@@ -1,7 +1,7 @@
 """
-Technical indicators: moving averages (SMA, EMA), exponential MACD, and RSI.
+Technical indicators: moving averages (SMA, EMA), MACD, RSI, Stochastic, and OBV.
 
-All functions take a sequence of closing prices and return lists aligned by index.
+All functions take a sequence of prices and return lists aligned by index.
 Leading values where the indicator is not yet defined are None.
 """
 
@@ -154,3 +154,185 @@ def rsi(prices: Sequence[float], period: int = 14) -> List[Optional[float]]:
             rs = avg_gain / avg_loss
             out[i + 1] = 100.0 - 100.0 / (1.0 + rs)
     return out
+
+
+@dataclass
+class StochasticResult:
+    """Stochastic %K and %D lines."""
+
+    k: List[Optional[float]]
+    d: List[Optional[float]]
+
+
+def stochastic(
+    highs: Sequence[float],
+    lows: Sequence[float],
+    closes: Sequence[float],
+    k_period: int = 14,
+    d_period: int = 3,
+) -> StochasticResult:
+    """
+    Stochastic Oscillator.
+
+    %K = (close - lowest_low) / (highest_high - lowest_low) * 100  over k_period bars.
+    %D = SMA(%K, d_period).
+
+    Buy zone: %K crosses above %D when both are below 20 (oversold).
+    Sell zone: %K crosses below %D when both are above 80 (overbought).
+
+    Args:
+        highs: High prices (oldest first).
+        lows: Low prices (oldest first).
+        closes: Closing prices (oldest first).
+        k_period: Lookback window for %K (default 14).
+        d_period: Smoothing period for %D (default 3).
+
+    Returns:
+        StochasticResult with k and d lists (same length as closes).
+    """
+    n = len(closes)
+    k_line: List[Optional[float]] = [None] * n
+    for i in range(k_period - 1, n):
+        window_lows = lows[i - k_period + 1 : i + 1]
+        window_highs = highs[i - k_period + 1 : i + 1]
+        lowest = min(window_lows)
+        highest = max(window_highs)
+        denom = highest - lowest
+        k_line[i] = ((closes[i] - lowest) / denom * 100.0) if denom != 0 else 50.0
+
+    # %D = SMA of defined %K values, mapped back to full-length output
+    k_values = [k_line[i] for i in range(n) if k_line[i] is not None]
+    d_sma = sma(k_values, d_period)
+    d_line: List[Optional[float]] = [None] * n
+    j = 0
+    for i in range(k_period - 1, n):
+        if k_line[i] is not None:
+            d_line[i] = d_sma[j]
+            j += 1
+
+    return StochasticResult(k=k_line, d=d_line)
+
+
+def obv(closes: Sequence[float], volumes: Sequence[float]) -> List[float]:
+    """
+    On-Balance Volume.
+
+    OBV rises when close > previous close (buying pressure) and falls otherwise.
+    A rising OBV confirms an uptrend; falling OBV confirms a downtrend.
+
+    Args:
+        closes: Closing prices (oldest first).
+        volumes: Volume per bar, same length as closes.
+
+    Returns:
+        List of OBV values (same length as closes). First value is 0.
+    """
+    n = len(closes)
+    out: List[float] = [0.0] * n
+    for i in range(1, n):
+        if closes[i] > closes[i - 1]:
+            out[i] = out[i - 1] + volumes[i]
+        elif closes[i] < closes[i - 1]:
+            out[i] = out[i - 1] - volumes[i]
+        else:
+            out[i] = out[i - 1]
+    return out
+
+
+@dataclass
+class ADXResult:
+    """ADX, +DI, and -DI lines."""
+
+    adx:      List[Optional[float]]
+    plus_di:  List[Optional[float]]
+    minus_di: List[Optional[float]]
+
+
+def adx(
+    highs: Sequence[float],
+    lows: Sequence[float],
+    closes: Sequence[float],
+    period: int = 14,
+) -> ADXResult:
+    """
+    Average Directional Index (ADX) with +DI and -DI.
+
+    Measures trend strength (not direction). ADX > 25 = strong trend worth trading;
+    ADX < 20 = choppy/sideways market where signals are unreliable.
+
+    Uses Wilder's smoothing throughout (same as RSI).
+    First ADX value appears at index 2 * period - 1.
+
+    Args:
+        highs:  High prices (oldest first).
+        lows:   Low prices (oldest first).
+        closes: Closing prices (oldest first).
+        period: Smoothing period (default 14).
+
+    Returns:
+        ADXResult with adx, plus_di, minus_di (all same length as closes).
+    """
+    n = len(closes)
+    adx_out:      List[Optional[float]] = [None] * n
+    plus_di_out:  List[Optional[float]] = [None] * n
+    minus_di_out: List[Optional[float]] = [None] * n
+
+    if n < 2 * period:
+        return ADXResult(adx=adx_out, plus_di=plus_di_out, minus_di=minus_di_out)
+
+    # Compute True Range, +DM, -DM for each bar starting at index 1
+    tr_vals:        List[float] = []
+    plus_dm_vals:   List[float] = []
+    minus_dm_vals:  List[float] = []
+
+    for i in range(1, n):
+        tr = max(
+            highs[i] - lows[i],
+            abs(highs[i] - closes[i - 1]),
+            abs(lows[i]  - closes[i - 1]),
+        )
+        up   = highs[i] - highs[i - 1]
+        down = lows[i - 1] - lows[i]
+        tr_vals.append(tr)
+        plus_dm_vals.append(up   if up > down and up > 0   else 0.0)
+        minus_dm_vals.append(down if down > up and down > 0 else 0.0)
+
+    # Wilder's initial sum (SMA seed) over first `period` values
+    smooth_tr       = sum(tr_vals[:period])
+    smooth_plus_dm  = sum(plus_dm_vals[:period])
+    smooth_minus_dm = sum(minus_dm_vals[:period])
+
+    def _di(dm: float, tr: float) -> float:
+        return 100.0 * dm / tr if tr != 0 else 0.0
+
+    dx_vals: List[float] = []
+
+    # First DI/DX at original index `period`
+    pdi = _di(smooth_plus_dm, smooth_tr)
+    mdi = _di(smooth_minus_dm, smooth_tr)
+    plus_di_out[period]  = pdi
+    minus_di_out[period] = mdi
+    denom = pdi + mdi
+    dx_vals.append(100.0 * abs(pdi - mdi) / denom if denom != 0 else 0.0)
+
+    # Wilder's rolling smoothing for remaining bars
+    for i in range(period, len(tr_vals)):
+        smooth_tr       = smooth_tr       - smooth_tr / period       + tr_vals[i]
+        smooth_plus_dm  = smooth_plus_dm  - smooth_plus_dm / period  + plus_dm_vals[i]
+        smooth_minus_dm = smooth_minus_dm - smooth_minus_dm / period + minus_dm_vals[i]
+
+        pdi = _di(smooth_plus_dm, smooth_tr)
+        mdi = _di(smooth_minus_dm, smooth_tr)
+        plus_di_out[i + 1]  = pdi
+        minus_di_out[i + 1] = mdi
+        denom = pdi + mdi
+        dx_vals.append(100.0 * abs(pdi - mdi) / denom if denom != 0 else 0.0)
+
+    # ADX = Wilder's smoothing of DX; first value at original index 2*period-1
+    adx_val = sum(dx_vals[:period]) / period
+    adx_out[2 * period - 1] = adx_val
+    for i in range(period, len(dx_vals)):
+        adx_val = (adx_val * (period - 1) + dx_vals[i]) / period
+        adx_out[i + period] = adx_val
+
+    return ADXResult(adx=adx_out, plus_di=plus_di_out, minus_di=minus_di_out)

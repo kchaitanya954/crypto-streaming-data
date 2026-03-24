@@ -3,7 +3,9 @@ Binance WebSocket kline (candlestick) stream for crypto OHLCV data.
 No API key required for public market data.
 """
 
+import asyncio
 import json
+import urllib.request
 from dataclasses import dataclass
 from typing import AsyncIterator, Callable, Optional
 
@@ -11,6 +13,7 @@ import websockets
 
 
 BINANCE_WS_BASE = "wss://stream.binance.com:9443/ws"
+BINANCE_REST_BASE = "https://api.binance.com"
 VALID_INTERVALS = ("1s","1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d", "3d", "1w", "1M")
 
 
@@ -68,6 +71,36 @@ def _build_stream_url(symbol: str, interval: str) -> str:
     if interval not in VALID_INTERVALS:
         raise ValueError(f"interval must be one of {VALID_INTERVALS}, got {interval!r}")
     return f"{BINANCE_WS_BASE}/{symbol}@kline_{interval}"
+
+
+def _fetch_klines_sync(symbol: str, interval: str, limit: int) -> list[Kline]:
+    url = (
+        f"{BINANCE_REST_BASE}/api/v3/klines"
+        f"?symbol={symbol.upper()}&interval={interval}&limit={limit}"
+    )
+    with urllib.request.urlopen(url, timeout=10) as resp:
+        rows = json.loads(resp.read())
+    return [
+        Kline(
+            symbol=symbol.upper(),
+            interval=interval,
+            open_time=int(r[0]),
+            close_time=int(r[6]),
+            open=float(r[1]),
+            high=float(r[2]),
+            low=float(r[3]),
+            close=float(r[4]),
+            volume=float(r[5]),
+            is_closed=True,
+            trade_count=int(r[8]),
+        )
+        for r in rows
+    ]
+
+
+async def fetch_historical_klines(symbol: str, interval: str, limit: int) -> list[Kline]:
+    """Fetch the last `limit` closed klines from Binance REST API."""
+    return await asyncio.to_thread(_fetch_klines_sync, symbol, interval, limit)
 
 
 async def stream_klines(
