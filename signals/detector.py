@@ -18,6 +18,26 @@ from indicators import macd, rsi, stochastic, obv, ema, adx
 from streaming.stream import Kline
 
 
+# ── Indicator snapshot (one per closed candle, used by UI) ────────────────────
+
+@dataclass
+class IndicatorSnapshot:
+    """All indicator values for a single closed candle — used by the UI server."""
+    time:        int             # Unix seconds (open_time // 1000)
+    open:        float
+    high:        float
+    low:         float
+    close:       float
+    volume:      float
+    ema50:       Optional[float]
+    ema200:      Optional[float]
+    macd_line:   Optional[float]
+    macd_signal: Optional[float]
+    macd_hist:   Optional[float]
+    rsi_val:     Optional[float]
+    adx_val:     Optional[float]
+
+
 # ── Default params ────────────────────────────────────────────────────────────
 
 MACD_FAST         = 12
@@ -31,7 +51,7 @@ STOCH_D           = 3
 ADX_PERIOD        = 14
 ADX_THRESHOLD     = 30.0   # raised from 25 — requires a clearer trend
 MIN_HISTOGRAM     = 0.5    # min |MACD - signal| to count as a real crossover (tune per asset)
-MIN_CONFIRMATIONS = 2      # require at least MEDIUM confidence — blocks LOW signals
+MIN_CONFIRMATIONS = 1      # require at least MEDIUM confidence — blocks LOW signals
 
 
 # ── Output dataclass ──────────────────────────────────────────────────────────
@@ -98,6 +118,7 @@ class SignalDetector:
         self.min_histogram     = min_histogram
         self.min_confirmations = min_confirmations
 
+        self.opens:      list[float] = []
         self.closes:     list[float] = []
         self.highs:      list[float] = []
         self.lows:       list[float] = []
@@ -107,6 +128,7 @@ class SignalDetector:
     def seed(self, historical: list[Kline]) -> None:
         """Pre-load historical bars so indicators are ready immediately."""
         for k in historical:
+            self.opens.append(k.open)
             self.closes.append(k.close)
             self.highs.append(k.high)
             self.lows.append(k.low)
@@ -115,12 +137,52 @@ class SignalDetector:
 
     def update(self, kline: Kline) -> Optional[Signal]:
         """Ingest a closed candle and return a Signal if one is detected."""
+        self.opens.append(kline.open)
         self.closes.append(kline.close)
         self.highs.append(kline.high)
         self.lows.append(kline.low)
         self.volumes.append(kline.volume)
         self.open_times.append(kline.open_time)
         return self._detect()
+
+    def history_snapshots(self) -> list[IndicatorSnapshot]:
+        """Compute indicator snapshots for all seeded bars (O(n), used by UI on startup)."""
+        closes = self.closes
+        highs  = self.highs
+        lows   = self.lows
+        n      = len(closes)
+
+        ema200_line = ema(closes, self.ema_slow)
+        ema50_line  = ema(closes, self.ema_fast)
+        macd_res    = macd(closes, fast_period=self.macd_fast,
+                           slow_period=self.macd_slow, signal_period=self.macd_signal)
+        rsi_line    = rsi(closes, period=self.rsi_period)
+        adx_res     = adx(highs, lows, closes, period=self.adx_period)
+
+        result = []
+        for i in range(n):
+            ml = macd_res.macd_line[i]
+            ms = macd_res.signal_line[i]
+            result.append(IndicatorSnapshot(
+                time=self.open_times[i] // 1000,
+                open=self.opens[i],
+                high=highs[i],
+                low=lows[i],
+                close=closes[i],
+                volume=self.volumes[i],
+                ema50=ema50_line[i],
+                ema200=ema200_line[i],
+                macd_line=ml,
+                macd_signal=ms,
+                macd_hist=(ml - ms) if ml is not None and ms is not None else None,
+                rsi_val=rsi_line[i],
+                adx_val=adx_res.adx[i],
+            ))
+        return result
+
+    def current_snapshot(self) -> IndicatorSnapshot:
+        """Return the indicator snapshot for the most recent bar."""
+        return self.history_snapshots()[-1]
 
     # ── Private ───────────────────────────────────────────────────────────────
 
