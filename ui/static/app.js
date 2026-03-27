@@ -19,7 +19,13 @@ const BASE = {
 
 const mainChart = LightweightCharts.createChart(document.getElementById('chart-main'), {
   ...BASE,
-  timeScale: { borderColor: '#2A2E39', timeVisible: true, secondsVisible: true },
+  timeScale: {
+    borderColor: '#2A2E39',
+    timeVisible: true,
+    secondsVisible: true,
+    rightOffset: 10,        // always leave 10 bars of space on the right
+    barSpacing: 8,
+  },
 });
 
 const macdChart = LightweightCharts.createChart(document.getElementById('chart-macd'), {
@@ -153,15 +159,15 @@ function clearSeries() {
 
 buildSeries();
 
-// ── Time-scale sync ───────────────────────────────────────────────────────────
+// ── Time-scale sync (logical range keeps all 3 charts in lock-step) ───────────
 
 let syncing = false;
 
 function syncFrom(src, ...targets) {
-  src.timeScale().subscribeVisibleTimeRangeChange(range => {
+  src.timeScale().subscribeVisibleLogicalRangeChange(range => {
     if (syncing || !range) return;
     syncing = true;
-    targets.forEach(c => c.timeScale().setVisibleRange(range));
+    targets.forEach(c => c.timeScale().setVisibleLogicalRange(range));
     syncing = false;
   });
 }
@@ -169,6 +175,58 @@ function syncFrom(src, ...targets) {
 syncFrom(mainChart, macdChart, rsiChart);
 syncFrom(macdChart, mainChart, rsiChart);
 syncFrom(rsiChart,  mainChart, macdChart);
+
+// ── Resize handles ────────────────────────────────────────────────────────────
+
+(function initResize() {
+  const handles = [
+    { el: document.getElementById('rh-1'), prev: document.getElementById('wrap-main'), next: document.getElementById('wrap-macd') },
+    { el: document.getElementById('rh-2'), prev: document.getElementById('wrap-macd'), next: document.getElementById('wrap-rsi')  },
+  ];
+
+  // Convert flex wrappers to explicit pixel heights once, so drag arithmetic is exact
+  function toPx() {
+    document.querySelectorAll('.chart-wrapper').forEach(w => {
+      if (w.style.flex !== 'none') {
+        w.style.height = w.offsetHeight + 'px';
+        w.style.flex   = 'none';
+      }
+    });
+  }
+
+  handles.forEach(({ el, prev, next }) => {
+    el.addEventListener('mousedown', e => {
+      e.preventDefault();
+      toPx();
+      el.classList.add('dragging');
+
+      const startY  = e.clientY;
+      const prevH0  = prev.offsetHeight;
+      const nextH0  = next.offsetHeight;
+      const MIN     = 60;
+
+      function onMove(ev) {
+        const dy      = ev.clientY - startY;
+        const newPrev = Math.max(MIN, prevH0 + dy);
+        const newNext = Math.max(MIN, nextH0 - dy);
+        // Clamp: don't let the two panels steal from each other beyond their minimums
+        if (prevH0 + dy >= MIN && nextH0 - dy >= MIN) {
+          prev.style.height = newPrev + 'px';
+          next.style.height = newNext + 'px';
+        }
+      }
+
+      function onUp() {
+        el.classList.remove('dragging');
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup',   onUp);
+      }
+
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup',   onUp);
+    });
+  });
+}());
 
 // ── Message handlers ──────────────────────────────────────────────────────────
 
