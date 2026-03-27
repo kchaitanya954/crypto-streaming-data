@@ -14,7 +14,7 @@ Signal flow:
 from dataclasses import dataclass, field
 from typing import Optional
 
-from indicators import macd, rsi, stochastic, obv, ema, adx
+from indicators import macd, rsi, stochastic, obv, ema, adx, bollinger_bands
 from streaming.stream import Kline
 
 
@@ -36,6 +36,9 @@ class IndicatorSnapshot:
     macd_hist:   Optional[float]
     rsi_val:     Optional[float]
     adx_val:     Optional[float]
+    bb_upper:    Optional[float] = None
+    bb_middle:   Optional[float] = None
+    bb_lower:    Optional[float] = None
 
 
 # ── Default params ────────────────────────────────────────────────────────────
@@ -158,6 +161,7 @@ class SignalDetector:
                            slow_period=self.macd_slow, signal_period=self.macd_signal)
         rsi_line    = rsi(closes, period=self.rsi_period)
         adx_res     = adx(highs, lows, closes, period=self.adx_period)
+        bb_res      = bollinger_bands(closes)
 
         result = []
         for i in range(n):
@@ -177,6 +181,9 @@ class SignalDetector:
                 macd_hist=(ml - ms) if ml is not None and ms is not None else None,
                 rsi_val=rsi_line[i],
                 adx_val=adx_res.adx[i],
+                bb_upper=bb_res.upper[i],
+                bb_middle=bb_res.middle[i],
+                bb_lower=bb_res.lower[i],
             ))
         return result
 

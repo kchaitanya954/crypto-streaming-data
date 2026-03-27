@@ -248,6 +248,54 @@ class ADXResult:
     minus_di: List[Optional[float]]
 
 
+@dataclass
+class BollingerResult:
+    """Bollinger Bands: upper, middle (SMA), and lower bands."""
+
+    upper:  List[Optional[float]]
+    middle: List[Optional[float]]
+    lower:  List[Optional[float]]
+
+
+def bollinger_bands(
+    prices: Sequence[float],
+    period: int = 20,
+    num_std: float = 2.0,
+) -> BollingerResult:
+    """
+    Bollinger Bands.
+
+    middle = SMA(period), upper = middle + num_std * stddev,
+    lower  = middle - num_std * stddev.
+
+    Uses population standard deviation (divisor = period).
+
+    Args:
+        prices:  Closing prices (oldest first).
+        period:  SMA period (default 20).
+        num_std: Number of standard deviations for the bands (default 2.0).
+
+    Returns:
+        BollingerResult with upper, middle, lower (all same length as prices).
+        First (period - 1) values are None.
+    """
+    if period < 1:
+        raise ValueError("period must be >= 1")
+    n = len(prices)
+    upper:  List[Optional[float]] = [None] * n
+    middle: List[Optional[float]] = [None] * n
+    lower:  List[Optional[float]] = [None] * n
+    for i in range(period - 1, n):
+        window = prices[i - period + 1 : i + 1]
+        mean   = sum(window) / period
+        variance = sum((x - mean) ** 2 for x in window) / period
+        std    = variance ** 0.5
+        middle[i] = mean
+        upper[i]  = mean + num_std * std
+        lower[i]  = mean - num_std * std
+    return BollingerResult(upper=upper, middle=middle, lower=lower)
+
+
 def adx(
     highs: Sequence[float],
     lows: Sequence[float],

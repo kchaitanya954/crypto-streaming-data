@@ -30,7 +30,6 @@ const macdChart = LightweightCharts.createChart(document.getElementById('chart-m
 const rsiChart = LightweightCharts.createChart(document.getElementById('chart-rsi'), {
   ...BASE,
   timeScale: { borderColor: '#2A2E39', timeVisible: true, secondsVisible: true },
-  // RSI on right, ADX on left — separate scales so they don't interfere
   leftPriceScale:  { borderColor: '#2A2E39', visible: true, scaleMargins: { top: 0.1, bottom: 0.1 } },
   rightPriceScale: { borderColor: '#2A2E39', visible: true, scaleMargins: { top: 0.1, bottom: 0.1 } },
 });
@@ -38,11 +37,12 @@ const rsiChart = LightweightCharts.createChart(document.getElementById('chart-rs
 // ── Series (recreated on each new connection) ─────────────────────────────────
 
 let candleSeries, ema50Series, ema200Series;
+let bbUpperSeries, bbMiddleSeries, bbLowerSeries;
 let macdHistSeries, macdLineSeries, macdSignalSeries;
 let rsiSeries, adxSeries;
 
 function buildSeries() {
-  // Main chart
+  // Main chart — candlestick
   candleSeries = mainChart.addCandlestickSeries({
     upColor: '#26A69A', downColor: '#EF5350',
     borderUpColor: '#26A69A', borderDownColor: '#EF5350',
@@ -61,6 +61,27 @@ function buildSeries() {
     title: 'EMA200',
     priceLineVisible: false, crosshairMarkerVisible: false,
     lastValueVisible: true,
+  });
+
+  // Bollinger Bands on main chart (dashed upper/lower, faint middle)
+  bbUpperSeries = mainChart.addLineSeries({
+    color: 'rgba(239,83,80,0.45)', lineWidth: 1,
+    title: 'BB Upper',
+    lineStyle: LightweightCharts.LineStyle.Dashed,
+    priceLineVisible: false, crosshairMarkerVisible: false, lastValueVisible: false,
+  });
+
+  bbMiddleSeries = mainChart.addLineSeries({
+    color: 'rgba(180,180,180,0.25)', lineWidth: 1,
+    title: 'BB Mid',
+    priceLineVisible: false, crosshairMarkerVisible: false, lastValueVisible: false,
+  });
+
+  bbLowerSeries = mainChart.addLineSeries({
+    color: 'rgba(38,166,154,0.45)', lineWidth: 1,
+    title: 'BB Lower',
+    lineStyle: LightweightCharts.LineStyle.Dashed,
+    priceLineVisible: false, crosshairMarkerVisible: false, lastValueVisible: false,
   });
 
   // MACD chart
@@ -117,7 +138,7 @@ function buildSeries() {
 
 function clearSeries() {
   const pairs = [
-    [mainChart, [candleSeries, ema50Series, ema200Series]],
+    [mainChart, [candleSeries, ema50Series, ema200Series, bbUpperSeries, bbMiddleSeries, bbLowerSeries]],
     [macdChart, [macdHistSeries, macdLineSeries, macdSignalSeries]],
     [rsiChart,  [rsiSeries, adxSeries]],
   ];
@@ -125,6 +146,7 @@ function clearSeries() {
     series.forEach(s => { if (s) try { chart.removeSeries(s); } catch (_) {} })
   );
   candleSeries = ema50Series = ema200Series = null;
+  bbUpperSeries = bbMiddleSeries = bbLowerSeries = null;
   macdHistSeries = macdLineSeries = macdSignalSeries = null;
   rsiSeries = adxSeries = null;
 }
@@ -162,6 +184,10 @@ function onCandle(msg) {
   if (msg.ema50  != null) ema50Series.update( { time: msg.time, value: msg.ema50  });
   if (msg.ema200 != null) ema200Series.update({ time: msg.time, value: msg.ema200 });
 
+  if (msg.bb_upper  != null) bbUpperSeries.update( { time: msg.time, value: msg.bb_upper  });
+  if (msg.bb_middle != null) bbMiddleSeries.update({ time: msg.time, value: msg.bb_middle });
+  if (msg.bb_lower  != null) bbLowerSeries.update( { time: msg.time, value: msg.bb_lower  });
+
   if (msg.macd_line != null && msg.macd_signal != null) {
     macdLineSeries.update(  { time: msg.time, value: msg.macd_line   });
     macdSignalSeries.update({ time: msg.time, value: msg.macd_signal });
@@ -177,17 +203,15 @@ function onCandle(msg) {
 }
 
 function onLive(msg) {
-  // Real-time candle update — no indicator recalc
   candleSeries.update({ time: msg.time, open: msg.open, high: msg.high, low: msg.low, close: msg.close });
 }
 
 function onReady() {
-  // History fully loaded — snap all charts to live (right edge)
   [mainChart, macdChart, rsiChart].forEach(c => c.timeScale().scrollToRealTime());
+  loadHistoricalSignals(currentSymbol, currentInterval);
 }
 
 function onSignal(msg) {
-  // Arrow marker on candle chart
   markers.push({
     time:     msg.time,
     position: msg.direction === 'BUY' ? 'belowBar' : 'aboveBar',
@@ -203,6 +227,69 @@ function onSignal(msg) {
   pushNotification(msg);
   mainChart.timeScale().scrollToRealTime();
 }
+
+// ── Historical signal pre-load ────────────────────────────────────────────────
+
+function loadHistoricalSignals(symbol, interval) {
+  fetch(`/api/signals/history?symbol=${encodeURIComponent(symbol)}&interval=${encodeURIComponent(interval)}&limit=50`)
+    .then(r => r.json())
+    .then(signals => {
+      if (!Array.isArray(signals) || signals.length === 0) return;
+      // Signals are newest-first from API; prepend in that order so newest is on top
+      signals.forEach(s => {
+        // Normalise field names from DB row to match WebSocket signal shape
+        addSignalCard({
+          direction:   s.direction,
+          confidence:  s.confidence,
+          entry_price: s.entry_price,
+          time:        s.open_time / 1000,   // open_time is ms epoch
+          reasons:     Array.isArray(s.reasons) ? s.reasons : [],
+          trend_note:  s.trend_note || '',
+          macd_val:    s.macd_val,
+          adx_val:     s.adx_val,
+        });
+      });
+    })
+    .catch(() => {});  // DB not configured — silently ignore
+}
+
+// ── Portfolio panel ───────────────────────────────────────────────────────────
+
+function fetchPortfolio() {
+  fetch('/api/portfolio')
+    .then(r => r.json())
+    .then(data => {
+      if (!Array.isArray(data)) return;
+      const list = document.getElementById('portfolio-list');
+      list.innerHTML = '';
+      if (data.length === 0) {
+        list.innerHTML = '<div class="pf-empty">No balances</div>';
+        return;
+      }
+      data.forEach(b => {
+        const avail  = parseFloat(b.balance        || 0);
+        const locked = parseFloat(b.locked_balance || 0);
+        const total  = avail + locked;
+        if (total < 0.000001) return;
+        const row = document.createElement('div');
+        row.className = 'pf-row';
+        row.innerHTML =
+          `<span class="pf-currency">${b.currency}</span>` +
+          `<span class="pf-amount">${total.toFixed(6)}</span>` +
+          (locked > 0 ? `<span class="pf-locked">${locked.toFixed(6)} locked</span>` : '');
+        list.appendChild(row);
+      });
+      document.getElementById('pf-updated').textContent =
+        'Updated ' + new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    })
+    .catch(() => {
+      document.getElementById('pf-updated').textContent = 'Unavailable';
+    });
+}
+
+// Poll portfolio every 30 seconds
+fetchPortfolio();
+setInterval(fetchPortfolio, 30000);
 
 // ── Signal card ───────────────────────────────────────────────────────────────
 
@@ -252,7 +339,8 @@ function updateLabel() {
   document.getElementById('label-main').innerHTML =
     `${currentSymbol} ${currentInterval}&nbsp;·&nbsp;` +
     `EMA50 <span style="color:#FF9800">─</span>&nbsp;` +
-    `EMA200 <span style="color:#2196F3">─</span>`;
+    `EMA200 <span style="color:#2196F3">─</span>&nbsp;·&nbsp;` +
+    `BB(20) <span style="color:rgba(239,83,80,0.8)">- -</span>`;
   document.title = `${currentSymbol} ${currentInterval} · Signals`;
 }
 
@@ -260,7 +348,7 @@ function updateLabel() {
 
 function connect(symbol, interval) {
   if (ws) {
-    ws.onclose = null;    // suppress auto-reconnect during intentional switch
+    ws.onclose = null;
     ws.close();
   }
 
