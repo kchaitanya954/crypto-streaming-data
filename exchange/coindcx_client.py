@@ -18,7 +18,8 @@ from typing import Optional
 
 import aiohttp
 
-BASE_URL = "https://api.coindcx.com"
+BASE_URL      = "https://api.coindcx.com"      # balances, markets, non-spot
+SPOT_BASE_URL = "https://apigw.coindcx.com"   # spot order execution (mandatory from CoinDCX update)
 
 
 class CoinDCXClient:
@@ -51,11 +52,12 @@ class CoinDCXClient:
         }
         return body_str, headers
 
-    async def _post(self, path: str, body: dict) -> dict:
+    async def _post(self, path: str, body: dict, spot: bool = False) -> dict:
         """POST to an authenticated endpoint, return parsed JSON."""
         body_str, headers = self._sign(body)
+        base = SPOT_BASE_URL if spot else BASE_URL
         async with self._session.post(
-            BASE_URL + path,
+            base + path,
             data=body_str,
             headers=headers,
         ) as resp:
@@ -126,7 +128,7 @@ class CoinDCXClient:
             body["price_per_unit"] = price
         if client_order_id is not None:
             body["client_order_id"] = client_order_id
-        return await self._post("/exchange/v1/orders/create", body)
+        return await self._post("/exchange/v1/orders/create", body, spot=True)
 
     async def cancel_order(self, order_id: str) -> dict:
         """
@@ -142,7 +144,7 @@ class CoinDCXClient:
             "id":        order_id,
             "timestamp": int(time.time() * 1000),
         }
-        return await self._post("/exchange/v1/orders/cancel", body)
+        return await self._post("/exchange/v1/orders/cancel", body, spot=True)
 
     async def get_order_status(self, order_id: str) -> dict:
         """
@@ -154,7 +156,7 @@ class CoinDCXClient:
             "id":        order_id,
             "timestamp": int(time.time() * 1000),
         }
-        return await self._post("/exchange/v1/orders/status", body)
+        return await self._post("/exchange/v1/orders/status", body, spot=True)
 
     async def get_active_orders(self, market: Optional[str] = None) -> list[dict]:
         """
@@ -165,4 +167,4 @@ class CoinDCXClient:
         body: dict = {"timestamp": int(time.time() * 1000)}
         if market:
             body["market"] = market.upper()
-        return await self._post("/exchange/v1/orders/active_orders", body)
+        return await self._post("/exchange/v1/orders/active_orders", body, spot=True)
