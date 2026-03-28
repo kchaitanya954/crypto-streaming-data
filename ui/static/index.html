@@ -242,12 +242,77 @@
     }
     .resize-handle:hover,
     .resize-handle.dragging { background: #2196F3; }
+
+    /* ── Mobile sidebar toggle ── */
+    #sidebar-toggle {
+      display: none;
+      background: transparent;
+      border: none;
+      color: #D1D4DC;
+      font-size: 18px;
+      cursor: pointer;
+      padding: 2px 4px;
+      line-height: 1;
+      flex-shrink: 0;
+    }
+
+    #sidebar-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.55);
+      z-index: 99;
+    }
+    #sidebar-overlay.visible { display: block; }
+
+    /* ── Mobile responsive ── */
+    @media (max-width: 767px) {
+      body { height: 100svh; }
+
+      #sidebar-toggle { display: block; }
+
+      /* Topbar scrolls horizontally so all buttons remain reachable */
+      #topbar {
+        gap: 4px;
+        padding: 5px 8px;
+        overflow-x: auto;
+        flex-wrap: nowrap;
+      }
+      #topbar::-webkit-scrollbar { display: none; }
+
+      #symbol-input { width: 80px; font-size: 11px; }
+      .iv-btn       { padding: 3px 6px; font-size: 10px; flex-shrink: 0; }
+      #status-text  { display: none; }   /* keep dot, drop label */
+
+      /* Sidebar slides in as an overlay */
+      #sidebar {
+        position: fixed;
+        left: -82vw;
+        top: 0;
+        height: 100%;
+        width: 82vw;
+        max-width: 300px;
+        z-index: 100;
+        transition: left 0.22s ease;
+      }
+      #sidebar.mobile-open { left: 0; }
+
+      /* Charts fill the full width */
+      #charts { width: 100%; }
+
+      /* Slightly taller minimum for chart panels on small screens */
+      .chart-wrapper { min-height: 80px; }
+    }
   </style>
 </head>
 <body>
 
+<!-- Mobile sidebar overlay backdrop -->
+<div id="sidebar-overlay"></div>
+
 <!-- Top bar -->
 <div id="topbar">
+  <button id="sidebar-toggle" title="Menu">☰</button>
   <input id="symbol-input" type="text" value="BTCUSDT" title="Press Enter to apply" spellcheck="false" />
   <div class="sep"></div>
   <button class="iv-btn" data-iv="1s">1s</button>
