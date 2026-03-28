@@ -190,6 +190,13 @@ async def get_trade_history(
 _CONF_ORDER = {"LOW": 0, "MEDIUM": 1, "HIGH": 2}
 
 
+async def get_trigger(db: aiosqlite.Connection, trigger_id: int) -> Optional[dict]:
+    """Fetch a single trigger by id."""
+    cursor = await db.execute("SELECT * FROM triggers WHERE id = ?", (trigger_id,))
+    row = await cursor.fetchone()
+    return dict(row) if row else None
+
+
 async def get_triggers(db: aiosqlite.Connection, active_only: bool = True) -> list[dict]:
     """Return all triggers (active only by default)."""
     if active_only:

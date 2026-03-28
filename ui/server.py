@@ -87,45 +87,75 @@ async def api_signals_history(
 
 @app.get("/api/triggers")
 async def api_get_triggers(request: Request):
-    """List all active triggers."""
+    """List ALL triggers (active and inactive)."""
     db = getattr(request.app.state, "db", None)
     if db is None:
         return []
-    return await queries.get_triggers(db)
+    return await queries.get_triggers(db, active_only=False)
 
 
 @app.post("/api/triggers", status_code=201)
 async def api_create_trigger(request: Request, body: TriggerCreate):
-    """Create a new trigger."""
-    db = getattr(request.app.state, "db", None)
+    """Create a new trigger and send a Telegram alert."""
+    db       = getattr(request.app.state, "db",           None)
+    tg_bot   = getattr(request.app.state, "telegram_bot", None)
+    settings = getattr(request.app.state, "settings",     None)
     if db is None:
         return JSONResponse({"error": "DB not configured"}, status_code=503)
-    tid = await queries.create_trigger(db, body.symbol, body.interval, body.min_confidence)
-    return {"id": tid, "symbol": body.symbol.upper(), "interval": body.interval,
-            "min_confidence": body.min_confidence.upper(), "active": True}
+    sym  = body.symbol.upper()
+    iv   = body.interval
+    conf = body.min_confidence.upper()
+    tid  = await queries.create_trigger(db, sym, iv, conf)
+    if tg_bot and settings:
+        from telegram_bot.alerts import send_trigger_alert
+        await send_trigger_alert(tg_bot, settings.telegram_chat_id, "created", sym, iv, conf)
+    return {"id": tid, "symbol": sym, "interval": iv, "min_confidence": conf, "active": True}
 
 
 @app.put("/api/triggers/{trigger_id}")
 async def api_update_trigger(request: Request, trigger_id: int, body: TriggerUpdate):
-    """Update an existing trigger."""
-    db = getattr(request.app.state, "db", None)
+    """Update an existing trigger and send a Telegram alert."""
+    db       = getattr(request.app.state, "db",           None)
+    tg_bot   = getattr(request.app.state, "telegram_bot", None)
+    settings = getattr(request.app.state, "settings",     None)
     if db is None:
         return JSONResponse({"error": "DB not configured"}, status_code=503)
+    trig = await queries.get_trigger(db, trigger_id)
     await queries.update_trigger(
         db, trigger_id,
         symbol=body.symbol, interval=body.interval,
         min_confidence=body.min_confidence, active=body.active,
     )
+    if tg_bot and settings and trig:
+        from telegram_bot.alerts import send_trigger_alert
+        only_toggle = (body.active is not None
+                       and body.symbol is None
+                       and body.interval is None
+                       and body.min_confidence is None)
+        action = ("enabled" if body.active else "disabled") if only_toggle else "updated"
+        sym  = (body.symbol  or trig["symbol"]).upper()
+        iv   = body.interval or trig["interval"]
+        conf = (body.min_confidence or trig["min_confidence"]).upper()
+        await send_trigger_alert(tg_bot, settings.telegram_chat_id, action, sym, iv, conf)
     return {"ok": True}
 
 
 @app.delete("/api/triggers/{trigger_id}")
 async def api_delete_trigger(request: Request, trigger_id: int):
-    """Delete a trigger."""
-    db = getattr(request.app.state, "db", None)
+    """Delete a trigger and send a Telegram alert."""
+    db       = getattr(request.app.state, "db",           None)
+    tg_bot   = getattr(request.app.state, "telegram_bot", None)
+    settings = getattr(request.app.state, "settings",     None)
     if db is None:
         return JSONResponse({"error": "DB not configured"}, status_code=503)
+    trig = await queries.get_trigger(db, trigger_id)
     await queries.delete_trigger(db, trigger_id)
+    if tg_bot and settings and trig:
+        from telegram_bot.alerts import send_trigger_alert
+        await send_trigger_alert(
+            tg_bot, settings.telegram_chat_id, "deleted",
+            trig["symbol"], trig["interval"], trig["min_confidence"],
+        )
     return {"ok": True}
 
 
