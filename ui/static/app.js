@@ -581,6 +581,20 @@ document.getElementById('trig-save-btn').addEventListener('click', () => {
 // Initial load
 loadTriggers();
 
+// ── Mobile sidebar toggle ─────────────────────────────────────────────────────
+
+(function initMobileSidebar() {
+  const toggle  = document.getElementById('sidebar-toggle');
+  const sidebar = document.getElementById('sidebar');
+  const overlay = document.getElementById('sidebar-overlay');
+
+  function openSidebar()  { sidebar.classList.add('mobile-open');    overlay.classList.add('visible'); }
+  function closeSidebar() { sidebar.classList.remove('mobile-open'); overlay.classList.remove('visible'); }
+
+  toggle.addEventListener('click',  openSidebar);
+  overlay.addEventListener('click', closeSidebar);
+}());
+
 // ── Start ─────────────────────────────────────────────────────────────────────
 
 connect(currentSymbol, currentInterval);
