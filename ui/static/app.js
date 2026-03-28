@@ -19,7 +19,13 @@ const BASE = {
 
 const mainChart = LightweightCharts.createChart(document.getElementById('chart-main'), {
   ...BASE,
-  timeScale: { borderColor: '#2A2E39', timeVisible: true, secondsVisible: true },
+  timeScale: {
+    borderColor: '#2A2E39',
+    timeVisible: true,
+    secondsVisible: true,
+    rightOffset: 10,        // always leave 10 bars of space on the right
+    barSpacing: 8,
+  },
 });
 
 const macdChart = LightweightCharts.createChart(document.getElementById('chart-macd'), {
@@ -30,7 +36,6 @@ const macdChart = LightweightCharts.createChart(document.getElementById('chart-m
 const rsiChart = LightweightCharts.createChart(document.getElementById('chart-rsi'), {
   ...BASE,
   timeScale: { borderColor: '#2A2E39', timeVisible: true, secondsVisible: true },
-  // RSI on right, ADX on left — separate scales so they don't interfere
   leftPriceScale:  { borderColor: '#2A2E39', visible: true, scaleMargins: { top: 0.1, bottom: 0.1 } },
   rightPriceScale: { borderColor: '#2A2E39', visible: true, scaleMargins: { top: 0.1, bottom: 0.1 } },
 });
@@ -38,11 +43,12 @@ const rsiChart = LightweightCharts.createChart(document.getElementById('chart-rs
 // ── Series (recreated on each new connection) ─────────────────────────────────
 
 let candleSeries, ema50Series, ema200Series;
+let bbUpperSeries, bbMiddleSeries, bbLowerSeries;
 let macdHistSeries, macdLineSeries, macdSignalSeries;
 let rsiSeries, adxSeries;
 
 function buildSeries() {
-  // Main chart
+  // Main chart — candlestick
   candleSeries = mainChart.addCandlestickSeries({
     upColor: '#26A69A', downColor: '#EF5350',
     borderUpColor: '#26A69A', borderDownColor: '#EF5350',
@@ -61,6 +67,27 @@ function buildSeries() {
     title: 'EMA200',
     priceLineVisible: false, crosshairMarkerVisible: false,
     lastValueVisible: true,
+  });
+
+  // Bollinger Bands on main chart (dashed upper/lower, faint middle)
+  bbUpperSeries = mainChart.addLineSeries({
+    color: 'rgba(239,83,80,0.45)', lineWidth: 1,
+    title: 'BB Upper',
+    lineStyle: LightweightCharts.LineStyle.Dashed,
+    priceLineVisible: false, crosshairMarkerVisible: false, lastValueVisible: false,
+  });
+
+  bbMiddleSeries = mainChart.addLineSeries({
+    color: 'rgba(180,180,180,0.25)', lineWidth: 1,
+    title: 'BB Mid',
+    priceLineVisible: false, crosshairMarkerVisible: false, lastValueVisible: false,
+  });
+
+  bbLowerSeries = mainChart.addLineSeries({
+    color: 'rgba(38,166,154,0.45)', lineWidth: 1,
+    title: 'BB Lower',
+    lineStyle: LightweightCharts.LineStyle.Dashed,
+    priceLineVisible: false, crosshairMarkerVisible: false, lastValueVisible: false,
   });
 
   // MACD chart
@@ -117,7 +144,7 @@ function buildSeries() {
 
 function clearSeries() {
   const pairs = [
-    [mainChart, [candleSeries, ema50Series, ema200Series]],
+    [mainChart, [candleSeries, ema50Series, ema200Series, bbUpperSeries, bbMiddleSeries, bbLowerSeries]],
     [macdChart, [macdHistSeries, macdLineSeries, macdSignalSeries]],
     [rsiChart,  [rsiSeries, adxSeries]],
   ];
@@ -125,21 +152,22 @@ function clearSeries() {
     series.forEach(s => { if (s) try { chart.removeSeries(s); } catch (_) {} })
   );
   candleSeries = ema50Series = ema200Series = null;
+  bbUpperSeries = bbMiddleSeries = bbLowerSeries = null;
   macdHistSeries = macdLineSeries = macdSignalSeries = null;
   rsiSeries = adxSeries = null;
 }
 
 buildSeries();
 
-// ── Time-scale sync ───────────────────────────────────────────────────────────
+// ── Time-scale sync (logical range keeps all 3 charts in lock-step) ───────────
 
 let syncing = false;
 
 function syncFrom(src, ...targets) {
-  src.timeScale().subscribeVisibleTimeRangeChange(range => {
+  src.timeScale().subscribeVisibleLogicalRangeChange(range => {
     if (syncing || !range) return;
     syncing = true;
-    targets.forEach(c => c.timeScale().setVisibleRange(range));
+    targets.forEach(c => c.timeScale().setVisibleLogicalRange(range));
     syncing = false;
   });
 }
@@ -147,6 +175,58 @@ function syncFrom(src, ...targets) {
 syncFrom(mainChart, macdChart, rsiChart);
 syncFrom(macdChart, mainChart, rsiChart);
 syncFrom(rsiChart,  mainChart, macdChart);
+
+// ── Resize handles ────────────────────────────────────────────────────────────
+
+(function initResize() {
+  const handles = [
+    { el: document.getElementById('rh-1'), prev: document.getElementById('wrap-main'), next: document.getElementById('wrap-macd') },
+    { el: document.getElementById('rh-2'), prev: document.getElementById('wrap-macd'), next: document.getElementById('wrap-rsi')  },
+  ];
+
+  // Convert flex wrappers to explicit pixel heights once, so drag arithmetic is exact
+  function toPx() {
+    document.querySelectorAll('.chart-wrapper').forEach(w => {
+      if (w.style.flex !== 'none') {
+        w.style.height = w.offsetHeight + 'px';
+        w.style.flex   = 'none';
+      }
+    });
+  }
+
+  handles.forEach(({ el, prev, next }) => {
+    el.addEventListener('mousedown', e => {
+      e.preventDefault();
+      toPx();
+      el.classList.add('dragging');
+
+      const startY  = e.clientY;
+      const prevH0  = prev.offsetHeight;
+      const nextH0  = next.offsetHeight;
+      const MIN     = 60;
+
+      function onMove(ev) {
+        const dy      = ev.clientY - startY;
+        const newPrev = Math.max(MIN, prevH0 + dy);
+        const newNext = Math.max(MIN, nextH0 - dy);
+        // Clamp: don't let the two panels steal from each other beyond their minimums
+        if (prevH0 + dy >= MIN && nextH0 - dy >= MIN) {
+          prev.style.height = newPrev + 'px';
+          next.style.height = newNext + 'px';
+        }
+      }
+
+      function onUp() {
+        el.classList.remove('dragging');
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup',   onUp);
+      }
+
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup',   onUp);
+    });
+  });
+}());
 
 // ── Message handlers ──────────────────────────────────────────────────────────
 
@@ -161,6 +241,10 @@ function onCandle(msg) {
 
   if (msg.ema50  != null) ema50Series.update( { time: msg.time, value: msg.ema50  });
   if (msg.ema200 != null) ema200Series.update({ time: msg.time, value: msg.ema200 });
+
+  if (msg.bb_upper  != null) bbUpperSeries.update( { time: msg.time, value: msg.bb_upper  });
+  if (msg.bb_middle != null) bbMiddleSeries.update({ time: msg.time, value: msg.bb_middle });
+  if (msg.bb_lower  != null) bbLowerSeries.update( { time: msg.time, value: msg.bb_lower  });
 
   if (msg.macd_line != null && msg.macd_signal != null) {
     macdLineSeries.update(  { time: msg.time, value: msg.macd_line   });
@@ -177,17 +261,15 @@ function onCandle(msg) {
 }
 
 function onLive(msg) {
-  // Real-time candle update — no indicator recalc
   candleSeries.update({ time: msg.time, open: msg.open, high: msg.high, low: msg.low, close: msg.close });
 }
 
 function onReady() {
-  // History fully loaded — snap all charts to live (right edge)
   [mainChart, macdChart, rsiChart].forEach(c => c.timeScale().scrollToRealTime());
+  loadHistoricalSignals(currentSymbol, currentInterval);
 }
 
 function onSignal(msg) {
-  // Arrow marker on candle chart
   markers.push({
     time:     msg.time,
     position: msg.direction === 'BUY' ? 'belowBar' : 'aboveBar',
@@ -199,14 +281,77 @@ function onSignal(msg) {
   markers.sort((a, b) => a.time - b.time);
   candleSeries.setMarkers(markers);
 
-  addSignalCard(msg);
+  addSignalCard(msg, msg.trigger_matched);
   pushNotification(msg);
   mainChart.timeScale().scrollToRealTime();
 }
 
+// ── Historical signal pre-load ────────────────────────────────────────────────
+
+function loadHistoricalSignals(symbol, interval) {
+  fetch(`/api/signals/history?symbol=${encodeURIComponent(symbol)}&interval=${encodeURIComponent(interval)}&limit=50`)
+    .then(r => r.json())
+    .then(signals => {
+      if (!Array.isArray(signals) || signals.length === 0) return;
+      // Signals are newest-first from API; prepend in that order so newest is on top
+      signals.forEach(s => {
+        // Normalise field names from DB row to match WebSocket signal shape
+        addSignalCard({
+          direction:   s.direction,
+          confidence:  s.confidence,
+          entry_price: s.entry_price,
+          time:        s.open_time / 1000,   // open_time is ms epoch
+          reasons:     Array.isArray(s.reasons) ? s.reasons : [],
+          trend_note:  s.trend_note || '',
+          macd_val:    s.macd_val,
+          adx_val:     s.adx_val,
+        });
+      });
+    })
+    .catch(() => {});  // DB not configured — silently ignore
+}
+
+// ── Portfolio panel ───────────────────────────────────────────────────────────
+
+function fetchPortfolio() {
+  fetch('/api/portfolio')
+    .then(r => r.json())
+    .then(data => {
+      if (!Array.isArray(data)) return;
+      const list = document.getElementById('portfolio-list');
+      list.innerHTML = '';
+      if (data.length === 0) {
+        list.innerHTML = '<div class="pf-empty">No balances</div>';
+        return;
+      }
+      data.forEach(b => {
+        const avail  = parseFloat(b.balance        || 0);
+        const locked = parseFloat(b.locked_balance || 0);
+        const total  = avail + locked;
+        if (total < 0.000001) return;
+        const row = document.createElement('div');
+        row.className = 'pf-row';
+        row.innerHTML =
+          `<span class="pf-currency">${b.currency}</span>` +
+          `<span class="pf-amount">${total.toFixed(6)}</span>` +
+          (locked > 0 ? `<span class="pf-locked">${locked.toFixed(6)} locked</span>` : '');
+        list.appendChild(row);
+      });
+      document.getElementById('pf-updated').textContent =
+        'Updated ' + new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    })
+    .catch(() => {
+      document.getElementById('pf-updated').textContent = 'Unavailable';
+    });
+}
+
+// Poll portfolio every 30 seconds
+fetchPortfolio();
+setInterval(fetchPortfolio, 30000);
+
 // ── Signal card ───────────────────────────────────────────────────────────────
 
-function addSignalCard(msg) {
+function addSignalCard(msg, triggerMatch = false) {
   const list = document.getElementById('signal-list');
   list.querySelector('.no-sig')?.remove();
 
@@ -214,7 +359,7 @@ function addSignalCard(msg) {
   const price = msg.entry_price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
   const card = document.createElement('div');
-  card.className = `signal-card ${msg.direction}`;
+  card.className = `signal-card ${msg.direction}${triggerMatch ? ' trigger-match' : ''}`;
   card.innerHTML = `
     <div class="sc-row">
       <span class="sc-dir">${msg.direction}</span>
@@ -252,7 +397,8 @@ function updateLabel() {
   document.getElementById('label-main').innerHTML =
     `${currentSymbol} ${currentInterval}&nbsp;·&nbsp;` +
     `EMA50 <span style="color:#FF9800">─</span>&nbsp;` +
-    `EMA200 <span style="color:#2196F3">─</span>`;
+    `EMA200 <span style="color:#2196F3">─</span>&nbsp;·&nbsp;` +
+    `BB(20) <span style="color:rgba(239,83,80,0.8)">- -</span>`;
   document.title = `${currentSymbol} ${currentInterval} · Signals`;
 }
 
@@ -260,7 +406,7 @@ function updateLabel() {
 
 function connect(symbol, interval) {
   if (ws) {
-    ws.onclose = null;    // suppress auto-reconnect during intentional switch
+    ws.onclose = null;
     ws.close();
   }
 
@@ -313,6 +459,99 @@ document.getElementById('symbol-input').addEventListener('keydown', e => {
     connect(currentSymbol, currentInterval);
   }
 });
+
+// ── Triggers panel ────────────────────────────────────────────────────────────
+
+function loadTriggers() {
+  fetch('/api/triggers')
+    .then(r => r.json())
+    .then(renderTriggers)
+    .catch(() => {});
+}
+
+function renderTriggers(list) {
+  const el = document.getElementById('triggers-list');
+  if (!Array.isArray(list) || list.length === 0) {
+    el.innerHTML = '<div class="trig-empty">No triggers</div>';
+    return;
+  }
+  el.innerHTML = '';
+  list.forEach(t => {
+    const row = document.createElement('div');
+    row.className = 'trig-row';
+    row.dataset.id = t.id;
+    const activeIcon = t.active ? '✓' : '○';
+    row.innerHTML =
+      `<span class="trig-sym">${t.symbol}</span>` +
+      `<span class="trig-iv">${t.interval}</span>` +
+      `<span class="trig-conf trig-conf-${t.min_confidence}">${t.min_confidence}</span>` +
+      `<span class="trig-toggle" title="${t.active ? 'Disable' : 'Enable'}">${activeIcon}</span>` +
+      `<span class="trig-del" title="Delete">✕</span>`;
+
+    row.querySelector('.trig-toggle').addEventListener('click', () => {
+      fetch(`/api/triggers/${t.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ active: !t.active }),
+      }).then(r => { if (r.ok) loadTriggers(); });
+    });
+
+    row.querySelector('.trig-del').addEventListener('click', () => {
+      fetch(`/api/triggers/${t.id}`, { method: 'DELETE' })
+        .then(r => { if (r.ok) loadTriggers(); });
+    });
+
+    el.appendChild(row);
+  });
+}
+
+// Add trigger form: toggle open/close and pre-fill with current chart selection
+document.getElementById('trig-add-btn').addEventListener('click', () => {
+  const form    = document.getElementById('trig-add-form');
+  const opening = !form.classList.contains('open');
+  form.classList.toggle('open');
+  if (opening) {
+    document.getElementById('trig-sym').value = currentSymbol;
+    const ivSel = document.getElementById('trig-iv');
+    for (const opt of ivSel.options) opt.selected = opt.value === currentInterval;
+    form.scrollIntoView({ block: 'nearest' });
+  }
+});
+
+document.getElementById('trig-save-btn').addEventListener('click', () => {
+  const btn  = document.getElementById('trig-save-btn');
+  const sym  = document.getElementById('trig-sym').value.trim().toUpperCase() || currentSymbol;
+  const iv   = document.getElementById('trig-iv').value;
+  const conf = document.getElementById('trig-conf').value;
+
+  btn.disabled    = true;
+  btn.textContent = 'Saving…';
+
+  fetch('/api/triggers', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ symbol: sym, interval: iv, min_confidence: conf }),
+  })
+  .then(r => {
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    return r.json();
+  })
+  .then(() => {
+    document.getElementById('trig-add-form').classList.remove('open');
+    document.getElementById('trig-sym').value = '';
+    btn.disabled    = false;
+    btn.textContent = 'Save Trigger';
+    loadTriggers();
+  })
+  .catch(() => {
+    btn.disabled    = false;
+    btn.textContent = '✕ Failed – retry';
+    setTimeout(() => { btn.textContent = 'Save Trigger'; }, 2500);
+  });
+});
+
+// Initial load
+loadTriggers();
 
 // ── Start ─────────────────────────────────────────────────────────────────────
 
