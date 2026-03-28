@@ -281,7 +281,7 @@ function onSignal(msg) {
   markers.sort((a, b) => a.time - b.time);
   candleSeries.setMarkers(markers);
 
-  addSignalCard(msg);
+  addSignalCard(msg, msg.trigger_matched);
   pushNotification(msg);
   mainChart.timeScale().scrollToRealTime();
 }
@@ -351,7 +351,7 @@ setInterval(fetchPortfolio, 30000);
 
 // ── Signal card ───────────────────────────────────────────────────────────────
 
-function addSignalCard(msg) {
+function addSignalCard(msg, triggerMatch = false) {
   const list = document.getElementById('signal-list');
   list.querySelector('.no-sig')?.remove();
 
@@ -359,7 +359,7 @@ function addSignalCard(msg) {
   const price = msg.entry_price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
   const card = document.createElement('div');
-  card.className = `signal-card ${msg.direction}`;
+  card.className = `signal-card ${msg.direction}${triggerMatch ? ' trigger-match' : ''}`;
   card.innerHTML = `
     <div class="sc-row">
       <span class="sc-dir">${msg.direction}</span>
@@ -459,6 +459,99 @@ document.getElementById('symbol-input').addEventListener('keydown', e => {
     connect(currentSymbol, currentInterval);
   }
 });
+
+// ── Triggers panel ────────────────────────────────────────────────────────────
+
+function loadTriggers() {
+  fetch('/api/triggers')
+    .then(r => r.json())
+    .then(renderTriggers)
+    .catch(() => {});
+}
+
+function renderTriggers(list) {
+  const el = document.getElementById('triggers-list');
+  if (!Array.isArray(list) || list.length === 0) {
+    el.innerHTML = '<div class="trig-empty">No triggers</div>';
+    return;
+  }
+  el.innerHTML = '';
+  list.forEach(t => {
+    const row = document.createElement('div');
+    row.className = 'trig-row';
+    row.dataset.id = t.id;
+    const activeIcon = t.active ? '✓' : '○';
+    row.innerHTML =
+      `<span class="trig-sym">${t.symbol}</span>` +
+      `<span class="trig-iv">${t.interval}</span>` +
+      `<span class="trig-conf trig-conf-${t.min_confidence}">${t.min_confidence}</span>` +
+      `<span class="trig-toggle" title="${t.active ? 'Disable' : 'Enable'}">${activeIcon}</span>` +
+      `<span class="trig-del" title="Delete">✕</span>`;
+
+    row.querySelector('.trig-toggle').addEventListener('click', () => {
+      fetch(`/api/triggers/${t.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ active: !t.active }),
+      }).then(r => { if (r.ok) loadTriggers(); });
+    });
+
+    row.querySelector('.trig-del').addEventListener('click', () => {
+      fetch(`/api/triggers/${t.id}`, { method: 'DELETE' })
+        .then(r => { if (r.ok) loadTriggers(); });
+    });
+
+    el.appendChild(row);
+  });
+}
+
+// Add trigger form: toggle open/close and pre-fill with current chart selection
+document.getElementById('trig-add-btn').addEventListener('click', () => {
+  const form    = document.getElementById('trig-add-form');
+  const opening = !form.classList.contains('open');
+  form.classList.toggle('open');
+  if (opening) {
+    document.getElementById('trig-sym').value = currentSymbol;
+    const ivSel = document.getElementById('trig-iv');
+    for (const opt of ivSel.options) opt.selected = opt.value === currentInterval;
+    form.scrollIntoView({ block: 'nearest' });
+  }
+});
+
+document.getElementById('trig-save-btn').addEventListener('click', () => {
+  const btn  = document.getElementById('trig-save-btn');
+  const sym  = document.getElementById('trig-sym').value.trim().toUpperCase() || currentSymbol;
+  const iv   = document.getElementById('trig-iv').value;
+  const conf = document.getElementById('trig-conf').value;
+
+  btn.disabled    = true;
+  btn.textContent = 'Saving…';
+
+  fetch('/api/triggers', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ symbol: sym, interval: iv, min_confidence: conf }),
+  })
+  .then(r => {
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    return r.json();
+  })
+  .then(() => {
+    document.getElementById('trig-add-form').classList.remove('open');
+    document.getElementById('trig-sym').value = '';
+    btn.disabled    = false;
+    btn.textContent = 'Save Trigger';
+    loadTriggers();
+  })
+  .catch(() => {
+    btn.disabled    = false;
+    btn.textContent = '✕ Failed – retry';
+    setTimeout(() => { btn.textContent = 'Save Trigger'; }, 2500);
+  });
+});
+
+// Initial load
+loadTriggers();
 
 // ── Start ─────────────────────────────────────────────────────────────────────
 

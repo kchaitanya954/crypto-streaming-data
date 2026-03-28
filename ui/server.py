@@ -25,6 +25,7 @@ from typing import Optional
 from fastapi import FastAPI, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 
 from signals.detector import SignalDetector
 from streaming.stream import stream_klines, fetch_historical_klines
@@ -32,6 +33,19 @@ from database import queries
 
 SEED_BARS  = 201
 static_dir = Path(__file__).parent / "static"
+
+# ── Trigger request models ──────────────────────────────────────────────────────
+
+class TriggerCreate(BaseModel):
+    symbol:         str
+    interval:       str
+    min_confidence: str = "MEDIUM"
+
+class TriggerUpdate(BaseModel):
+    symbol:         Optional[str]  = None
+    interval:       Optional[str]  = None
+    min_confidence: Optional[str]  = None
+    active:         Optional[bool] = None
 
 app = FastAPI()
 app.mount("/static", StaticFiles(directory=static_dir), name="static")
@@ -69,6 +83,50 @@ async def api_signals_history(
     if db is None:
         return []
     return await queries.get_recent_signals(db, symbol=symbol, interval=interval, limit=limit)
+
+
+@app.get("/api/triggers")
+async def api_get_triggers(request: Request):
+    """List all active triggers."""
+    db = getattr(request.app.state, "db", None)
+    if db is None:
+        return []
+    return await queries.get_triggers(db)
+
+
+@app.post("/api/triggers", status_code=201)
+async def api_create_trigger(request: Request, body: TriggerCreate):
+    """Create a new trigger."""
+    db = getattr(request.app.state, "db", None)
+    if db is None:
+        return JSONResponse({"error": "DB not configured"}, status_code=503)
+    tid = await queries.create_trigger(db, body.symbol, body.interval, body.min_confidence)
+    return {"id": tid, "symbol": body.symbol.upper(), "interval": body.interval,
+            "min_confidence": body.min_confidence.upper(), "active": True}
+
+
+@app.put("/api/triggers/{trigger_id}")
+async def api_update_trigger(request: Request, trigger_id: int, body: TriggerUpdate):
+    """Update an existing trigger."""
+    db = getattr(request.app.state, "db", None)
+    if db is None:
+        return JSONResponse({"error": "DB not configured"}, status_code=503)
+    await queries.update_trigger(
+        db, trigger_id,
+        symbol=body.symbol, interval=body.interval,
+        min_confidence=body.min_confidence, active=body.active,
+    )
+    return {"ok": True}
+
+
+@app.delete("/api/triggers/{trigger_id}")
+async def api_delete_trigger(request: Request, trigger_id: int):
+    """Delete a trigger."""
+    db = getattr(request.app.state, "db", None)
+    if db is None:
+        return JSONResponse({"error": "DB not configured"}, status_code=503)
+    await queries.delete_trigger(db, trigger_id)
+    return {"ok": True}
 
 
 # ── WebSocket endpoint ─────────────────────────────────────────────────────────
@@ -138,6 +196,18 @@ async def _connection_loop(ws: WebSocket, symbol: str, interval: str, app_state)
                         "reasons":     signal.reasons,
                         "trend_note":  signal.trend_note,
                     }
+                    # Check if any active trigger matches this signal
+                    trigger_matched = False
+                    if db is not None:
+                        try:
+                            active_triggers = await queries.get_triggers(db)
+                            trigger_matched = any(
+                                queries.trigger_matches(t, symbol, interval, signal.confidence)
+                                for t in active_triggers
+                            )
+                        except Exception:
+                            pass
+                    signal_payload["trigger_matched"] = trigger_matched
                     await ws.send_json(signal_payload)
 
                     # Persist signal to DB

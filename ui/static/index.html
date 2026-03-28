@@ -73,7 +73,8 @@
       border-right: 1px solid #2A2E39;
       display: flex;
       flex-direction: column;
-      overflow: hidden;
+      overflow-y: auto;
+      overflow-x: hidden;
     }
 
     .sidebar-title {
@@ -113,6 +114,61 @@
     .sc-reason { font-size: 10px; color: #B2B5BE; margin-top: 3px; line-height: 1.5; }
     .sc-trend  { font-size: 9px;  color: #4C525E; margin-top: 2px; }
     .no-sig    { font-size: 11px; color: #4C525E; text-align: center; margin-top: 24px; }
+
+    /* ── Triggers panel ── */
+    #triggers-panel {
+      border-top: 1px solid #2A2E39;
+      flex-shrink: 0;
+    }
+    #triggers-list { padding: 4px 8px 6px; max-height: 160px; overflow-y: auto; }
+    #triggers-list::-webkit-scrollbar       { width: 3px; }
+    #triggers-list::-webkit-scrollbar-thumb { background: #2A2E39; border-radius: 2px; }
+
+    .trig-row {
+      display: flex; align-items: center; gap: 5px;
+      padding: 4px 2px; border-bottom: 1px solid #1A1D27; font-size: 10px;
+    }
+    .trig-row:last-child { border-bottom: none; }
+    .trig-sym  { color: #D1D4DC; font-weight: 600; min-width: 60px; }
+    .trig-iv   { color: #787B86; min-width: 28px; }
+    .trig-conf { font-size: 9px; font-weight: 600; border-radius: 3px; padding: 1px 4px; }
+    .trig-conf-HIGH   { background: rgba(38,166,154,0.2);  color: #26A69A; }
+    .trig-conf-MEDIUM { background: rgba(255,152,0,0.2);   color: #FF9800; }
+    .trig-conf-LOW    { background: rgba(120,123,134,0.2); color: #787B86; }
+    .trig-toggle { cursor: pointer; font-size: 12px; opacity: 0.6; margin-left: auto; }
+    .trig-toggle:hover { opacity: 1; }
+    .trig-del   { cursor: pointer; color: #EF5350; font-size: 12px; opacity: 0.5; }
+    .trig-del:hover { opacity: 1; }
+    .trig-empty { font-size: 11px; color: #4C525E; text-align: center; padding: 8px 0; }
+
+    #trig-add-form {
+      display: none; padding: 6px 8px 8px;
+      border-top: 1px solid #2A2E39; background: #131722;
+    }
+    #trig-add-form.open { display: block; }
+    .trig-form-row { display: flex; gap: 4px; align-items: center; flex-wrap: wrap; margin-bottom: 5px; }
+    .trig-inp, .trig-sel {
+      background: #1E222D; color: #D1D4DC; border: 1px solid #2A2E39;
+      border-radius: 3px; padding: 3px 6px; font-size: 10px; outline: none;
+    }
+    .trig-inp { width: 72px; }
+    .trig-sel { flex: 1; }
+    .trig-inp:focus, .trig-sel:focus { border-color: #2196F3; }
+    .trig-save-btn {
+      background: #2196F3; color: #fff; border: none; border-radius: 3px;
+      padding: 3px 8px; font-size: 10px; cursor: pointer; width: 100%;
+    }
+    .trig-save-btn:hover { background: #1976D2; }
+
+    /* Signal card highlight when trigger matched */
+    .signal-card.trigger-match {
+      box-shadow: 0 0 0 1px currentColor;
+      animation: trigpulse 1.5s ease-in-out 2;
+    }
+    @keyframes trigpulse {
+      0%, 100% { opacity: 1; }
+      50%       { opacity: 0.6; }
+    }
 
     /* ── Portfolio panel ── */
     #portfolio-panel {
@@ -222,6 +278,31 @@
         <div class="pf-empty">Loading…</div>
       </div>
       <div id="pf-updated"></div>
+    </div>
+
+    <!-- Triggers panel -->
+    <div id="triggers-panel">
+      <div class="sidebar-title" style="display:flex;align-items:center;justify-content:space-between;cursor:default">
+        <span>Triggers</span>
+        <span id="trig-add-btn" style="cursor:pointer;color:#2196F3;font-size:14px;line-height:1" title="Add trigger">+</span>
+      </div>
+      <div id="trig-add-form">
+        <div class="trig-form-row">
+          <input  id="trig-sym"  class="trig-inp" type="text"   placeholder="BTCUSDT" />
+          <select id="trig-iv"   class="trig-sel">
+            <option>1s</option><option selected>1m</option><option>3m</option>
+            <option>5m</option><option>15m</option><option>30m</option>
+            <option>1h</option><option>4h</option>
+          </select>
+          <select id="trig-conf" class="trig-sel">
+            <option value="LOW">LOW</option>
+            <option value="MEDIUM" selected>MEDIUM</option>
+            <option value="HIGH">HIGH</option>
+          </select>
+        </div>
+        <button class="trig-save-btn" id="trig-save-btn">Save Trigger</button>
+      </div>
+      <div id="triggers-list"><div class="trig-empty">No triggers</div></div>
     </div>
   </div>
 

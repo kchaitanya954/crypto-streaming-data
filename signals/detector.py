@@ -5,10 +5,12 @@ Signal flow:
   1. EMA(200) hard gate      — blocks signals against the long-term trend
   2. ADX gate                — blocks signals when market is choppy (ADX < threshold)
   3. MACD crossover          — trigger, must exceed min_histogram gap to avoid micro-crosses
-  4. RSI                     — confirmation (+1 if not overbought/oversold)
-  5. Stochastic              — confirmation (+1 if %K/%D cross agrees)
-  6. OBV                     — confirmation (+1 if volume backs the move)
-  7. min_confirmations gate  — signal is suppressed if too few confirmations pass
+  4. Bollinger Band gate     — BUY only below middle band (room to rise), SELL only above it
+  5. Cooldown gate           — blocks signals within cooldown_bars of the previous signal
+  6. RSI                     — confirmation (+1 if in healthy zone: 30–65 for BUY, 35–70 for SELL)
+  7. Stochastic              — confirmation (+1 if %K/%D cross AND coming from right zone)
+  8. OBV                     — confirmation (+1 if volume backs the move)
+  9. min_confirmations gate — signal suppressed if too few confirmations pass
 """
 
 from dataclasses import dataclass, field
@@ -52,9 +54,12 @@ RSI_PERIOD        = 14
 STOCH_K           = 14
 STOCH_D           = 3
 ADX_PERIOD        = 14
-ADX_THRESHOLD     = 30.0   # raised from 25 — requires a clearer trend
-MIN_HISTOGRAM     = 0.5    # min |MACD - signal| to count as a real crossover (tune per asset)
-MIN_CONFIRMATIONS = 1      # require at least MEDIUM confidence — blocks LOW signals
+ADX_THRESHOLD     = 30.0   # below this = choppy market, skip signal
+MIN_HISTOGRAM     = 0.5    # min |MACD − signal| to reject micro-crossovers (tune per asset/TF)
+MIN_CONFIRMATIONS = 2      # require MEDIUM or HIGH — LOW signals (1 confirm) are always suppressed
+BB_PERIOD         = 20     # Bollinger Band lookback
+BB_STD            = 2.0    # Bollinger Band standard deviation multiplier
+COOLDOWN_BARS     = 5      # bars to wait after a signal before allowing the next one
 
 
 # ── Output dataclass ──────────────────────────────────────────────────────────
@@ -107,6 +112,9 @@ class SignalDetector:
         adx_threshold:     float = ADX_THRESHOLD,
         min_histogram:     float = MIN_HISTOGRAM,
         min_confirmations: int   = MIN_CONFIRMATIONS,
+        bb_period:         int   = BB_PERIOD,
+        bb_std:            float = BB_STD,
+        cooldown_bars:     int   = COOLDOWN_BARS,
     ) -> None:
         self.macd_fast         = macd_fast
         self.macd_slow         = macd_slow
@@ -120,6 +128,10 @@ class SignalDetector:
         self.adx_threshold     = adx_threshold
         self.min_histogram     = min_histogram
         self.min_confirmations = min_confirmations
+        self.bb_period         = bb_period
+        self.bb_std            = bb_std
+        self.cooldown_bars     = cooldown_bars
+        self._last_signal_bar: int = -999   # bar index when last signal fired
 
         self.opens:      list[float] = []
         self.closes:     list[float] = []
@@ -247,7 +259,22 @@ class SignalDetector:
         if cross_down and above_ema200:
             return None
 
-        # 4–6. Confirmations
+        # 4. Bollinger Band position gate — prevents buying at overextended prices.
+        #    BUY only when price is below the BB midline (lower half = room to rise).
+        #    SELL only when price is above the BB midline (upper half = room to fall).
+        bb_res = bollinger_bands(closes, period=self.bb_period, std_dev=self.bb_std)
+        bb_mid = bb_res.middle[n - 1]
+        if bb_mid is not None:
+            if cross_up   and price > bb_mid:
+                return None   # price already in upper band — overextended for a buy
+            if cross_down and price < bb_mid:
+                return None   # price already in lower band — overextended for a sell
+
+        # 5. Cooldown gate — prevents rapid-fire signals after a recent one
+        if n - self._last_signal_bar < self.cooldown_bars:
+            return None
+
+        # 6–8. Confirmations
         rsi_line = rsi(closes, period=self.rsi_period)
         rsi_curr = rsi_line[n - 1]
 
@@ -273,38 +300,52 @@ class SignalDetector:
         )
 
         if cross_up:
+            # Stochastic zone: only count the cross if %K was coming from a low zone (< 50)
+            # — prevents treating overbought momentum as a fresh buy entry
+            stoch_buy_ok = (
+                _stoch_cross_up(stoch_k_prev, stoch_d_prev, stoch_k_curr, stoch_d_curr)
+                and stoch_k_prev is not None and stoch_k_prev < 50
+            )
             sig = self._build_signal(
                 direction="BUY",
                 price=price, macd_curr=macd_curr, sig_curr=sig_curr,
                 histogram=histogram, adx_val=adx_val, trend_note=trend_note,
                 confirmations=[
-                    (rsi_curr is not None and rsi_curr < 60,
-                     f"RSI={rsi_curr:.1f} (not overbought)" if rsi_curr else ""),
-                    (_stoch_cross_up(stoch_k_prev, stoch_d_prev, stoch_k_curr, stoch_d_curr),
-                     f"Stoch %K crossed above %D ({stoch_k_curr:.1f}/{stoch_d_curr:.1f})"
+                    # RSI: healthy buy zone — not overbought, has upward momentum
+                    (rsi_curr is not None and 30 <= rsi_curr <= 65,
+                     f"RSI={rsi_curr:.1f} (healthy buy zone)" if rsi_curr else ""),
+                    (stoch_buy_ok,
+                     f"Stoch %K crossed above %D from low zone ({stoch_k_curr:.1f}/{stoch_d_curr:.1f})"
                      if stoch_k_curr is not None and stoch_d_curr is not None else ""),
                     (obv_rising, "OBV rising"),
                 ],
             )
         else:
+            # Stochastic zone: only count the cross if %K was coming from a high zone (> 50)
+            stoch_sell_ok = (
+                _stoch_cross_down(stoch_k_prev, stoch_d_prev, stoch_k_curr, stoch_d_curr)
+                and stoch_k_prev is not None and stoch_k_prev > 50
+            )
             sig = self._build_signal(
                 direction="SELL",
                 price=price, macd_curr=macd_curr, sig_curr=sig_curr,
                 histogram=histogram, adx_val=adx_val, trend_note=trend_note,
                 confirmations=[
-                    (rsi_curr is not None and rsi_curr > 40,
-                     f"RSI={rsi_curr:.1f} (not oversold)" if rsi_curr else ""),
-                    (_stoch_cross_down(stoch_k_prev, stoch_d_prev, stoch_k_curr, stoch_d_curr),
-                     f"Stoch %K crossed below %D ({stoch_k_curr:.1f}/{stoch_d_curr:.1f})"
+                    # RSI: healthy sell zone — not oversold, has downward momentum
+                    (rsi_curr is not None and 35 <= rsi_curr <= 70,
+                     f"RSI={rsi_curr:.1f} (healthy sell zone)" if rsi_curr else ""),
+                    (stoch_sell_ok,
+                     f"Stoch %K crossed below %D from high zone ({stoch_k_curr:.1f}/{stoch_d_curr:.1f})"
                      if stoch_k_curr is not None and stoch_d_curr is not None else ""),
                     (not obv_rising, "OBV falling"),
                 ],
             )
 
-        # 7. Minimum confirmations gate — suppress LOW signals
+        # 9. Minimum confirmations gate — suppress LOW signals
         if len(sig.reasons) < self.min_confirmations:
             return None
 
+        self._last_signal_bar = n   # record cooldown checkpoint
         return sig
 
     def _build_signal(

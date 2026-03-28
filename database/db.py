@@ -71,6 +71,15 @@ CREATE TABLE IF NOT EXISTS trade_history (
     pnl          REAL,
     created_at   INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS triggers (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol         TEXT    NOT NULL,
+    interval       TEXT    NOT NULL,
+    min_confidence TEXT    NOT NULL DEFAULT 'MEDIUM',
+    active         INTEGER NOT NULL DEFAULT 1,
+    created_at     INTEGER NOT NULL
+);
 """
 
 

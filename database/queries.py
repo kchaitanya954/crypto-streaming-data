@@ -185,3 +185,69 @@ async def get_trade_history(
     )
     rows = await cursor.fetchall()
     return [dict(row) for row in rows]
+
+
+_CONF_ORDER = {"LOW": 0, "MEDIUM": 1, "HIGH": 2}
+
+
+async def get_triggers(db: aiosqlite.Connection, active_only: bool = True) -> list[dict]:
+    """Return all triggers (active only by default)."""
+    if active_only:
+        cursor = await db.execute(
+            "SELECT * FROM triggers WHERE active = 1 ORDER BY created_at DESC"
+        )
+    else:
+        cursor = await db.execute("SELECT * FROM triggers ORDER BY created_at DESC")
+    rows = await cursor.fetchall()
+    return [dict(row) for row in rows]
+
+
+async def create_trigger(
+    db: aiosqlite.Connection,
+    symbol: str,
+    interval: str,
+    min_confidence: str = "MEDIUM",
+) -> int:
+    """Insert a new trigger. Returns the new row id."""
+    cursor = await db.execute(
+        "INSERT INTO triggers (symbol, interval, min_confidence, active, created_at) VALUES (?, ?, ?, 1, ?)",
+        (symbol.upper(), interval, min_confidence.upper(), int(time.time())),
+    )
+    await db.commit()
+    return cursor.lastrowid
+
+
+async def update_trigger(
+    db: aiosqlite.Connection,
+    trigger_id: int,
+    symbol: Optional[str] = None,
+    interval: Optional[str] = None,
+    min_confidence: Optional[str] = None,
+    active: Optional[bool] = None,
+) -> None:
+    """Update any subset of trigger fields."""
+    fields, params = [], []
+    if symbol         is not None: fields.append("symbol = ?");         params.append(symbol.upper())
+    if interval       is not None: fields.append("interval = ?");       params.append(interval)
+    if min_confidence is not None: fields.append("min_confidence = ?"); params.append(min_confidence.upper())
+    if active         is not None: fields.append("active = ?");         params.append(1 if active else 0)
+    if not fields:
+        return
+    params.append(trigger_id)
+    await db.execute(f"UPDATE triggers SET {', '.join(fields)} WHERE id = ?", params)
+    await db.commit()
+
+
+async def delete_trigger(db: aiosqlite.Connection, trigger_id: int) -> None:
+    """Hard-delete a trigger row."""
+    await db.execute("DELETE FROM triggers WHERE id = ?", (trigger_id,))
+    await db.commit()
+
+
+def trigger_matches(trigger: dict, symbol: str, interval: str, confidence: str) -> bool:
+    """Return True if the signal meets the trigger's criteria."""
+    return (
+        trigger["symbol"].upper() == symbol.upper()
+        and trigger["interval"] == interval
+        and _CONF_ORDER.get(confidence.upper(), 0) >= _CONF_ORDER.get(trigger["min_confidence"].upper(), 0)
+    )
