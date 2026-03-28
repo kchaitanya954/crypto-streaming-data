@@ -6,6 +6,7 @@ let ws               = null;
 let currentSymbol    = 'BTCUSDT';
 let currentInterval  = '1m';
 let markers          = [];
+let currentEditId    = null;   // null = create mode, number = edit existing trigger
 
 // ── Chart creation ────────────────────────────────────────────────────────────
 
@@ -416,7 +417,8 @@ function connect(symbol, interval) {
   document.getElementById('signal-list').innerHTML = '<div class="no-sig">Loading…</div>';
   setStatus(false);
 
-  ws = new WebSocket(`ws://${location.host}/ws?symbol=${symbol.toLowerCase()}&interval=${interval}`);
+  const wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  ws = new WebSocket(`${wsProto}//${location.host}/ws?symbol=${symbol.toLowerCase()}&interval=${interval}`);
 
   ws.onopen = () => {
     setStatus(true);
@@ -478,15 +480,17 @@ function renderTriggers(list) {
   el.innerHTML = '';
   list.forEach(t => {
     const row = document.createElement('div');
-    row.className = 'trig-row';
+    row.className = `trig-row${t.active ? '' : ' inactive'}`;
     row.dataset.id = t.id;
-    const activeIcon = t.active ? '✓' : '○';
     row.innerHTML =
       `<span class="trig-sym">${t.symbol}</span>` +
       `<span class="trig-iv">${t.interval}</span>` +
       `<span class="trig-conf trig-conf-${t.min_confidence}">${t.min_confidence}</span>` +
-      `<span class="trig-toggle" title="${t.active ? 'Disable' : 'Enable'}">${activeIcon}</span>` +
+      `<span class="trig-edit" title="Edit">✏</span>` +
+      `<span class="trig-toggle" title="${t.active ? 'Disable' : 'Enable'}">${t.active ? '✓' : '○'}</span>` +
       `<span class="trig-del" title="Delete">✕</span>`;
+
+    row.querySelector('.trig-edit').addEventListener('click', () => openEditForm(t));
 
     row.querySelector('.trig-toggle').addEventListener('click', () => {
       fetch(`/api/triggers/${t.id}`, {
@@ -505,30 +509,51 @@ function renderTriggers(list) {
   });
 }
 
-// Add trigger form: toggle open/close and pre-fill with current chart selection
+function openEditForm(t) {
+  currentEditId = t.id;
+  document.getElementById('trig-sym').value = t.symbol;
+  for (const opt of document.getElementById('trig-iv').options)
+    opt.selected = opt.value === t.interval;
+  for (const opt of document.getElementById('trig-conf').options)
+    opt.selected = opt.value === t.min_confidence;
+  document.getElementById('trig-save-btn').textContent = 'Update Trigger';
+  const form = document.getElementById('trig-add-form');
+  form.classList.add('open');
+  form.scrollIntoView({ block: 'nearest' });
+}
+
+// + button: open create form (or switch back from edit mode)
 document.getElementById('trig-add-btn').addEventListener('click', () => {
   const form    = document.getElementById('trig-add-form');
-  const opening = !form.classList.contains('open');
-  form.classList.toggle('open');
+  const opening = !form.classList.contains('open') || currentEditId !== null;
+  currentEditId = null;
+  document.getElementById('trig-save-btn').textContent = 'Save Trigger';
   if (opening) {
     document.getElementById('trig-sym').value = currentSymbol;
-    const ivSel = document.getElementById('trig-iv');
-    for (const opt of ivSel.options) opt.selected = opt.value === currentInterval;
+    for (const opt of document.getElementById('trig-iv').options)
+      opt.selected = opt.value === currentInterval;
+    form.classList.add('open');
     form.scrollIntoView({ block: 'nearest' });
+  } else {
+    form.classList.remove('open');
   }
 });
 
 document.getElementById('trig-save-btn').addEventListener('click', () => {
-  const btn  = document.getElementById('trig-save-btn');
-  const sym  = document.getElementById('trig-sym').value.trim().toUpperCase() || currentSymbol;
-  const iv   = document.getElementById('trig-iv').value;
-  const conf = document.getElementById('trig-conf').value;
+  const btn    = document.getElementById('trig-save-btn');
+  const sym    = document.getElementById('trig-sym').value.trim().toUpperCase() || currentSymbol;
+  const iv     = document.getElementById('trig-iv').value;
+  const conf   = document.getElementById('trig-conf').value;
+  const editId = currentEditId;
 
   btn.disabled    = true;
-  btn.textContent = 'Saving…';
+  btn.textContent = editId ? 'Updating…' : 'Saving…';
 
-  fetch('/api/triggers', {
-    method: 'POST',
+  const url    = editId ? `/api/triggers/${editId}` : '/api/triggers';
+  const method = editId ? 'PUT' : 'POST';
+
+  fetch(url, {
+    method,
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ symbol: sym, interval: iv, min_confidence: conf }),
   })
@@ -541,12 +566,15 @@ document.getElementById('trig-save-btn').addEventListener('click', () => {
     document.getElementById('trig-sym').value = '';
     btn.disabled    = false;
     btn.textContent = 'Save Trigger';
+    currentEditId   = null;
     loadTriggers();
   })
   .catch(() => {
     btn.disabled    = false;
     btn.textContent = '✕ Failed – retry';
-    setTimeout(() => { btn.textContent = 'Save Trigger'; }, 2500);
+    setTimeout(() => {
+      btn.textContent = currentEditId ? 'Update Trigger' : 'Save Trigger';
+    }, 2500);
   });
 });
 

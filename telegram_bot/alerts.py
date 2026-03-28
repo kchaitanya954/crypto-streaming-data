@@ -119,3 +119,31 @@ async def send_signal_alert(
         return msg.message_id
 
     return None
+
+
+async def send_trigger_alert(
+    bot: Bot,
+    chat_id: str,
+    action: str,
+    symbol: str,
+    interval: str,
+    min_confidence: str,
+) -> None:
+    """Send a Telegram notification when a trigger is created, updated, or deleted."""
+    icons = {
+        "created":  "🔔",
+        "updated":  "✏️",
+        "deleted":  "🗑️",
+        "enabled":  "✅",
+        "disabled": "⏸",
+    }
+    icon = icons.get(action, "📌")
+    text = (
+        f"{icon} *Trigger {action.upper()}*\n"
+        f"Pair: `{symbol}` | `{interval}`\n"
+        f"Min confidence: `{min_confidence}`"
+    )
+    try:
+        await bot.send_message(chat_id=chat_id, text=text, parse_mode=ParseMode.MARKDOWN)
+    except Exception:
+        pass
