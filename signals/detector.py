@@ -262,7 +262,7 @@ class SignalDetector:
         # 4. Bollinger Band position gate — prevents buying at overextended prices.
         #    BUY only when price is below the BB midline (lower half = room to rise).
         #    SELL only when price is above the BB midline (upper half = room to fall).
-        bb_res = bollinger_bands(closes, period=self.bb_period, std_dev=self.bb_std)
+        bb_res = bollinger_bands(closes, period=self.bb_period, num_std=self.bb_std)
         bb_mid = bb_res.middle[n - 1]
         if bb_mid is not None:
             if cross_up   and price > bb_mid:
