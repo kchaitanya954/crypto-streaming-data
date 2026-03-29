@@ -4,6 +4,7 @@ Main orchestrator — starts all services concurrently:
   2. CoinDCX exchange client (order execution)
   3. Telegram bot (alerts + manual trading)
   4. FastAPI + Uvicorn (dashboard + WebSocket streaming)
+  5. Background signal worker (detects signals & fires trigger alerts 24/7)
 
 Run:
     python orchestrator.py
@@ -13,7 +14,6 @@ Run:
 
 import asyncio
 import logging
-import os
 
 import aiohttp
 import uvicorn
@@ -30,6 +30,120 @@ logging.basicConfig(
 )
 log = logging.getLogger("orchestrator")
 
+
+# ── Background signal worker ───────────────────────────────────────────────────
+
+async def _stream_pair(symbol: str, interval: str, db, tg_bot, exchange, settings) -> None:
+    """
+    Stream one symbol/interval pair forever, detect signals, and fire
+    Telegram alerts whenever an active trigger matches.
+    Restarts automatically on any error.
+    """
+    from streaming.stream import stream_klines, fetch_historical_klines
+    from signals.detector import SignalDetector
+    from database import queries
+    from telegram_bot.alerts import send_signal_alert
+
+    while True:
+        try:
+            detector = SignalDetector()
+            historical = await fetch_historical_klines(symbol, interval, limit=201)
+            detector.seed(historical)
+            log.info("BG worker seeded  %s %s  (%d bars)", symbol.upper(), interval, len(historical))
+
+            async for kline in stream_klines(symbol=symbol, interval=interval, only_closed=False):
+                if not kline.is_closed:
+                    continue
+
+                signal = detector.update(kline)
+                if signal is None:
+                    continue
+
+                log.info("BG signal  %s %s %s %s @ %.2f",
+                         symbol.upper(), interval, signal.direction,
+                         signal.confidence, signal.entry_price)
+
+                # Persist to DB
+                try:
+                    await queries.insert_signal(db, symbol, interval, signal)
+                except Exception:
+                    pass
+
+                # Fire Telegram alert if any active trigger matches
+                try:
+                    active_triggers = await queries.get_triggers(db, active_only=True)
+                    matched = any(
+                        queries.trigger_matches(t, symbol, interval, signal.confidence)
+                        for t in active_triggers
+                    )
+                    if matched:
+                        await send_signal_alert(
+                            bot=tg_bot,
+                            chat_id=settings.telegram_chat_id,
+                            signal=signal,
+                            symbol=symbol.upper(),
+                            interval=interval,
+                            phase=settings.trading_phase,
+                            db=db,
+                            exchange=exchange,
+                            settings=settings,
+                        )
+                        log.info("Trigger alert sent  %s %s %s %s",
+                                 signal.direction, signal.confidence,
+                                 symbol.upper(), interval)
+                except Exception as exc:
+                    log.error("BG trigger check error: %s", exc)
+
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log.warning("BG worker %s %s crashed (%s) — restarting in 10 s",
+                        symbol.upper(), interval, exc)
+            await asyncio.sleep(10)
+
+
+async def background_signal_worker(db, tg_bot, exchange, settings) -> None:
+    """
+    Manage one streaming task per unique (symbol, interval) across all active
+    triggers.  Re-checks the DB every 30 s so newly added/removed triggers are
+    picked up without a restart.
+    """
+    from database import queries
+
+    running: dict[tuple, asyncio.Task] = {}
+
+    while True:
+        try:
+            triggers = await queries.get_triggers(db, active_only=True)
+            pairs = {(t["symbol"].lower(), t["interval"]) for t in triggers}
+
+            # Start tasks for new pairs
+            for sym, iv in pairs:
+                key = (sym, iv)
+                if key not in running or running[key].done():
+                    log.info("BG worker starting %s %s", sym.upper(), iv)
+                    running[key] = asyncio.create_task(
+                        _stream_pair(sym, iv, db, tg_bot, exchange, settings)
+                    )
+
+            # Cancel tasks for pairs that no longer have active triggers
+            for key in list(running):
+                if key not in pairs and not running[key].done():
+                    log.info("BG worker stopping %s %s", key[0].upper(), key[1])
+                    running[key].cancel()
+                    del running[key]
+
+        except asyncio.CancelledError:
+            for task in running.values():
+                task.cancel()
+            raise
+        except Exception as exc:
+            log.error("BG worker manager error: %s", exc)
+
+        await asyncio.sleep(30)   # re-sync with DB triggers every 30 s
+
+
+# ── Main ──────────────────────────────────────────────────────────────────────
 
 async def main() -> None:
     # ── Load config ──────────────────────────────────────────────────────────
@@ -78,10 +192,18 @@ async def main() -> None:
         await tg_app.start()
         await tg_app.updater.start_polling(drop_pending_updates=True)
 
+        # Start background signal worker (runs forever, independent of UI)
+        worker_task = asyncio.create_task(
+            background_signal_worker(db, tg_app.bot, exchange, settings)
+        )
+        log.info("Background signal worker started")
+
         try:
             await server.serve()
         finally:
             log.info("Shutting down…")
+            worker_task.cancel()
+            await asyncio.gather(worker_task, return_exceptions=True)
             await tg_app.updater.stop()
             await tg_app.stop()
 
