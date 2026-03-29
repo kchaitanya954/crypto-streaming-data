@@ -54,9 +54,9 @@ RSI_PERIOD        = 14
 STOCH_K           = 14
 STOCH_D           = 3
 ADX_PERIOD        = 14
-ADX_THRESHOLD     = 30.0   # below this = choppy market, skip signal
-MIN_HISTOGRAM     = 0.5    # min |MACD − signal| to reject micro-crossovers (tune per asset/TF)
-MIN_CONFIRMATIONS = 2      # require MEDIUM or HIGH — LOW signals (1 confirm) are always suppressed
+ADX_THRESHOLD     = 20.0   # below this = choppy market, skip signal
+MIN_HISTOGRAM     = 0.1    # min |MACD − signal| to reject micro-crossovers (tune per asset/TF)
+MIN_CONFIRMATIONS = 1      # allow LOW signals through (1 confirm)
 BB_PERIOD         = 20     # Bollinger Band lookback
 BB_STD            = 2.0    # Bollinger Band standard deviation multiplier
 COOLDOWN_BARS     = 5      # bars to wait after a signal before allowing the next one
