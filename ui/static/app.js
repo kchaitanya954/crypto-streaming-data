@@ -546,6 +546,20 @@ document.getElementById('trig-save-btn').addEventListener('click', () => {
   const conf   = document.getElementById('trig-conf').value;
   const editId = currentEditId;
 
+  // Basic symbol validation: 3-12 uppercase letters/digits, must end with USDT/BTC/ETH/BNB/INR
+  const symInput = document.getElementById('trig-sym');
+  const validSym = /^[A-Z0-9]{3,12}$/.test(sym) && /^.+(USDT|BTC|ETH|BNB|INR)$/.test(sym);
+  if (!validSym) {
+    symInput.style.borderColor = '#EF5350';
+    btn.textContent = '✕ Invalid symbol (e.g. BTCUSDT)';
+    setTimeout(() => {
+      symInput.style.borderColor = '';
+      btn.textContent = editId ? 'Update Trigger' : 'Save Trigger';
+    }, 2500);
+    return;
+  }
+  symInput.style.borderColor = '';
+
   btn.disabled    = true;
   btn.textContent = editId ? 'Updating…' : 'Saving…';
 

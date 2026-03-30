@@ -52,11 +52,19 @@ async def _stream_pair(symbol: str, interval: str, db, tg_bot, exchange, setting
             detector.seed(historical)
             log.info("BG worker seeded  %s %s  (%d bars)", symbol.upper(), interval, len(historical))
 
+            candle_count = 0
             async for kline in stream_klines(symbol=symbol, interval=interval, only_closed=False):
                 if not kline.is_closed:
                     continue
 
+                candle_count += 1
                 signal = detector.update(kline)
+                # Log every 30 candles so we can confirm the worker is alive and processing
+                if candle_count % 30 == 0:
+                    snap = detector.current_snapshot()
+                    log.info("BG heartbeat  %s %s  candle#%d  close=%.4f  adx=%s",
+                             symbol.upper(), interval, candle_count, kline.close,
+                             f"{snap.adx_val:.1f}" if snap.adx_val else "n/a")
                 if signal is None:
                     continue
 

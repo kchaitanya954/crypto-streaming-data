@@ -259,18 +259,7 @@ class SignalDetector:
         if cross_down and above_ema200:
             return None
 
-        # 4. Bollinger Band position gate — prevents buying at overextended prices.
-        #    BUY only when price is below the BB midline (lower half = room to rise).
-        #    SELL only when price is above the BB midline (upper half = room to fall).
-        bb_res = bollinger_bands(closes, period=self.bb_period, num_std=self.bb_std)
-        bb_mid = bb_res.middle[n - 1]
-        if bb_mid is not None:
-            if cross_up   and price > bb_mid:
-                return None   # price already in upper band — overextended for a buy
-            if cross_down and price < bb_mid:
-                return None   # price already in lower band — overextended for a sell
-
-        # 5. Cooldown gate — prevents rapid-fire signals after a recent one
+        # 4. Cooldown gate — prevents rapid-fire signals after a recent one
         if n - self._last_signal_bar < self.cooldown_bars:
             return None
 
