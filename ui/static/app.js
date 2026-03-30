@@ -641,12 +641,26 @@ function pct(v, decimals = 2) {
 }
 function pctClass(v) { return v > 0 ? 'pos' : v < 0 ? 'neg' : 'neu'; }
 
+function simParams() {
+  return {
+    initial_usdt: parseFloat(document.getElementById('sim-usdt').value)    || 100,
+    buy_pct:      parseFloat(document.getElementById('sim-buy-pct').value) || 10,
+    sell_pct:     parseFloat(document.getElementById('sim-sell-pct').value)|| 100,
+  };
+}
+
+document.getElementById('sim-run').addEventListener('click', loadAnalytics);
+
 function loadAnalytics() {
   const sym      = document.getElementById('an-symbol').value;
   const interval = document.getElementById('an-interval').value;
   const conf     = document.getElementById('an-conf').value;
   const period   = document.getElementById('an-period').value;
-  const params   = new URLSearchParams({ symbol: sym, interval, confidence: conf, period });
+  const sim      = simParams();
+  const params   = new URLSearchParams({
+    symbol: sym, interval, confidence: conf, period,
+    initial_usdt: sim.initial_usdt, buy_pct: sim.buy_pct, sell_pct: sim.sell_pct,
+  });
   fetch(`/api/analytics?${params}`)
     .then(r => r.json())
     .then(renderAnalytics)
@@ -724,6 +738,9 @@ function renderAnalytics(d) {
       <td class="${pctClass(s.avg_pnl)}">${pct(s.avg_pnl)}</td>
     </tr>`).join('') || '<tr><td colspan="5" style="color:#4C525E;text-align:center">No data</td></tr>';
 
+  // Simulation
+  if (d.simulation) renderSimulation(d.simulation);
+
   // Trades table
   const tradesBody = document.getElementById('an-trades');
   const noTrades   = document.getElementById('an-no-trades');
@@ -750,6 +767,71 @@ function renderAnalytics(d) {
       </tr>`;
     }).join('');
   }
+}
+
+function renderSimulation(s) {
+  const setCard = (id, val, cls) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.textContent = val;
+    el.className = 'an-card-val' + (cls ? ' ' + cls : '');
+  };
+
+  setCard('sim-v-final',   '$' + s.final_value_usdt.toFixed(2));
+  setCard('sim-v-return',  pct(s.total_return_pct), pctClass(s.total_return_pct));
+  setCard('sim-v-cash',    '$' + s.final_cash_usdt.toFixed(2));
+  setCard('sim-v-holding', '$' + s.final_holding_usdt.toFixed(2));
+  setCard('sim-v-count',   s.sim_trade_count || '—');
+
+  // Holdings chips
+  const holdWrap = document.getElementById('sim-holdings-wrap');
+  const holdEl   = document.getElementById('sim-holdings');
+  const entries  = Object.entries(s.holdings || {});
+  if (entries.length > 0) {
+    holdWrap.style.display = '';
+    holdEl.innerHTML = entries.map(([base, amt]) =>
+      `<span style="background:#131722;border:1px solid #2A2E39;border-radius:4px;padding:3px 8px;font-size:11px;color:#D1D4DC">
+        <span style="color:#FF9800;font-weight:700">${base}</span> ${amt.toFixed(6)}
+      </span>`
+    ).join('');
+  } else {
+    holdWrap.style.display = 'none';
+  }
+
+  // Sim trade log
+  const tbody  = document.getElementById('sim-trades');
+  const noData = document.getElementById('sim-no-data');
+  const trades = s.sim_trades || [];
+
+  if (trades.length === 0) {
+    tbody.innerHTML = '';
+    noData.style.display = '';
+    return;
+  }
+  noData.style.display = 'none';
+
+  tbody.innerHTML = [...trades].reverse().map(t => {
+    const dt = new Date(t.time * 1000);
+    const ts = dt.toLocaleDateString([], {month:'short', day:'numeric'}) + ' ' +
+               dt.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+    const isBuy     = t.direction === 'BUY';
+    const dirColor  = isBuy ? '#26A69A' : '#EF5350';
+    const usdtDelta = isBuy
+      ? `<span style="color:#EF5350">-$${t.usdt_spent.toFixed(2)}</span>`
+      : `<span style="color:#26A69A">+$${t.usdt_received.toFixed(2)}</span>`;
+    const confColors = { HIGH: '#26A69A', MEDIUM: '#FF9800', LOW: '#787B86' };
+    return `<tr>
+      <td style="font-weight:600;color:#D1D4DC">${t.symbol}</td>
+      <td style="color:#787B86">${t.interval}</td>
+      <td style="color:${dirColor};font-weight:700">${t.direction}</td>
+      <td style="color:${confColors[t.confidence]||'#D1D4DC'};font-size:9px;font-weight:700">${t.confidence}</td>
+      <td>$${t.price.toFixed(2)}</td>
+      <td>${usdtDelta}</td>
+      <td style="color:#B2B5BE">$${t.usdt_balance.toFixed(2)}</td>
+      <td style="color:#D1D4DC;font-weight:600">$${t.portfolio_val.toFixed(2)}</td>
+      <td style="color:#4C525E;font-size:10px">${ts}</td>
+    </tr>`;
+  }).join('');
 }
 
 // ── Start ─────────────────────────────────────────────────────────────────────

@@ -608,6 +608,55 @@
         <div class="an-no-data" id="an-no-trades" style="display:none">No completed trades yet — need both BUY &amp; SELL signals for the same pair.</div>
       </div>
     </div>
+
+    <!-- Portfolio Simulation -->
+    <div class="an-section" style="border-top:1px solid #2A2E39;">
+      <div class="an-section-title" style="margin-bottom:10px">Portfolio Simulation (Slicing Strategy)</div>
+
+      <!-- Sim controls -->
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:12px">
+        <label style="font-size:10px;color:#787B86;display:flex;align-items:center;gap:5px">
+          Start USDT
+          <input id="sim-usdt" type="number" min="1" step="10" value="100"
+            style="width:70px;background:#131722;color:#D1D4DC;border:1px solid #2A2E39;border-radius:3px;padding:3px 6px;font-size:11px;outline:none">
+        </label>
+        <label style="font-size:10px;color:#787B86;display:flex;align-items:center;gap:5px">
+          Buy %/signal
+          <input id="sim-buy-pct" type="number" min="1" max="100" step="1" value="10"
+            style="width:55px;background:#131722;color:#D1D4DC;border:1px solid #2A2E39;border-radius:3px;padding:3px 6px;font-size:11px;outline:none">
+        </label>
+        <label style="font-size:10px;color:#787B86;display:flex;align-items:center;gap:5px">
+          Sell %/signal
+          <input id="sim-sell-pct" type="number" min="1" max="100" step="1" value="100"
+            style="width:55px;background:#131722;color:#D1D4DC;border:1px solid #2A2E39;border-radius:3px;padding:3px 6px;font-size:11px;outline:none">
+        </label>
+        <button id="sim-run" class="an-refresh-btn">▶ Run</button>
+      </div>
+
+      <!-- Sim result cards -->
+      <div class="an-cards" id="sim-cards" style="border:1px solid #2A2E39;border-radius:6px;overflow:hidden;margin-bottom:12px">
+        <div class="an-card"><div class="an-card-val" id="sim-v-final">—</div><div class="an-card-lbl">Final Value</div></div>
+        <div class="an-card"><div class="an-card-val" id="sim-v-return">—</div><div class="an-card-lbl">Total Return</div></div>
+        <div class="an-card"><div class="an-card-val" id="sim-v-cash">—</div><div class="an-card-lbl">Cash USDT</div></div>
+        <div class="an-card"><div class="an-card-val" id="sim-v-holding">—</div><div class="an-card-lbl">Holdings Value</div></div>
+        <div class="an-card"><div class="an-card-val" id="sim-v-count">—</div><div class="an-card-lbl">Sim Trades</div></div>
+      </div>
+
+      <!-- Holdings -->
+      <div id="sim-holdings-wrap" style="display:none;margin-bottom:10px">
+        <div style="font-size:10px;color:#4C525E;margin-bottom:4px">Open Holdings</div>
+        <div id="sim-holdings" style="display:flex;gap:6px;flex-wrap:wrap"></div>
+      </div>
+
+      <!-- Sim trade log -->
+      <div class="an-trades-wrap" style="max-height:240px">
+        <table class="an-table" style="width:100%">
+          <thead><tr><th>Symbol</th><th>IV</th><th>Dir</th><th>Conf</th><th>Price</th><th>USDT ±</th><th>Balance</th><th>Portfolio</th><th>Time</th></tr></thead>
+          <tbody id="sim-trades"></tbody>
+        </table>
+        <div class="an-no-data" id="sim-no-data" style="display:none">No simulation trades yet — need BUY/SELL signals in the selected period.</div>
+      </div>
+    </div>
   </div>
 </div>
 

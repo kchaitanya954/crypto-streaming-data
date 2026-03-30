@@ -166,6 +166,111 @@ async def api_delete_trigger(request: Request, trigger_id: int):
 _PERIOD_SECS = {"1h": 3600, "4h": 14400, "1d": 86400, "7d": 604800, "30d": 2592000}
 
 
+def _simulate_portfolio(
+    signals: list[dict],
+    initial_usdt: float,
+    buy_pct: float,
+    sell_pct: float,
+) -> dict:
+    """
+    Slicing portfolio simulation.
+
+    BUY signal  → spend buy_pct% of available USDT on that coin.
+    SELL signal → sell sell_pct% of that coin's holdings back to USDT.
+
+    Holdings are tracked per base currency (e.g. BTC for BTCUSDT).
+    USDT pool is shared across all symbols.
+    """
+    usdt: float = initial_usdt
+    holdings: dict[str, float] = {}   # base_currency → coin amount
+    sim_trades: list[dict] = []
+
+    # track last seen price per symbol for final valuation
+    last_price: dict[str, float] = {}
+
+    for sig in signals:   # oldest-first
+        sym   = sig["symbol"]           # e.g. "BTCUSDT"
+        price = sig["entry_price"]
+        last_price[sym] = price
+
+        # Derive base currency: strip known quote suffixes
+        base = sym
+        for quote in ("USDT", "BTC", "ETH", "BNB", "INR"):
+            if sym.endswith(quote):
+                base = sym[: -len(quote)]
+                break
+
+        if sig["direction"] == "BUY":
+            spend = usdt * (buy_pct / 100.0)
+            if spend < 0.001:
+                continue
+            coins = spend / price
+            usdt -= spend
+            holdings[base] = holdings.get(base, 0.0) + coins
+            portfolio_val = usdt + sum(
+                holdings.get(b, 0) * last_price.get(b + "USDT", last_price.get(sym, price))
+                for b in holdings
+            )
+            sim_trades.append({
+                "time":          sig["open_time"] // 1000,
+                "symbol":        sym,
+                "interval":      sig["interval"],
+                "direction":     "BUY",
+                "confidence":    sig["confidence"],
+                "price":         round(price, 4),
+                "usdt_spent":    round(spend, 4),
+                "coins_bought":  round(coins, 8),
+                "usdt_balance":  round(usdt, 4),
+                "portfolio_val": round(portfolio_val, 4),
+            })
+
+        elif sig["direction"] == "SELL":
+            coin_held = holdings.get(base, 0.0)
+            if coin_held < 1e-10:
+                continue
+            coins_sold = coin_held * (sell_pct / 100.0)
+            received   = coins_sold * price
+            usdt      += received
+            holdings[base] = coin_held - coins_sold
+            portfolio_val = usdt + sum(
+                holdings.get(b, 0) * last_price.get(b + "USDT", last_price.get(sym, price))
+                for b in holdings
+            )
+            sim_trades.append({
+                "time":           sig["open_time"] // 1000,
+                "symbol":         sym,
+                "interval":       sig["interval"],
+                "direction":      "SELL",
+                "confidence":     sig["confidence"],
+                "price":          round(price, 4),
+                "usdt_received":  round(received, 4),
+                "coins_sold":     round(coins_sold, 8),
+                "usdt_balance":   round(usdt, 4),
+                "portfolio_val":  round(portfolio_val, 4),
+            })
+
+    # Final valuation: cash + mark holdings at last seen price
+    holding_value = sum(
+        holdings.get(base, 0) * last_price.get(base + "USDT", 0)
+        for base in holdings
+    )
+    final_value   = usdt + holding_value
+    total_return  = (final_value - initial_usdt) / initial_usdt * 100
+
+    return {
+        "initial_usdt":       round(initial_usdt, 2),
+        "buy_pct":            buy_pct,
+        "sell_pct":           sell_pct,
+        "final_cash_usdt":    round(usdt, 4),
+        "final_holding_usdt": round(holding_value, 4),
+        "final_value_usdt":   round(final_value, 4),
+        "total_return_pct":   round(total_return, 3),
+        "holdings":           {k: round(v, 8) for k, v in holdings.items() if v > 1e-10},
+        "sim_trades":         sim_trades[-100:],
+        "sim_trade_count":    len(sim_trades),
+    }
+
+
 def _pair_signals(signals: list[dict]) -> tuple[list[dict], Optional[dict]]:
     """
     Pair consecutive direction-flipping signals into completed trades.
@@ -204,11 +309,14 @@ def _pair_signals(signals: list[dict]) -> tuple[list[dict], Optional[dict]]:
 
 @app.get("/api/analytics")
 async def api_analytics(
-    request:    Request,
-    symbol:     str = Query(default="ALL"),
-    interval:   str = Query(default="ALL"),
-    confidence: str = Query(default="ALL"),
-    period:     str = Query(default="1d"),
+    request:      Request,
+    symbol:       str   = Query(default="ALL"),
+    interval:     str   = Query(default="ALL"),
+    confidence:   str   = Query(default="ALL"),
+    period:       str   = Query(default="1d"),
+    initial_usdt: float = Query(default=100.0),
+    buy_pct:      float = Query(default=10.0),
+    sell_pct:     float = Query(default=100.0),
 ):
     """
     Signal performance analytics: pairs BUY→SELL (and SELL→BUY) signals into
@@ -292,6 +400,7 @@ async def api_analytics(
         "by_confidence":  by_confidence,
         "by_symbol":      by_symbol,
         "trades":         all_trades[-100:],   # most recent 100 trades
+        "simulation":     _simulate_portfolio(signals, initial_usdt, buy_pct, sell_pct),
     }
 
 
