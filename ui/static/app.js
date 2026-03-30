@@ -285,6 +285,7 @@ function onSignal(msg) {
   addSignalCard(msg, msg.trigger_matched);
   pushNotification(msg);
   mainChart.timeScale().scrollToRealTime();
+  if (analyticsOpen) loadAnalytics();
 }
 
 // ── Historical signal pre-load ────────────────────────────────────────────────
@@ -608,6 +609,146 @@ loadTriggers();
   toggle.addEventListener('click',  openSidebar);
   overlay.addEventListener('click', closeSidebar);
 }());
+
+// ── Analytics ─────────────────────────────────────────────────────────────────
+
+let analyticsOpen = false;
+
+document.getElementById('analytics-btn').addEventListener('click', () => {
+  document.getElementById('analytics-modal').classList.add('open');
+  analyticsOpen = true;
+  loadAnalytics();
+});
+
+document.getElementById('an-close').addEventListener('click', closeAnalytics);
+document.getElementById('analytics-modal').addEventListener('click', e => {
+  if (e.target === document.getElementById('analytics-modal')) closeAnalytics();
+});
+document.getElementById('an-refresh').addEventListener('click', loadAnalytics);
+document.getElementById('an-symbol').addEventListener('change', loadAnalytics);
+document.getElementById('an-conf').addEventListener('change', loadAnalytics);
+document.getElementById('an-period').addEventListener('change', loadAnalytics);
+
+function closeAnalytics() {
+  document.getElementById('analytics-modal').classList.remove('open');
+  analyticsOpen = false;
+}
+
+function pct(v, decimals = 2) {
+  const s = (v >= 0 ? '+' : '') + v.toFixed(decimals) + '%';
+  return s;
+}
+function pctClass(v) { return v > 0 ? 'pos' : v < 0 ? 'neg' : 'neu'; }
+
+function loadAnalytics() {
+  const sym    = document.getElementById('an-symbol').value;
+  const conf   = document.getElementById('an-conf').value;
+  const period = document.getElementById('an-period').value;
+  const params = new URLSearchParams({ symbol: sym, confidence: conf, period });
+  fetch(`/api/analytics?${params}`)
+    .then(r => r.json())
+    .then(renderAnalytics)
+    .catch(() => {});
+}
+
+function renderAnalytics(d) {
+  if (d.error) return;
+
+  // Populate symbol dropdown from by_symbol keys (keep ALL + seen symbols)
+  const symSel = document.getElementById('an-symbol');
+  const curSym = symSel.value;
+  const known  = new Set(Object.keys(d.by_symbol));
+  [...symSel.options].forEach(o => { if (o.value !== 'ALL') o.remove(); });
+  known.forEach(s => {
+    const o = document.createElement('option');
+    o.value = o.textContent = s;
+    if (s === curSym) o.selected = true;
+    symSel.appendChild(o);
+  });
+
+  // Summary cards
+  const n = d.total_trades;
+  const setCard = (id, val, cls) => {
+    const el = document.getElementById(id);
+    el.textContent = val;
+    el.className = 'an-card-val' + (cls ? ' ' + cls : '');
+  };
+
+  setCard('an-v-trades',  n || '—');
+  setCard('an-v-winrate', n ? d.win_rate + '%' : '—',  n ? pctClass(d.win_rate - 50) : '');
+  setCard('an-v-pnl',     n ? pct(d.total_pnl_pct) : '—', n ? pctClass(d.total_pnl_pct) : '');
+  setCard('an-v-gain',    d.avg_gain_pct ? pct(d.avg_gain_pct) : '—', 'pos');
+  setCard('an-v-loss',    d.avg_loss_pct ? pct(d.avg_loss_pct) : '—', 'neg');
+  setCard('an-v-best',    d.best_trade_pct  ? pct(d.best_trade_pct)  : '—', 'pos');
+  setCard('an-v-worst',   d.worst_trade_pct ? pct(d.worst_trade_pct) : '—', 'neg');
+  setCard('an-v-sigs',    d.total_signals || '—');
+
+  // Open positions
+  const openWrap = document.getElementById('an-open-wrap');
+  const openList = document.getElementById('an-open-list');
+  if (d.open_positions && d.open_positions.length > 0) {
+    openWrap.style.display = '';
+    openList.innerHTML = d.open_positions.map(p => `
+      <div class="an-pos-chip ${p.direction}">
+        <span class="an-pos-dir ${p.direction}">${p.direction}</span>
+        <span>${p.symbol} ${p.interval}</span>
+        <span style="color:#787B86">@ $${p.entry_price.toFixed(2)}</span>
+        <span style="color:#4C525E;font-size:9px">${p.confidence}</span>
+      </div>`).join('');
+  } else {
+    openWrap.style.display = 'none';
+  }
+
+  // By-symbol table
+  const symBody = document.getElementById('an-by-symbol');
+  symBody.innerHTML = Object.entries(d.by_symbol).map(([sym, s]) => `
+    <tr>
+      <td style="font-weight:600;color:#D1D4DC">${sym}</td>
+      <td>${s.trades}</td>
+      <td class="${pctClass(s.win_rate - 50)}">${s.win_rate}%</td>
+      <td class="${pctClass(s.total_pnl)}">${pct(s.total_pnl)}</td>
+      <td class="${pctClass(s.avg_pnl)}">${pct(s.avg_pnl)}</td>
+    </tr>`).join('') || '<tr><td colspan="5" style="color:#4C525E;text-align:center">No data</td></tr>';
+
+  // By-confidence table
+  const confBody = document.getElementById('an-by-conf');
+  const confColors = { HIGH: '#26A69A', MEDIUM: '#FF9800', LOW: '#787B86' };
+  confBody.innerHTML = Object.entries(d.by_confidence).map(([conf, s]) => `
+    <tr>
+      <td style="font-weight:700;color:${confColors[conf]||'#D1D4DC'}">${conf}</td>
+      <td>${s.trades}</td>
+      <td class="${pctClass(s.win_rate - 50)}">${s.win_rate}%</td>
+      <td class="${pctClass(s.total_pnl)}">${pct(s.total_pnl)}</td>
+      <td class="${pctClass(s.avg_pnl)}">${pct(s.avg_pnl)}</td>
+    </tr>`).join('') || '<tr><td colspan="5" style="color:#4C525E;text-align:center">No data</td></tr>';
+
+  // Trades table
+  const tradesBody = document.getElementById('an-trades');
+  const noTrades   = document.getElementById('an-no-trades');
+  if (!d.trades || d.trades.length === 0) {
+    tradesBody.innerHTML = '';
+    noTrades.style.display = '';
+  } else {
+    noTrades.style.display = 'none';
+    tradesBody.innerHTML = [...d.trades].reverse().map(t => {
+      const dt = new Date(t.open_time * 1000);
+      const ts = dt.toLocaleDateString([], {month:'short',day:'numeric'}) + ' ' +
+                 dt.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+      const dirColor = t.direction === 'BUY' ? '#26A69A' : '#EF5350';
+      const confC    = confColors[t.confidence] || '#D1D4DC';
+      return `<tr>
+        <td style="font-weight:600;color:#D1D4DC">${t.symbol}</td>
+        <td style="color:#787B86">${t.interval}</td>
+        <td style="color:${dirColor};font-weight:700">${t.direction}</td>
+        <td style="color:${confC};font-size:9px;font-weight:700">${t.confidence}</td>
+        <td>$${t.entry_price.toFixed(2)}</td>
+        <td>$${t.exit_price.toFixed(2)}</td>
+        <td class="${pctClass(t.pnl_pct)}" style="font-weight:700">${pct(t.pnl_pct)}</td>
+        <td style="color:#4C525E;font-size:10px">${ts}</td>
+      </tr>`;
+    }).join('');
+  }
+}
 
 // ── Start ─────────────────────────────────────────────────────────────────────
 

@@ -243,6 +243,125 @@
     .resize-handle:hover,
     .resize-handle.dragging { background: #2196F3; }
 
+    /* ── Analytics modal ── */
+    #analytics-modal {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.72);
+      z-index: 200;
+      overflow-y: auto;
+      padding: 16px;
+    }
+    #analytics-modal.open { display: block; }
+
+    .an-panel {
+      background: #1E222D;
+      border: 1px solid #2A2E39;
+      border-radius: 8px;
+      max-width: 1000px;
+      margin: 0 auto;
+      overflow: hidden;
+    }
+
+    .an-header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 12px 16px;
+      background: #131722;
+      border-bottom: 1px solid #2A2E39;
+      flex-wrap: wrap;
+    }
+    .an-title { font-size: 13px; font-weight: 700; letter-spacing: 0.5px; color: #D1D4DC; flex: 1; min-width: 120px; }
+
+    .an-filters { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+    .an-sel {
+      background: #1E222D; color: #D1D4DC; border: 1px solid #2A2E39;
+      border-radius: 4px; padding: 3px 8px; font-size: 11px; outline: none; cursor: pointer;
+    }
+    .an-sel:focus { border-color: #2196F3; }
+
+    .an-refresh-btn {
+      background: #2A2E39; color: #D1D4DC; border: none; border-radius: 4px;
+      padding: 3px 10px; font-size: 11px; cursor: pointer;
+    }
+    .an-refresh-btn:hover { background: #363a48; }
+
+    .an-close-btn {
+      background: transparent; border: none; color: #787B86;
+      font-size: 18px; cursor: pointer; line-height: 1; padding: 0 4px; margin-left: auto;
+    }
+    .an-close-btn:hover { color: #EF5350; }
+
+    /* Summary stat cards */
+    .an-cards {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
+      gap: 1px;
+      background: #2A2E39;
+      border-bottom: 1px solid #2A2E39;
+    }
+    .an-card {
+      background: #131722;
+      padding: 12px 14px;
+      text-align: center;
+    }
+    .an-card-val { font-size: 20px; font-weight: 700; color: #D1D4DC; }
+    .an-card-val.pos { color: #26A69A; }
+    .an-card-val.neg { color: #EF5350; }
+    .an-card-val.neu { color: #FF9800; }
+    .an-card-lbl { font-size: 10px; color: #4C525E; margin-top: 3px; text-transform: uppercase; letter-spacing: 0.5px; }
+
+    /* Open positions */
+    .an-open-pos {
+      display: flex; gap: 8px; flex-wrap: wrap;
+      padding: 10px 16px; border-bottom: 1px solid #2A2E39;
+    }
+    .an-pos-chip {
+      display: flex; align-items: center; gap: 6px;
+      background: #131722; border: 1px solid #2A2E39; border-radius: 4px;
+      padding: 4px 10px; font-size: 11px;
+    }
+    .an-pos-chip.BUY  { border-color: #26A69A; }
+    .an-pos-chip.SELL { border-color: #EF5350; }
+    .an-pos-dir.BUY  { color: #26A69A; font-weight: 700; }
+    .an-pos-dir.SELL { color: #EF5350; font-weight: 700; }
+
+    /* Tables section */
+    .an-tables { display: grid; grid-template-columns: 1fr 1fr; border-bottom: 1px solid #2A2E39; }
+    .an-section { padding: 14px 16px; }
+    .an-section + .an-section { border-left: 1px solid #2A2E39; }
+    .an-section-title { font-size: 10px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase; color: #4C525E; margin-bottom: 8px; }
+
+    .an-table { width: 100%; border-collapse: collapse; font-size: 11px; }
+    .an-table th { color: #4C525E; font-weight: 600; padding: 3px 6px; text-align: left; border-bottom: 1px solid #2A2E39; }
+    .an-table td { padding: 4px 6px; border-bottom: 1px solid #1A1D27; color: #B2B5BE; }
+    .an-table tr:last-child td { border-bottom: none; }
+    .an-table .pos { color: #26A69A; }
+    .an-table .neg { color: #EF5350; }
+    .an-table .neu { color: #FF9800; }
+
+    /* Trades section */
+    .an-trades-wrap { padding: 14px 16px; max-height: 320px; overflow-y: auto; }
+    .an-trades-wrap::-webkit-scrollbar       { width: 3px; }
+    .an-trades-wrap::-webkit-scrollbar-thumb { background: #2A2E39; }
+
+    .an-no-data { font-size: 12px; color: #4C525E; text-align: center; padding: 20px 0; }
+
+    @media (max-width: 600px) {
+      .an-tables { grid-template-columns: 1fr; }
+      .an-section + .an-section { border-left: none; border-top: 1px solid #2A2E39; }
+    }
+
+    /* Analytics topbar button */
+    #analytics-btn {
+      background: transparent; color: #787B86; border: 1px solid #2A2E39;
+      border-radius: 4px; padding: 3px 10px; font-size: 11px; cursor: pointer;
+      flex-shrink: 0;
+    }
+    #analytics-btn:hover { background: #2A2E39; color: #D1D4DC; }
+
     /* ── Mobile sidebar toggle ── */
     #sidebar-toggle {
       display: none;
@@ -324,6 +443,7 @@
   <button class="iv-btn" data-iv="1h">1h</button>
   <button class="iv-btn" data-iv="4h">4h</button>
   <div id="status-wrap">
+    <button id="analytics-btn" title="Signal performance analytics">Analytics</button>
     <div id="status-dot"></div>
     <span id="status-text">Connecting…</span>
   </div>
@@ -399,6 +519,85 @@
     </div>
   </div>
 
+</div>
+
+<!-- Analytics modal -->
+<div id="analytics-modal">
+  <div class="an-panel">
+    <!-- Header + filters -->
+    <div class="an-header">
+      <span class="an-title">Signal Performance</span>
+      <div class="an-filters">
+        <select id="an-symbol" class="an-sel">
+          <option value="ALL">All Symbols</option>
+        </select>
+        <select id="an-conf" class="an-sel">
+          <option value="ALL">All Confidence</option>
+          <option value="HIGH">HIGH</option>
+          <option value="MEDIUM">MEDIUM</option>
+          <option value="LOW">LOW</option>
+        </select>
+        <select id="an-period" class="an-sel">
+          <option value="1h">Last 1 Hour</option>
+          <option value="4h">Last 4 Hours</option>
+          <option value="1d" selected>Last 24 Hours</option>
+          <option value="7d">Last 7 Days</option>
+          <option value="30d">Last 30 Days</option>
+          <option value="all">All Time</option>
+        </select>
+        <button id="an-refresh" class="an-refresh-btn">⟳ Refresh</button>
+      </div>
+      <button class="an-close-btn" id="an-close">✕</button>
+    </div>
+
+    <!-- Summary cards -->
+    <div class="an-cards" id="an-cards">
+      <div class="an-card"><div class="an-card-val" id="an-v-trades">—</div><div class="an-card-lbl">Trades</div></div>
+      <div class="an-card"><div class="an-card-val" id="an-v-winrate">—</div><div class="an-card-lbl">Win Rate</div></div>
+      <div class="an-card"><div class="an-card-val" id="an-v-pnl">—</div><div class="an-card-lbl">Total P&amp;L</div></div>
+      <div class="an-card"><div class="an-card-val" id="an-v-gain">—</div><div class="an-card-lbl">Avg Gain</div></div>
+      <div class="an-card"><div class="an-card-val" id="an-v-loss">—</div><div class="an-card-lbl">Avg Loss</div></div>
+      <div class="an-card"><div class="an-card-val" id="an-v-best">—</div><div class="an-card-lbl">Best Trade</div></div>
+      <div class="an-card"><div class="an-card-val" id="an-v-worst">—</div><div class="an-card-lbl">Worst Trade</div></div>
+      <div class="an-card"><div class="an-card-val" id="an-v-sigs">—</div><div class="an-card-lbl">Signals</div></div>
+    </div>
+
+    <!-- Open positions -->
+    <div id="an-open-wrap" style="display:none;padding:10px 16px;border-bottom:1px solid #2A2E39;">
+      <div class="an-section-title">Open Positions</div>
+      <div class="an-open-pos" id="an-open-list"></div>
+    </div>
+
+    <!-- By-symbol / By-confidence tables -->
+    <div class="an-tables">
+      <div class="an-section">
+        <div class="an-section-title">By Symbol</div>
+        <table class="an-table">
+          <thead><tr><th>Symbol</th><th>Trades</th><th>Win%</th><th>Total P&L</th><th>Avg P&L</th></tr></thead>
+          <tbody id="an-by-symbol"></tbody>
+        </table>
+      </div>
+      <div class="an-section">
+        <div class="an-section-title">By Confidence</div>
+        <table class="an-table">
+          <thead><tr><th>Level</th><th>Trades</th><th>Win%</th><th>Total P&L</th><th>Avg P&L</th></tr></thead>
+          <tbody id="an-by-conf"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Trade history -->
+    <div class="an-section" style="border-top:1px solid #2A2E39;">
+      <div class="an-section-title">Recent Trades (paired signals)</div>
+      <div class="an-trades-wrap">
+        <table class="an-table" style="width:100%">
+          <thead><tr><th>Symbol</th><th>IV</th><th>Dir</th><th>Conf</th><th>Entry</th><th>Exit</th><th>P&L%</th><th>Opened</th></tr></thead>
+          <tbody id="an-trades"></tbody>
+        </table>
+        <div class="an-no-data" id="an-no-trades" style="display:none">No completed trades yet — need both BUY &amp; SELL signals for the same pair.</div>
+      </div>
+    </div>
+  </div>
 </div>
 
 <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>

@@ -165,6 +165,36 @@ async def get_recent_signals(
     return result
 
 
+async def get_signals_for_analytics(
+    db: aiosqlite.Connection,
+    symbol: Optional[str] = None,
+    interval: Optional[str] = None,
+    confidence: Optional[str] = None,
+    since: Optional[int] = None,
+) -> list[dict]:
+    """Return signals for analytics (oldest-first), filtered by params."""
+    conditions, params = [], []
+    if symbol:
+        conditions.append("symbol = ?"); params.append(symbol.upper())
+    if interval:
+        conditions.append("interval = ?"); params.append(interval)
+    if confidence:
+        conditions.append("confidence = ?"); params.append(confidence.upper())
+    if since:
+        conditions.append("created_at >= ?"); params.append(since)
+    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    cursor = await db.execute(
+        f"SELECT * FROM signals {where} ORDER BY open_time ASC", params
+    )
+    rows = await cursor.fetchall()
+    result = []
+    for row in rows:
+        d = dict(row)
+        d["reasons"] = json.loads(d["reasons"]) if d["reasons"] else []
+        result.append(d)
+    return result
+
+
 async def get_open_orders(db: aiosqlite.Connection) -> list[dict]:
     """Return all orders with status 'open' or 'pending'."""
     cursor = await db.execute(

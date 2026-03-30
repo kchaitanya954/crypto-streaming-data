@@ -18,6 +18,8 @@ Run via orchestrator (full stack):
 
 import asyncio
 import json as _json
+import time as _time
+from collections import defaultdict
 from dataclasses import asdict
 from pathlib import Path
 from typing import Optional
@@ -157,6 +159,140 @@ async def api_delete_trigger(request: Request, trigger_id: int):
             trig["symbol"], trig["interval"], trig["min_confidence"],
         )
     return {"ok": True}
+
+
+# ── Analytics endpoint ─────────────────────────────────────────────────────────
+
+_PERIOD_SECS = {"1h": 3600, "4h": 14400, "1d": 86400, "7d": 604800, "30d": 2592000}
+
+
+def _pair_signals(signals: list[dict]) -> tuple[list[dict], Optional[dict]]:
+    """
+    Pair consecutive direction-flipping signals into completed trades.
+    Returns (trades_list, open_position_or_None).
+    Same-direction consecutive signals keep the FIRST entry (original entry price).
+    """
+    trades = []
+    open_trade: Optional[dict] = None
+
+    for sig in signals:  # already sorted oldest-first
+        if open_trade is None:
+            open_trade = sig
+        elif open_trade["direction"] != sig["direction"]:
+            if open_trade["direction"] == "BUY":
+                pnl_pct = (sig["entry_price"] - open_trade["entry_price"]) / open_trade["entry_price"] * 100
+            else:  # SELL → BUY short
+                pnl_pct = (open_trade["entry_price"] - sig["entry_price"]) / open_trade["entry_price"] * 100
+
+            trades.append({
+                "open_time":   open_trade["open_time"] // 1000,
+                "close_time":  sig["open_time"] // 1000,
+                "symbol":      open_trade["symbol"],
+                "interval":    open_trade["interval"],
+                "direction":   open_trade["direction"],
+                "entry_price": open_trade["entry_price"],
+                "exit_price":  sig["entry_price"],
+                "pnl_pct":     round(pnl_pct, 3),
+                "won":         pnl_pct > 0,
+                "confidence":  open_trade["confidence"],
+            })
+            open_trade = sig
+        # else: same direction — keep first entry, discard duplicate
+
+    return trades, open_trade
+
+
+@app.get("/api/analytics")
+async def api_analytics(
+    request:    Request,
+    symbol:     str = Query(default="ALL"),
+    interval:   str = Query(default="ALL"),
+    confidence: str = Query(default="ALL"),
+    period:     str = Query(default="1d"),
+):
+    """
+    Signal performance analytics: pairs BUY→SELL (and SELL→BUY) signals into
+    trades and computes win-rate, P&L, and breakdowns by symbol and confidence.
+    """
+    db = getattr(request.app.state, "db", None)
+    if db is None:
+        return JSONResponse({"error": "DB not configured"}, status_code=503)
+
+    now   = int(_time.time())
+    since = now - _PERIOD_SECS[period] if period in _PERIOD_SECS else None
+
+    signals = await queries.get_signals_for_analytics(
+        db,
+        symbol     = None if symbol     == "ALL" else symbol,
+        interval   = None if interval   == "ALL" else interval,
+        confidence = None if confidence == "ALL" else confidence,
+        since      = since,
+    )
+
+    # Group per (symbol, interval) then pair within each group
+    groups: dict[tuple, list] = defaultdict(list)
+    for sig in signals:
+        groups[(sig["symbol"], sig["interval"])].append(sig)
+
+    all_trades: list[dict] = []
+    open_positions: list[dict] = []
+
+    for (sym, iv), grp in groups.items():
+        trades, open_pos = _pair_signals(grp)
+        all_trades.extend(trades)
+        if open_pos:
+            open_positions.append({
+                "symbol":      sym,
+                "interval":    iv,
+                "direction":   open_pos["direction"],
+                "entry_price": open_pos["entry_price"],
+                "confidence":  open_pos["confidence"],
+                "open_time":   open_pos["open_time"] // 1000,
+            })
+
+    all_trades.sort(key=lambda t: t["close_time"])
+
+    wins   = [t for t in all_trades if t["pnl_pct"] > 0]
+    losses = [t for t in all_trades if t["pnl_pct"] <= 0]
+    n      = len(all_trades)
+
+    def _stats(subset: list[dict]) -> dict:
+        if not subset:
+            return {"trades": 0, "wins": 0, "win_rate": 0, "total_pnl": 0, "avg_pnl": 0}
+        w = [t for t in subset if t["pnl_pct"] > 0]
+        return {
+            "trades":    len(subset),
+            "wins":      len(w),
+            "win_rate":  round(len(w) / len(subset) * 100, 1),
+            "total_pnl": round(sum(t["pnl_pct"] for t in subset), 3),
+            "avg_pnl":   round(sum(t["pnl_pct"] for t in subset) / len(subset), 3),
+        }
+
+    by_confidence = {
+        conf: _stats([t for t in all_trades if t["confidence"] == conf])
+        for conf in ("HIGH", "MEDIUM", "LOW")
+        if any(t["confidence"] == conf for t in all_trades)
+    }
+
+    by_symbol = {
+        sym: _stats([t for t in all_trades if t["symbol"] == sym])
+        for sym in sorted({t["symbol"] for t in all_trades})
+    }
+
+    return {
+        "total_signals":  len(signals),
+        "total_trades":   n,
+        "open_positions": open_positions,
+        "win_rate":       round(len(wins) / n * 100, 1) if n else 0,
+        "avg_gain_pct":   round(sum(t["pnl_pct"] for t in wins)   / len(wins)   if wins   else 0, 3),
+        "avg_loss_pct":   round(sum(t["pnl_pct"] for t in losses) / len(losses) if losses else 0, 3),
+        "total_pnl_pct":  round(sum(t["pnl_pct"] for t in all_trades), 3),
+        "best_trade_pct": round(max((t["pnl_pct"] for t in all_trades), default=0), 3),
+        "worst_trade_pct":round(min((t["pnl_pct"] for t in all_trades), default=0), 3),
+        "by_confidence":  by_confidence,
+        "by_symbol":      by_symbol,
+        "trades":         all_trades[-100:],   # most recent 100 trades
+    }
 
 
 # ── WebSocket endpoint ─────────────────────────────────────────────────────────
