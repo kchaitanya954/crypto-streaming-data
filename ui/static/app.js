@@ -626,6 +626,7 @@ document.getElementById('analytics-modal').addEventListener('click', e => {
 });
 document.getElementById('an-refresh').addEventListener('click', loadAnalytics);
 document.getElementById('an-symbol').addEventListener('change', loadAnalytics);
+document.getElementById('an-interval').addEventListener('change', loadAnalytics);
 document.getElementById('an-conf').addEventListener('change', loadAnalytics);
 document.getElementById('an-period').addEventListener('change', loadAnalytics);
 
@@ -641,10 +642,11 @@ function pct(v, decimals = 2) {
 function pctClass(v) { return v > 0 ? 'pos' : v < 0 ? 'neg' : 'neu'; }
 
 function loadAnalytics() {
-  const sym    = document.getElementById('an-symbol').value;
-  const conf   = document.getElementById('an-conf').value;
-  const period = document.getElementById('an-period').value;
-  const params = new URLSearchParams({ symbol: sym, confidence: conf, period });
+  const sym      = document.getElementById('an-symbol').value;
+  const interval = document.getElementById('an-interval').value;
+  const conf     = document.getElementById('an-conf').value;
+  const period   = document.getElementById('an-period').value;
+  const params   = new URLSearchParams({ symbol: sym, interval, confidence: conf, period });
   fetch(`/api/analytics?${params}`)
     .then(r => r.json())
     .then(renderAnalytics)
