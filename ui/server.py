@@ -408,13 +408,17 @@ async def api_analytics(
 
 @app.websocket("/ws")
 async def ws_endpoint(
-    websocket: WebSocket,
-    symbol:    str = Query(default="ethusdt"),
-    interval:  str = Query(default="1m"),
+    websocket:  WebSocket,
+    symbol:     str   = Query(default="ethusdt"),
+    interval:   str   = Query(default="1m"),
+    adx_min:    float = Query(default=30.0),
+    min_conf:   int   = Query(default=2),
+    cooldown:   int   = Query(default=3),
 ):
     await websocket.accept()
     task = asyncio.create_task(
-        _connection_loop(websocket, symbol.lower(), interval, websocket.app)
+        _connection_loop(websocket, symbol.lower(), interval, websocket.app,
+                         adx_min=adx_min, min_conf=min_conf, cooldown=cooldown)
     )
     try:
         while True:
@@ -426,13 +430,26 @@ async def ws_endpoint(
         await asyncio.gather(task, return_exceptions=True)
 
 
-async def _connection_loop(ws: WebSocket, symbol: str, interval: str, app_state) -> None:
+async def _connection_loop(
+    ws: WebSocket,
+    symbol: str,
+    interval: str,
+    app_state,
+    *,
+    adx_min:  float = 30.0,
+    min_conf: int   = 2,
+    cooldown: int   = 3,
+) -> None:
     """Fetch history, send it, then stream live candles + signals to one client."""
     db       = getattr(app_state.state, "db",           None)
     tg_bot   = getattr(app_state.state, "telegram_bot", None)
     settings = getattr(app_state.state, "settings",     None)
 
-    detector = SignalDetector()
+    detector = SignalDetector(
+        adx_threshold=adx_min,
+        min_confirmations=min_conf,
+        cooldown_bars=cooldown,
+    )
     try:
         await ws.send_json({"type": "meta", "symbol": symbol.upper(), "interval": interval})
 

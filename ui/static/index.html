@@ -62,6 +62,45 @@
     #status-dot.ok { background: #26A69A; }
     #status-text   { font-size: 10px; color: #787B86; }
 
+    /* ── Sensitivity bar ── */
+    #sensitivity-bar {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 4px 14px;
+      background: #181C27;
+      border-bottom: 1px solid #2A2E39;
+      flex-shrink: 0;
+    }
+
+    .sens-group {
+      display: flex;
+      align-items: center;
+      gap: 3px;
+    }
+
+    .sens-label {
+      font-size: 10px;
+      color: #4C525E;
+      margin-right: 3px;
+      white-space: nowrap;
+    }
+
+    .sens-btn {
+      background: transparent;
+      color: #787B86;
+      border: 1px solid #2A2E39;
+      border-radius: 3px;
+      padding: 2px 7px;
+      font-size: 10px;
+      cursor: pointer;
+      transition: background 0.12s, color 0.12s;
+    }
+    .sens-btn:hover  { background: #2A2E39; color: #D1D4DC; }
+    .sens-btn.active { background: #364153; color: #D1D4DC; border-color: #4C6080; }
+
+    .sens-sep { width: 1px; height: 14px; background: #2A2E39; margin: 0 4px; }
+
     /* ── Main body ── */
     #body { flex: 1; display: flex; min-height: 0; }
 
@@ -446,6 +485,32 @@
     <button id="analytics-btn" title="Signal performance analytics">Analytics</button>
     <div id="status-dot"></div>
     <span id="status-text">Connecting…</span>
+  </div>
+</div>
+
+<!-- Sensitivity bar -->
+<div id="sensitivity-bar">
+  <div class="sens-group">
+    <span class="sens-label">ADX ≥</span>
+    <button class="sens-btn adx-btn" data-adx="20">20</button>
+    <button class="sens-btn adx-btn" data-adx="25">25</button>
+    <button class="sens-btn adx-btn active" data-adx="30">30</button>
+    <button class="sens-btn adx-btn" data-adx="35">35</button>
+  </div>
+  <div class="sens-sep"></div>
+  <div class="sens-group">
+    <span class="sens-label">Confidence</span>
+    <button class="sens-btn conf-btn" data-conf="1">ANY</button>
+    <button class="sens-btn conf-btn active" data-conf="2">MED+</button>
+    <button class="sens-btn conf-btn" data-conf="3">HIGH</button>
+  </div>
+  <div class="sens-sep"></div>
+  <div class="sens-group">
+    <span class="sens-label">Cooldown</span>
+    <button class="sens-btn cd-btn" data-cd="0">0</button>
+    <button class="sens-btn cd-btn active" data-cd="3">3</button>
+    <button class="sens-btn cd-btn" data-cd="5">5</button>
+    <button class="sens-btn cd-btn" data-cd="10">10</button>
   </div>
 </div>
 
