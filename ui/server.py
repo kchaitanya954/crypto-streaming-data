@@ -41,13 +41,17 @@ static_dir = Path(__file__).parent / "static"
 class TriggerCreate(BaseModel):
     symbol:         str
     interval:       str
-    min_confidence: str = "MEDIUM"
+    min_confidence: str            = "MEDIUM"
+    adx_threshold:  Optional[float] = None   # None = use interval-tier default
+    cooldown_bars:  Optional[int]   = None   # None = use interval-tier default
 
 class TriggerUpdate(BaseModel):
-    symbol:         Optional[str]  = None
-    interval:       Optional[str]  = None
-    min_confidence: Optional[str]  = None
-    active:         Optional[bool] = None
+    symbol:         Optional[str]   = None
+    interval:       Optional[str]   = None
+    min_confidence: Optional[str]   = None
+    active:         Optional[bool]  = None
+    adx_threshold:  Optional[float] = None
+    cooldown_bars:  Optional[int]   = None
 
 app = FastAPI()
 app.mount("/static", StaticFiles(directory=static_dir), name="static")
@@ -107,11 +111,20 @@ async def api_create_trigger(request: Request, body: TriggerCreate):
     sym  = body.symbol.upper()
     iv   = body.interval
     conf = body.min_confidence.upper()
-    tid  = await queries.create_trigger(db, sym, iv, conf)
+    tid  = await queries.create_trigger(
+        db, sym, iv, conf,
+        adx_threshold=body.adx_threshold,
+        cooldown_bars=body.cooldown_bars,
+    )
     if tg_bot and settings:
         from telegram_bot.alerts import send_trigger_alert
         await send_trigger_alert(tg_bot, settings.telegram_chat_id, "created", sym, iv, conf)
-    return {"id": tid, "symbol": sym, "interval": iv, "min_confidence": conf, "active": True}
+    return {
+        "id": tid, "symbol": sym, "interval": iv,
+        "min_confidence": conf, "active": True,
+        "adx_threshold": body.adx_threshold,
+        "cooldown_bars": body.cooldown_bars,
+    }
 
 
 @app.put("/api/triggers/{trigger_id}")
@@ -127,6 +140,8 @@ async def api_update_trigger(request: Request, trigger_id: int, body: TriggerUpd
         db, trigger_id,
         symbol=body.symbol, interval=body.interval,
         min_confidence=body.min_confidence, active=body.active,
+        adx_threshold=body.adx_threshold,
+        cooldown_bars=body.cooldown_bars,
     )
     if tg_bot and settings and trig:
         from telegram_bot.alerts import send_trigger_alert
@@ -491,7 +506,7 @@ async def _connection_loop(
                         try:
                             active_triggers = await queries.get_triggers(db)
                             trigger_matched = any(
-                                queries.trigger_matches(t, symbol, interval, signal.confidence)
+                                queries.trigger_matches(t, symbol, interval, signal.confidence, signal.adx_val)
                                 for t in active_triggers
                             )
                         except Exception:

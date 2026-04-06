@@ -244,14 +244,22 @@ async def create_trigger(
     symbol: str,
     interval: str,
     min_confidence: str = "MEDIUM",
+    adx_threshold: Optional[float] = None,
+    cooldown_bars: Optional[int] = None,
 ) -> int:
     """Insert a new trigger. Returns the new row id."""
     cursor = await db.execute(
-        "INSERT INTO triggers (symbol, interval, min_confidence, active, created_at) VALUES (?, ?, ?, 1, ?)",
-        (symbol.upper(), interval, min_confidence.upper(), int(time.time())),
+        """INSERT INTO triggers
+               (symbol, interval, min_confidence, adx_threshold, cooldown_bars, active, created_at)
+           VALUES (?, ?, ?, ?, ?, 1, ?)""",
+        (symbol.upper(), interval, min_confidence.upper(),
+         adx_threshold, cooldown_bars, int(time.time())),
     )
     await db.commit()
     return cursor.lastrowid
+
+
+_SENTINEL = object()
 
 
 async def update_trigger(
@@ -261,13 +269,17 @@ async def update_trigger(
     interval: Optional[str] = None,
     min_confidence: Optional[str] = None,
     active: Optional[bool] = None,
+    adx_threshold = _SENTINEL,
+    cooldown_bars  = _SENTINEL,
 ) -> None:
     """Update any subset of trigger fields."""
     fields, params = [], []
-    if symbol         is not None: fields.append("symbol = ?");         params.append(symbol.upper())
-    if interval       is not None: fields.append("interval = ?");       params.append(interval)
-    if min_confidence is not None: fields.append("min_confidence = ?"); params.append(min_confidence.upper())
-    if active         is not None: fields.append("active = ?");         params.append(1 if active else 0)
+    if symbol         is not None:      fields.append("symbol = ?");         params.append(symbol.upper())
+    if interval       is not None:      fields.append("interval = ?");       params.append(interval)
+    if min_confidence is not None:      fields.append("min_confidence = ?"); params.append(min_confidence.upper())
+    if active         is not None:      fields.append("active = ?");         params.append(1 if active else 0)
+    if adx_threshold  is not _SENTINEL: fields.append("adx_threshold = ?");  params.append(adx_threshold)
+    if cooldown_bars  is not _SENTINEL: fields.append("cooldown_bars = ?");  params.append(cooldown_bars)
     if not fields:
         return
     params.append(trigger_id)
@@ -281,10 +293,22 @@ async def delete_trigger(db: aiosqlite.Connection, trigger_id: int) -> None:
     await db.commit()
 
 
-def trigger_matches(trigger: dict, symbol: str, interval: str, confidence: str) -> bool:
+def trigger_matches(
+    trigger: dict,
+    symbol: str,
+    interval: str,
+    confidence: str,
+    adx_val: Optional[float] = None,
+) -> bool:
     """Return True if the signal meets the trigger's criteria."""
-    return (
-        trigger["symbol"].upper() == symbol.upper()
-        and trigger["interval"] == interval
-        and _CONF_ORDER.get(confidence.upper(), 0) >= _CONF_ORDER.get(trigger["min_confidence"].upper(), 0)
-    )
+    if trigger["symbol"].upper() != symbol.upper():
+        return False
+    if trigger["interval"] != interval:
+        return False
+    if _CONF_ORDER.get(confidence.upper(), 0) < _CONF_ORDER.get(trigger["min_confidence"].upper(), 0):
+        return False
+    # Per-trigger ADX filter: if set, signal's ADX must meet or exceed it
+    trig_adx = trigger.get("adx_threshold")
+    if trig_adx and adx_val is not None and adx_val < trig_adx:
+        return False
+    return True

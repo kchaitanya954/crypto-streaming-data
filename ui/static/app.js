@@ -470,6 +470,48 @@ function ivTier(iv) {
   return 'position';
 }
 
+const TIER_DEFAULTS = {
+  scalping: { adx: 12, cooldown: 2, conf: 1 },
+  intraday: { adx: 18, cooldown: 3, conf: 1 },
+  swing:    { adx: 20, cooldown: 5, conf: 1 },
+  position: { adx: 22, cooldown: 3, conf: 1 },
+};
+
+function applyTierToSensitivityBar(iv) {
+  const d = TIER_DEFAULTS[ivTier(iv)];
+  // Find closest ADX button and activate it
+  let closestAdx = null, minDiff = Infinity;
+  document.querySelectorAll('.adx-btn').forEach(b => {
+    const diff = Math.abs(parseFloat(b.dataset.adx) - d.adx);
+    if (diff < minDiff) { minDiff = diff; closestAdx = b; }
+  });
+  if (closestAdx) { activateBtn('.adx-btn', closestAdx); currentAdxMin = parseFloat(closestAdx.dataset.adx); }
+
+  // Confidence
+  document.querySelectorAll('.conf-btn').forEach(b => {
+    if (parseInt(b.dataset.conf, 10) === d.conf) { activateBtn('.conf-btn', b); currentMinConf = d.conf; }
+  });
+
+  // Cooldown: find closest button
+  let closestCd = null; minDiff = Infinity;
+  document.querySelectorAll('.cd-btn').forEach(b => {
+    const diff = Math.abs(parseInt(b.dataset.cd, 10) - d.cooldown);
+    if (diff < minDiff) { minDiff = diff; closestCd = b; }
+  });
+  if (closestCd) { activateBtn('.cd-btn', closestCd); currentCooldown = parseInt(closestCd.dataset.cd, 10); }
+}
+
+function applyTierToTriggerForm(iv) {
+  const d = TIER_DEFAULTS[ivTier(iv)];
+  const hint = document.getElementById('trig-tier-hint');
+  if (hint) hint.textContent = `tier: ${ivTier(iv)} · adx=${d.adx} cd=${d.cooldown}`;
+  // Set placeholders to show tier defaults; leave value blank (user can override)
+  const adxEl = document.getElementById('trig-adx');
+  const cdEl  = document.getElementById('trig-cd');
+  if (adxEl) adxEl.placeholder = d.adx;
+  if (cdEl)  cdEl.placeholder  = d.cooldown;
+}
+
 function applyInterval() {
   const n  = (document.getElementById('iv-num').value || '1').trim();
   const u  = document.getElementById('iv-unit').value;
@@ -484,6 +526,7 @@ function applyInterval() {
   errEl.textContent  = '';
   tierEl.textContent = ivTier(iv);
   currentInterval    = iv;
+  applyTierToSensitivityBar(iv);
   connect(currentSymbol, currentInterval);
 }
 
@@ -568,10 +611,13 @@ function renderTriggers(list) {
     const row = document.createElement('div');
     row.className = `trig-row${t.active ? '' : ' inactive'}`;
     row.dataset.id = t.id;
+    const adxHint = t.adx_threshold != null ? ` adx≥${t.adx_threshold}` : '';
+    const cdHint  = t.cooldown_bars  != null ? ` cd${t.cooldown_bars}`   : '';
     row.innerHTML =
       `<span class="trig-sym">${t.symbol}</span>` +
       `<span class="trig-iv">${t.interval}</span>` +
       `<span class="trig-conf trig-conf-${t.min_confidence}">${t.min_confidence}</span>` +
+      (adxHint || cdHint ? `<span style="font-size:8px;color:#4C525E">${adxHint}${cdHint}</span>` : '') +
       `<span class="trig-edit" title="Edit">✏</span>` +
       `<span class="trig-toggle" title="${t.active ? 'Disable' : 'Enable'}">${t.active ? '✓' : '○'}</span>` +
       `<span class="trig-del" title="Delete">✕</span>`;
@@ -595,6 +641,11 @@ function renderTriggers(list) {
   });
 }
 
+// Auto-fill tier hints when interval changes inside the trigger form
+document.getElementById('trig-iv').addEventListener('change', e => {
+  applyTierToTriggerForm(e.target.value);
+});
+
 function openEditForm(t) {
   currentEditId = t.id;
   document.getElementById('trig-sym').value = t.symbol;
@@ -602,6 +653,10 @@ function openEditForm(t) {
     opt.selected = opt.value === t.interval;
   for (const opt of document.getElementById('trig-conf').options)
     opt.selected = opt.value === t.min_confidence;
+  // Populate ADX / cooldown (show stored value or blank for "tier default")
+  document.getElementById('trig-adx').value = t.adx_threshold != null ? t.adx_threshold : '';
+  document.getElementById('trig-cd').value  = t.cooldown_bars  != null ? t.cooldown_bars  : '';
+  applyTierToTriggerForm(t.interval);
   document.getElementById('trig-save-btn').textContent = 'Update Trigger';
   const form = document.getElementById('trig-add-form');
   form.classList.add('open');
@@ -616,8 +671,11 @@ document.getElementById('trig-add-btn').addEventListener('click', () => {
   document.getElementById('trig-save-btn').textContent = 'Save Trigger';
   if (opening) {
     document.getElementById('trig-sym').value = currentSymbol;
+    document.getElementById('trig-adx').value = '';
+    document.getElementById('trig-cd').value  = '';
     for (const opt of document.getElementById('trig-iv').options)
       opt.selected = opt.value === currentInterval;
+    applyTierToTriggerForm(currentInterval);
     form.classList.add('open');
     form.scrollIntoView({ block: 'nearest' });
   } else {
@@ -652,10 +710,18 @@ document.getElementById('trig-save-btn').addEventListener('click', () => {
   const url    = editId ? `/api/triggers/${editId}` : '/api/triggers';
   const method = editId ? 'PUT' : 'POST';
 
+  const adxRaw = document.getElementById('trig-adx').value.trim();
+  const cdRaw  = document.getElementById('trig-cd').value.trim();
+  const payload = {
+    symbol: sym, interval: iv, min_confidence: conf,
+    adx_threshold: adxRaw !== '' ? parseFloat(adxRaw) : null,
+    cooldown_bars: cdRaw  !== '' ? parseInt(cdRaw, 10) : null,
+  };
+
   fetch(url, {
     method,
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ symbol: sym, interval: iv, min_confidence: conf }),
+    body: JSON.stringify(payload),
   })
   .then(r => {
     if (!r.ok) throw new Error(`HTTP ${r.status}`);

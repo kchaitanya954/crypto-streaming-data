@@ -88,7 +88,7 @@ async def _stream_pair(symbol: str, interval: str, db, tg_bot, exchange, setting
                 try:
                     active_triggers = await queries.get_triggers(db, active_only=True)
                     matched = any(
-                        queries.trigger_matches(t, symbol, interval, signal.confidence)
+                        queries.trigger_matches(t, symbol, interval, signal.confidence, signal.adx_val)
                         for t in active_triggers
                     )
                     if matched:
