@@ -473,14 +473,19 @@
   <button id="sidebar-toggle" title="Menu">☰</button>
   <input id="symbol-input" type="text" value="BTCUSDT" title="Press Enter to apply" spellcheck="false" />
   <div class="sep"></div>
-  <button class="iv-btn" data-iv="1s">1s</button>
-  <button class="iv-btn active" data-iv="1m">1m</button>
-  <button class="iv-btn" data-iv="3m">3m</button>
-  <button class="iv-btn" data-iv="5m">5m</button>
-  <button class="iv-btn" data-iv="15m">15m</button>
-  <button class="iv-btn" data-iv="30m">30m</button>
-  <button class="iv-btn" data-iv="1h">1h</button>
-  <button class="iv-btn" data-iv="4h">4h</button>
+  <input  id="iv-num"  type="number" min="1" max="999" value="1"
+    style="width:46px;background:#131722;color:#D1D4DC;border:1px solid #2A2E39;border-radius:4px;padding:3px 6px;font-size:12px;outline:none;-moz-appearance:textfield" />
+  <select id="iv-unit"
+    style="background:#131722;color:#D1D4DC;border:1px solid #2A2E39;border-radius:4px;padding:3px 6px;font-size:12px;outline:none;cursor:pointer">
+    <option value="s">sec</option>
+    <option value="m" selected>min</option>
+    <option value="h">hour</option>
+    <option value="d">day</option>
+    <option value="w">week</option>
+  </select>
+  <button id="iv-go" class="iv-btn active" style="font-size:11px;padding:3px 10px">Apply</button>
+  <span   id="iv-err" style="font-size:10px;color:#EF5350"></span>
+  <span   id="iv-tier" style="font-size:9px;color:#4C525E;background:#1E222D;border:1px solid #2A2E39;border-radius:3px;padding:2px 5px">scalping</span>
   <div id="status-wrap">
     <button id="analytics-btn" title="Signal performance analytics">Analytics</button>
     <div id="status-dot"></div>
@@ -605,7 +610,14 @@
           <option value="15m">15m</option>
           <option value="30m">30m</option>
           <option value="1h">1h</option>
+          <option value="2h">2h</option>
           <option value="4h">4h</option>
+          <option value="6h">6h</option>
+          <option value="8h">8h</option>
+          <option value="12h">12h</option>
+          <option value="1d">1d</option>
+          <option value="3d">3d</option>
+          <option value="1w">1w</option>
         </select>
         <select id="an-conf" class="an-sel">
           <option value="ALL">All Confidence</option>

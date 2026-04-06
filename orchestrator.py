@@ -41,13 +41,19 @@ async def _stream_pair(symbol: str, interval: str, db, tg_bot, exchange, setting
     Restarts automatically on any error.
     """
     from streaming.stream import stream_klines, fetch_historical_klines
-    from signals.detector import SignalDetector
+    from signals.detector import SignalDetector, params_for_interval
     from database import queries
     from telegram_bot.alerts import send_signal_alert
 
     while True:
         try:
-            detector = SignalDetector()
+            detector = SignalDetector(**params_for_interval(interval))
+            log.info("BG worker params  %s %s  tier=%s",
+                     symbol.upper(), interval,
+                     "scalping" if params_for_interval(interval)["adx_threshold"] <= 12 else
+                     "intraday" if params_for_interval(interval)["adx_threshold"] <= 18 else
+                     "swing"    if params_for_interval(interval)["adx_threshold"] <= 20 else
+                     "position")
             historical = await fetch_historical_klines(symbol, interval, limit=201)
             detector.seed(historical)
             log.info("BG worker seeded  %s %s  (%d bars)", symbol.upper(), interval, len(historical))

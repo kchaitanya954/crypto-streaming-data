@@ -453,14 +453,43 @@ function connect(symbol, interval) {
 
 // ── Controls ──────────────────────────────────────────────────────────────────
 
-document.querySelectorAll('.iv-btn').forEach(btn => {
-  btn.addEventListener('click', () => {
-    document.querySelectorAll('.iv-btn').forEach(b => b.classList.remove('active'));
-    btn.classList.add('active');
-    currentInterval = btn.dataset.iv;
-    connect(currentSymbol, currentInterval);
-  });
-});
+const VALID_INTERVALS = new Set([
+  '1s',
+  '1m','3m','5m','15m','30m',
+  '1h','2h','4h','6h','8h','12h',
+  '1d','3d','1w','1M',
+]);
+
+function ivTier(iv) {
+  const u = iv.slice(-1);
+  const n = parseInt(iv) || 1;
+  const mins = ({'s':1/60,'m':1,'h':60,'d':1440,'w':10080}[u] || 1) * n;
+  if (mins < 3)   return 'scalping';
+  if (mins < 60)  return 'intraday';
+  if (mins < 360) return 'swing';
+  return 'position';
+}
+
+function applyInterval() {
+  const n  = (document.getElementById('iv-num').value || '1').trim();
+  const u  = document.getElementById('iv-unit').value;
+  const iv = n + u;
+  const errEl  = document.getElementById('iv-err');
+  const tierEl = document.getElementById('iv-tier');
+  if (!VALID_INTERVALS.has(iv)) {
+    errEl.textContent = `"${iv}" not valid`;
+    setTimeout(() => errEl.textContent = '', 2500);
+    return;
+  }
+  errEl.textContent  = '';
+  tierEl.textContent = ivTier(iv);
+  currentInterval    = iv;
+  connect(currentSymbol, currentInterval);
+}
+
+document.getElementById('iv-go').addEventListener('click', applyInterval);
+document.getElementById('iv-num').addEventListener('keydown', e => { if (e.key === 'Enter') applyInterval(); });
+document.getElementById('iv-unit').addEventListener('change', applyInterval);
 
 // ── Sensitivity controls ──────────────────────────────────────────────────────
 

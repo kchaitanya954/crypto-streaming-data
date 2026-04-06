@@ -62,6 +62,65 @@ BB_STD            = 2.0    # Bollinger Band standard deviation multiplier
 COOLDOWN_BARS     = 3      # bars to wait after a signal before allowing the next one
 
 
+# ── Adaptive params by timeframe ──────────────────────────────────────────────
+
+def params_for_interval(interval: str) -> dict:
+    """
+    Return SignalDetector kwargs tuned for the given Binance interval string.
+
+    Four tiers:
+      Scalping  (< 3 min/bar):  1s, 2s, 1m, 2m  — fast MACD, low ADX, tiny histogram
+      Intraday  (3–59 min/bar): 3m … 30m         — medium settings
+      Swing     (1–5 h/bar):    1h … 4h           — standard settings
+      Position  (≥ 6 h/bar):    6h, 12h, 1d, …   — slower settings, higher histogram
+    """
+    unit = interval[-1]                       # s / m / h / d / w / M
+    try:
+        n = int(interval[:-1])
+    except ValueError:
+        n = 1
+
+    to_min = {'s': 1/60, 'm': 1, 'h': 60, 'd': 1440, 'w': 10080, 'M': 43200}
+    minutes = n * to_min.get(unit, 1)
+
+    if minutes < 3:          # ── Scalping (1s, 2s, 1m, 2m) ──
+        return dict(
+            macd_fast=3,    macd_slow=10,  macd_signal=3,
+            ema_fast=9,     ema_slow=50,
+            rsi_period=7,   stoch_k=5,     stoch_d=3,
+            adx_period=7,   adx_threshold=12.0,
+            min_histogram=0.0,
+            min_confirmations=1, cooldown_bars=2,
+        )
+    elif minutes < 60:       # ── Intraday (3m – 30m) ──
+        return dict(
+            macd_fast=6,    macd_slow=14,  macd_signal=5,
+            ema_fast=21,    ema_slow=55,
+            rsi_period=10,  stoch_k=9,     stoch_d=3,
+            adx_period=10,  adx_threshold=18.0,
+            min_histogram=0.02,
+            min_confirmations=1, cooldown_bars=3,
+        )
+    elif minutes < 360:      # ── Swing (1h – 4h) ──
+        return dict(
+            macd_fast=12,   macd_slow=26,  macd_signal=9,
+            ema_fast=50,    ema_slow=200,
+            rsi_period=14,  stoch_k=14,    stoch_d=3,
+            adx_period=14,  adx_threshold=20.0,
+            min_histogram=0.1,
+            min_confirmations=1, cooldown_bars=5,
+        )
+    else:                    # ── Position (6h, 12h, 1d, 1w …) ──
+        return dict(
+            macd_fast=12,   macd_slow=26,  macd_signal=9,
+            ema_fast=50,    ema_slow=200,
+            rsi_period=14,  stoch_k=14,    stoch_d=3,
+            adx_period=14,  adx_threshold=22.0,
+            min_histogram=1.0,
+            min_confirmations=1, cooldown_bars=3,
+        )
+
+
 # ── Output dataclass ──────────────────────────────────────────────────────────
 
 @dataclass
