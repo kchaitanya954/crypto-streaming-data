@@ -8,6 +8,11 @@ let currentInterval  = '1m';
 let markers          = [];
 let currentEditId    = null;   // null = create mode, number = edit existing trigger
 
+// Sensitivity controls — persisted in localStorage
+let currentAdxMin  = parseFloat(localStorage.getItem('adxMin')  ?? '30');
+let currentMinConf = parseInt(  localStorage.getItem('minConf') ?? '2', 10);
+let currentCooldown= parseInt(  localStorage.getItem('cooldown') ?? '3', 10);
+
 // ── Chart creation ────────────────────────────────────────────────────────────
 
 const BASE = {
@@ -419,7 +424,10 @@ function connect(symbol, interval) {
   setStatus(false);
 
   const wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  ws = new WebSocket(`${wsProto}//${location.host}/ws?symbol=${symbol.toLowerCase()}&interval=${interval}`);
+  ws = new WebSocket(
+    `${wsProto}//${location.host}/ws?symbol=${symbol.toLowerCase()}&interval=${interval}` +
+    `&adx_min=${currentAdxMin}&min_conf=${currentMinConf}&cooldown=${currentCooldown}`
+  );
 
   ws.onopen = () => {
     setStatus(true);
@@ -450,6 +458,54 @@ document.querySelectorAll('.iv-btn').forEach(btn => {
     document.querySelectorAll('.iv-btn').forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
     currentInterval = btn.dataset.iv;
+    connect(currentSymbol, currentInterval);
+  });
+});
+
+// ── Sensitivity controls ──────────────────────────────────────────────────────
+
+function activateBtn(selector, activeBtn) {
+  document.querySelectorAll(selector).forEach(b => b.classList.remove('active'));
+  activeBtn.classList.add('active');
+}
+
+function restoreSensitivityUI() {
+  document.querySelectorAll('.adx-btn').forEach(b => {
+    b.classList.toggle('active', parseFloat(b.dataset.adx) === currentAdxMin);
+  });
+  document.querySelectorAll('.conf-btn').forEach(b => {
+    b.classList.toggle('active', parseInt(b.dataset.conf, 10) === currentMinConf);
+  });
+  document.querySelectorAll('.cd-btn').forEach(b => {
+    b.classList.toggle('active', parseInt(b.dataset.cd, 10) === currentCooldown);
+  });
+}
+
+restoreSensitivityUI();
+
+document.querySelectorAll('.adx-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    activateBtn('.adx-btn', btn);
+    currentAdxMin = parseFloat(btn.dataset.adx);
+    localStorage.setItem('adxMin', currentAdxMin);
+    connect(currentSymbol, currentInterval);
+  });
+});
+
+document.querySelectorAll('.conf-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    activateBtn('.conf-btn', btn);
+    currentMinConf = parseInt(btn.dataset.conf, 10);
+    localStorage.setItem('minConf', currentMinConf);
+    connect(currentSymbol, currentInterval);
+  });
+});
+
+document.querySelectorAll('.cd-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    activateBtn('.cd-btn', btn);
+    currentCooldown = parseInt(btn.dataset.cd, 10);
+    localStorage.setItem('cooldown', currentCooldown);
     connect(currentSymbol, currentInterval);
   });
 });

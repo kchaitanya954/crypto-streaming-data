@@ -54,12 +54,12 @@ RSI_PERIOD        = 14
 STOCH_K           = 14
 STOCH_D           = 3
 ADX_PERIOD        = 14
-ADX_THRESHOLD     = 20.0   # below this = choppy market, skip signal
-MIN_HISTOGRAM     = 0.1    # min |MACD − signal| to reject micro-crossovers (tune per asset/TF)
-MIN_CONFIRMATIONS = 1      # allow LOW signals through (1 confirm)
+ADX_THRESHOLD     = 30.0   # below this = choppy market, skip signal
+MIN_HISTOGRAM     = 1.0    # min |MACD − signal| to reject micro-crossovers
+MIN_CONFIRMATIONS = 2      # require MEDIUM or HIGH — LOW signals always suppressed
 BB_PERIOD         = 20     # Bollinger Band lookback
 BB_STD            = 2.0    # Bollinger Band standard deviation multiplier
-COOLDOWN_BARS     = 5      # bars to wait after a signal before allowing the next one
+COOLDOWN_BARS     = 3      # bars to wait after a signal before allowing the next one
 
 
 # ── Output dataclass ──────────────────────────────────────────────────────────
@@ -89,8 +89,9 @@ class SignalDetector:
 
     Key quality filters:
       - adx_threshold (default 30): skip signals in ranging/choppy markets
-      - min_histogram (default 0.5): skip hairline MACD crossovers
-      - min_confirmations (default 2): require at least MEDIUM confidence
+      - min_histogram (default 1.0): skip hairline MACD crossovers
+      - min_confirmations (default 2): require MEDIUM (2) or HIGH (3) confidence
+      - cooldown_bars (default 3): min candles between signals to prevent whipsaw
 
     Usage:
         detector = SignalDetector()
@@ -152,13 +153,17 @@ class SignalDetector:
 
     def update(self, kline: Kline) -> Optional[Signal]:
         """Ingest a closed candle and return a Signal if one is detected."""
+        self._bar_count += 1
         self.opens.append(kline.open)
         self.closes.append(kline.close)
         self.highs.append(kline.high)
         self.lows.append(kline.low)
         self.volumes.append(kline.volume)
         self.open_times.append(kline.open_time)
-        return self._detect()
+        signal = self._detect()
+        if signal:
+            self._last_signal_bar = self._bar_count
+        return signal
 
     def history_snapshots(self) -> list[IndicatorSnapshot]:
         """Compute indicator snapshots for all seeded bars (O(n), used by UI on startup)."""
@@ -206,6 +211,10 @@ class SignalDetector:
     # ── Private ───────────────────────────────────────────────────────────────
 
     def _detect(self) -> Optional[Signal]:
+        # Cooldown gate — prevent whipsaw signals on consecutive candles
+        if self._bar_count - self._last_signal_bar < self.cooldown_bars:
+            return None
+
         closes  = self.closes
         highs   = self.highs
         lows    = self.lows
@@ -253,10 +262,12 @@ class SignalDetector:
         if abs(histogram) < self.min_histogram:
             return None
 
-        # Block signals that contradict EMA(200) trend direction
-        if cross_up   and not above_ema200:
+        # Block signals that contradict the trend direction
+        # BUY: price must be above EMA200 (long-term uptrend)
+        if cross_up and not above_ema200:
             return None
-        if cross_down and above_ema200:
+        # SELL: price must be below both EMA200 AND EMA50 — no selling into any uptrend
+        if cross_down and (above_ema200 or above_ema50):
             return None
 
         # 4. Cooldown gate — prevents rapid-fire signals after a recent one
@@ -300,7 +311,6 @@ class SignalDetector:
                 price=price, macd_curr=macd_curr, sig_curr=sig_curr,
                 histogram=histogram, adx_val=adx_val, trend_note=trend_note,
                 confirmations=[
-                    # RSI: healthy buy zone — not overbought, has upward momentum
                     (rsi_curr is not None and 30 <= rsi_curr <= 65,
                      f"RSI={rsi_curr:.1f} (healthy buy zone)" if rsi_curr else ""),
                     (stoch_buy_ok,
@@ -320,7 +330,6 @@ class SignalDetector:
                 price=price, macd_curr=macd_curr, sig_curr=sig_curr,
                 histogram=histogram, adx_val=adx_val, trend_note=trend_note,
                 confirmations=[
-                    # RSI: healthy sell zone — not oversold, has downward momentum
                     (rsi_curr is not None and 35 <= rsi_curr <= 70,
                      f"RSI={rsi_curr:.1f} (healthy sell zone)" if rsi_curr else ""),
                     (stoch_sell_ok,
@@ -368,13 +377,13 @@ class SignalDetector:
 def _stoch_cross_up(k_prev, d_prev, k_curr, d_curr) -> bool:
     if any(v is None for v in (k_prev, d_prev, k_curr, d_curr)):
         return False
-    return k_prev <= d_prev and k_curr > d_curr
+    return k_prev < d_prev and k_curr > d_curr
 
 
 def _stoch_cross_down(k_prev, d_prev, k_curr, d_curr) -> bool:
     if any(v is None for v in (k_prev, d_prev, k_curr, d_curr)):
         return False
-    return k_prev >= d_prev and k_curr < d_curr
+    return k_prev > d_prev and k_curr < d_curr
 
 
 def _confidence(count: int) -> str:
