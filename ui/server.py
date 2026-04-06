@@ -409,12 +409,16 @@ async def api_analytics(
 @app.websocket("/ws")
 async def ws_endpoint(
     websocket: WebSocket,
-    symbol:    str = Query(default="ethusdt"),
-    interval:  str = Query(default="1m"),
+    symbol:    str   = Query(default="ethusdt"),
+    interval:  str   = Query(default="1m"),
+    adx_min:   float = Query(default=None),
+    min_conf:  int   = Query(default=None),
+    cooldown:  int   = Query(default=None),
 ):
     await websocket.accept()
     task = asyncio.create_task(
-        _connection_loop(websocket, symbol.lower(), interval, websocket.app)
+        _connection_loop(websocket, symbol.lower(), interval, websocket.app,
+                         adx_min=adx_min, min_conf=min_conf, cooldown=cooldown)
     )
     try:
         while True:
@@ -426,13 +430,23 @@ async def ws_endpoint(
         await asyncio.gather(task, return_exceptions=True)
 
 
-async def _connection_loop(ws: WebSocket, symbol: str, interval: str, app_state) -> None:
+async def _connection_loop(
+    ws: WebSocket, symbol: str, interval: str, app_state, *,
+    adx_min: Optional[float] = None,
+    min_conf: Optional[int]  = None,
+    cooldown: Optional[int]  = None,
+) -> None:
     """Fetch history, send it, then stream live candles + signals to one client."""
     db       = getattr(app_state.state, "db",           None)
     tg_bot   = getattr(app_state.state, "telegram_bot", None)
     settings = getattr(app_state.state, "settings",     None)
 
-    detector = SignalDetector(**params_for_interval(interval))
+    # Start from tier defaults, then apply any manual overrides from the UI
+    det_params = params_for_interval(interval)
+    if adx_min  is not None: det_params["adx_threshold"]     = adx_min
+    if min_conf is not None: det_params["min_confirmations"] = min_conf
+    if cooldown is not None: det_params["cooldown_bars"]     = cooldown
+    detector = SignalDetector(**det_params)
     try:
         await ws.send_json({"type": "meta", "symbol": symbol.upper(), "interval": interval})
 
