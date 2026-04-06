@@ -9,9 +9,10 @@ let markers          = [];
 let currentEditId    = null;   // null = create mode, number = edit existing trigger
 
 // Sensitivity controls — persisted in localStorage
-let currentAdxMin  = parseFloat(localStorage.getItem('adxMin')  ?? '30');
-let currentMinConf = parseInt(  localStorage.getItem('minConf') ?? '2', 10);
-let currentCooldown= parseInt(  localStorage.getItem('cooldown') ?? '3', 10);
+// Defaults are overwritten by tier on first interval selection; stored values are manual overrides
+let currentAdxMin  = parseFloat(localStorage.getItem('adxMin')  ?? '12');
+let currentMinConf = parseInt(  localStorage.getItem('minConf') ?? '1', 10);
+let currentCooldown= parseInt(  localStorage.getItem('cooldown') ?? '2', 10);
 
 // ── Chart creation ────────────────────────────────────────────────────────────
 
@@ -478,27 +479,28 @@ const TIER_DEFAULTS = {
 };
 
 function applyTierToSensitivityBar(iv) {
-  const d = TIER_DEFAULTS[ivTier(iv)];
-  // Find closest ADX button and activate it
-  let closestAdx = null, minDiff = Infinity;
-  document.querySelectorAll('.adx-btn').forEach(b => {
-    const diff = Math.abs(parseFloat(b.dataset.adx) - d.adx);
-    if (diff < minDiff) { minDiff = diff; closestAdx = b; }
-  });
-  if (closestAdx) { activateBtn('.adx-btn', closestAdx); currentAdxMin = parseFloat(closestAdx.dataset.adx); }
+  const tier = ivTier(iv);
+  const d    = TIER_DEFAULTS[tier];
+  currentAdxMin   = d.adx;
+  currentMinConf  = d.conf;
+  currentCooldown = d.cooldown;
+  localStorage.setItem('adxMin',   currentAdxMin);
+  localStorage.setItem('minConf',  currentMinConf);
+  localStorage.setItem('cooldown', currentCooldown);
+  updateSensitivityDisplay();
+}
 
-  // Confidence
+function updateSensitivityDisplay() {
+  const adxEl = document.getElementById('adx-val-display');
+  const cdEl  = document.getElementById('cd-val-display');
+  const badge = document.getElementById('tier-badge');
+  if (adxEl) adxEl.textContent = currentAdxMin;
+  if (cdEl)  cdEl.textContent  = currentCooldown;
+  if (badge) badge.textContent = ivTier(currentInterval);
+  // Highlight active confidence button
   document.querySelectorAll('.conf-btn').forEach(b => {
-    if (parseInt(b.dataset.conf, 10) === d.conf) { activateBtn('.conf-btn', b); currentMinConf = d.conf; }
+    b.classList.toggle('active', parseInt(b.dataset.conf, 10) === currentMinConf);
   });
-
-  // Cooldown: find closest button
-  let closestCd = null; minDiff = Infinity;
-  document.querySelectorAll('.cd-btn').forEach(b => {
-    const diff = Math.abs(parseInt(b.dataset.cd, 10) - d.cooldown);
-    if (diff < minDiff) { minDiff = diff; closestCd = b; }
-  });
-  if (closestCd) { activateBtn('.cd-btn', closestCd); currentCooldown = parseInt(closestCd.dataset.cd, 10); }
 }
 
 function applyTierToTriggerForm(iv) {
@@ -512,27 +514,11 @@ function applyTierToTriggerForm(iv) {
   if (cdEl)  cdEl.placeholder  = d.cooldown;
 }
 
-function applyInterval() {
-  const n  = (document.getElementById('iv-num').value || '1').trim();
-  const u  = document.getElementById('iv-unit').value;
-  const iv = n + u;
-  const errEl  = document.getElementById('iv-err');
-  const tierEl = document.getElementById('iv-tier');
-  if (!VALID_INTERVALS.has(iv)) {
-    errEl.textContent = `"${iv}" not valid`;
-    setTimeout(() => errEl.textContent = '', 2500);
-    return;
-  }
-  errEl.textContent  = '';
-  tierEl.textContent = ivTier(iv);
-  currentInterval    = iv;
-  applyTierToSensitivityBar(iv);
+document.getElementById('iv-select').addEventListener('change', e => {
+  currentInterval = e.target.value;
+  applyTierToSensitivityBar(currentInterval);
   connect(currentSymbol, currentInterval);
-}
-
-document.getElementById('iv-go').addEventListener('click', applyInterval);
-document.getElementById('iv-num').addEventListener('keydown', e => { if (e.key === 'Enter') applyInterval(); });
-document.getElementById('iv-unit').addEventListener('change', applyInterval);
+});
 
 // ── Sensitivity controls ──────────────────────────────────────────────────────
 
@@ -541,43 +527,34 @@ function activateBtn(selector, activeBtn) {
   activeBtn.classList.add('active');
 }
 
-function restoreSensitivityUI() {
-  document.querySelectorAll('.adx-btn').forEach(b => {
-    b.classList.toggle('active', parseFloat(b.dataset.adx) === currentAdxMin);
-  });
-  document.querySelectorAll('.conf-btn').forEach(b => {
-    b.classList.toggle('active', parseInt(b.dataset.conf, 10) === currentMinConf);
-  });
-  document.querySelectorAll('.cd-btn').forEach(b => {
-    b.classList.toggle('active', parseInt(b.dataset.cd, 10) === currentCooldown);
-  });
-}
-
-restoreSensitivityUI();
+// Initialise display from stored/default state
+updateSensitivityDisplay();
 
 document.querySelectorAll('.adx-btn').forEach(btn => {
   btn.addEventListener('click', () => {
-    activateBtn('.adx-btn', btn);
-    currentAdxMin = parseFloat(btn.dataset.adx);
+    const delta = parseFloat(btn.dataset.adx);   // e.g. -5 or +5
+    currentAdxMin = Math.max(0, currentAdxMin + delta);
     localStorage.setItem('adxMin', currentAdxMin);
+    updateSensitivityDisplay();
     connect(currentSymbol, currentInterval);
   });
 });
 
 document.querySelectorAll('.conf-btn').forEach(btn => {
   btn.addEventListener('click', () => {
-    activateBtn('.conf-btn', btn);
     currentMinConf = parseInt(btn.dataset.conf, 10);
     localStorage.setItem('minConf', currentMinConf);
+    updateSensitivityDisplay();
     connect(currentSymbol, currentInterval);
   });
 });
 
 document.querySelectorAll('.cd-btn').forEach(btn => {
   btn.addEventListener('click', () => {
-    activateBtn('.cd-btn', btn);
-    currentCooldown = parseInt(btn.dataset.cd, 10);
+    const delta = parseInt(btn.dataset.cd, 10);  // e.g. -1 or +1
+    currentCooldown = Math.max(0, currentCooldown + delta);
     localStorage.setItem('cooldown', currentCooldown);
+    updateSensitivityDisplay();
     connect(currentSymbol, currentInterval);
   });
 });
@@ -986,5 +963,14 @@ function renderSimulation(s) {
 }
 
 // ── Start ─────────────────────────────────────────────────────────────────────
+
+// Sync interval dropdown and sensitivity bar to initial state
+(function initUI() {
+  const sel = document.getElementById('iv-select');
+  if (sel) {
+    for (const opt of sel.options) opt.selected = opt.value === currentInterval;
+  }
+  updateSensitivityDisplay();
+})();
 
 connect(currentSymbol, currentInterval);
