@@ -915,6 +915,16 @@ function renderSimulation(s) {
   setCard('sim-v-holding', '$' + s.final_holding_usdt.toFixed(2));
   setCard('sim-v-count',   s.sim_trade_count || '—');
 
+  // Skipped signal counts (adaptive DCA capping)
+  const skipEl = document.getElementById('sim-skipped');
+  if (skipEl) {
+    const skB = s.skipped_buys  || 0;
+    const skS = s.skipped_sells || 0;
+    skipEl.textContent = (skB || skS)
+      ? `DCA cap skipped: ${skB} buy${skB !== 1 ? 's' : ''}, ${skS} sell${skS !== 1 ? 's' : ''}`
+      : '';
+  }
+
   // Holdings chips
   const holdWrap = document.getElementById('sim-holdings-wrap');
   const holdEl   = document.getElementById('sim-holdings');
@@ -942,23 +952,36 @@ function renderSimulation(s) {
   }
   noData.style.display = 'none';
 
+  const confColors = { HIGH: '#26A69A', MEDIUM: '#FF9800', LOW: '#787B86' };
   tbody.innerHTML = [...trades].reverse().map(t => {
     const dt = new Date(t.time * 1000);
     const ts = dt.toLocaleDateString([], {month:'short', day:'numeric'}) + ' ' +
                dt.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
-    const isBuy     = t.direction === 'BUY';
-    const dirColor  = isBuy ? '#26A69A' : '#EF5350';
+    const isBuy    = t.direction === 'BUY';
+    const dirColor = isBuy ? '#26A69A' : '#EF5350';
+
+    // Action label: BUY shows DCA entry#, SELL shows exit%
+    const actionLabel = isBuy
+      ? `BUY<sub style="font-size:8px;color:#787B86">#${t.dca_entry||1}</sub>`
+      : `SELL<sub style="font-size:8px;color:#787B86">${t.exit_pct||100}%</sub>`;
+
     const usdtDelta = isBuy
-      ? `<span style="color:#EF5350">-$${t.usdt_spent.toFixed(2)}</span>`
-      : `<span style="color:#26A69A">+$${t.usdt_received.toFixed(2)}</span>`;
-    const confColors = { HIGH: '#26A69A', MEDIUM: '#FF9800', LOW: '#787B86' };
+      ? `<span style="color:#EF5350">-$${(t.usdt_spent||0).toFixed(2)}</span>`
+      : `<span style="color:#26A69A">+$${(t.usdt_received||0).toFixed(2)}</span>`;
+
+    // P&L cell only for sells
+    const pnlCell = isBuy
+      ? '<td style="color:#4C525E">—</td>'
+      : `<td class="${pctClass(t.pnl_pct||0)}" style="font-weight:700">${pct(t.pnl_pct||0)}</td>`;
+
     return `<tr>
       <td style="font-weight:600;color:#D1D4DC">${t.symbol}</td>
       <td style="color:#787B86">${t.interval}</td>
-      <td style="color:${dirColor};font-weight:700">${t.direction}</td>
+      <td style="color:${dirColor};font-weight:700">${actionLabel}</td>
       <td style="color:${confColors[t.confidence]||'#D1D4DC'};font-size:9px;font-weight:700">${t.confidence}</td>
       <td>$${t.price.toFixed(2)}</td>
       <td>${usdtDelta}</td>
+      ${pnlCell}
       <td style="color:#B2B5BE">$${t.usdt_balance.toFixed(2)}</td>
       <td style="color:#D1D4DC;font-weight:600">$${t.portfolio_val.toFixed(2)}</td>
       <td style="color:#4C525E;font-size:10px">${ts}</td>
