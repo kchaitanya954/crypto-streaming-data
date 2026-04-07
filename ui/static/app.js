@@ -716,7 +716,7 @@ document.getElementById('trig-save-btn').addEventListener('click', () => {
     btn.disabled    = false;
     btn.textContent = '✕ Failed – retry';
     setTimeout(() => {
-      btn.textContent = currentEditId ? 'Update Trigger' : 'Save Trigger';
+      btn.textContent = editId ? 'Update Trigger' : 'Save Trigger';
     }, 2500);
   });
 });
@@ -991,13 +991,14 @@ function renderSimulation(s) {
 
 // ── Start ─────────────────────────────────────────────────────────────────────
 
-// Sync interval dropdown and sensitivity bar to initial state
+// Sync interval dropdown and apply correct tier defaults on page load
 (function initUI() {
   const sel = document.getElementById('iv-select');
   if (sel) {
     for (const opt of sel.options) opt.selected = opt.value === currentInterval;
   }
-  updateSensitivityDisplay();
+  // Always derive from tier — never trust stale localStorage on load
+  applyTierToSensitivityBar(currentInterval);
 })();
 
 connect(currentSymbol, currentInterval);

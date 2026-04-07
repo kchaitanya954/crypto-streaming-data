@@ -489,11 +489,11 @@ async def api_analytics(
 @app.websocket("/ws")
 async def ws_endpoint(
     websocket: WebSocket,
-    symbol:    str   = Query(default="ethusdt"),
-    interval:  str   = Query(default="1m"),
-    adx_min:   float = Query(default=None),
-    min_conf:  int   = Query(default=None),
-    cooldown:  int   = Query(default=None),
+    symbol:    str            = Query(default="ethusdt"),
+    interval:  str            = Query(default="1m"),
+    adx_min:   Optional[float] = Query(default=None),
+    min_conf:  Optional[int]   = Query(default=None),
+    cooldown:  Optional[int]   = Query(default=None),
 ):
     await websocket.accept()
     task = asyncio.create_task(
