@@ -9,9 +9,10 @@ let markers          = [];
 let currentEditId    = null;   // null = create mode, number = edit existing trigger
 
 // Sensitivity controls — persisted in localStorage
-let currentAdxMin  = parseFloat(localStorage.getItem('adxMin')  ?? '30');
-let currentMinConf = parseInt(  localStorage.getItem('minConf') ?? '2', 10);
-let currentCooldown= parseInt(  localStorage.getItem('cooldown') ?? '3', 10);
+// Defaults are overwritten by tier on first interval selection; stored values are manual overrides
+let currentAdxMin  = parseFloat(localStorage.getItem('adxMin')  ?? '12');
+let currentMinConf = parseInt(  localStorage.getItem('minConf') ?? '1', 10);
+let currentCooldown= parseInt(  localStorage.getItem('cooldown') ?? '2', 10);
 
 // ── Chart creation ────────────────────────────────────────────────────────────
 
@@ -470,26 +471,54 @@ function ivTier(iv) {
   return 'position';
 }
 
-function applyInterval() {
-  const n  = (document.getElementById('iv-num').value || '1').trim();
-  const u  = document.getElementById('iv-unit').value;
-  const iv = n + u;
-  const errEl  = document.getElementById('iv-err');
-  const tierEl = document.getElementById('iv-tier');
-  if (!VALID_INTERVALS.has(iv)) {
-    errEl.textContent = `"${iv}" not valid`;
-    setTimeout(() => errEl.textContent = '', 2500);
-    return;
-  }
-  errEl.textContent  = '';
-  tierEl.textContent = ivTier(iv);
-  currentInterval    = iv;
-  connect(currentSymbol, currentInterval);
+const TIER_DEFAULTS = {
+  scalping: { adx: 12, cooldown: 2, conf: 1 },
+  intraday: { adx: 18, cooldown: 3, conf: 1 },
+  swing:    { adx: 20, cooldown: 5, conf: 1 },
+  position: { adx: 22, cooldown: 3, conf: 1 },
+};
+
+function applyTierToSensitivityBar(iv) {
+  const tier = ivTier(iv);
+  const d    = TIER_DEFAULTS[tier];
+  currentAdxMin   = d.adx;
+  currentMinConf  = d.conf;
+  currentCooldown = d.cooldown;
+  localStorage.setItem('adxMin',   currentAdxMin);
+  localStorage.setItem('minConf',  currentMinConf);
+  localStorage.setItem('cooldown', currentCooldown);
+  updateSensitivityDisplay();
 }
 
-document.getElementById('iv-go').addEventListener('click', applyInterval);
-document.getElementById('iv-num').addEventListener('keydown', e => { if (e.key === 'Enter') applyInterval(); });
-document.getElementById('iv-unit').addEventListener('change', applyInterval);
+function updateSensitivityDisplay() {
+  const adxEl = document.getElementById('adx-val-display');
+  const cdEl  = document.getElementById('cd-val-display');
+  const badge = document.getElementById('tier-badge');
+  if (adxEl) adxEl.textContent = currentAdxMin;
+  if (cdEl)  cdEl.textContent  = currentCooldown;
+  if (badge) badge.textContent = ivTier(currentInterval);
+  // Highlight active confidence button
+  document.querySelectorAll('.conf-btn').forEach(b => {
+    b.classList.toggle('active', parseInt(b.dataset.conf, 10) === currentMinConf);
+  });
+}
+
+function applyTierToTriggerForm(iv) {
+  const d = TIER_DEFAULTS[ivTier(iv)];
+  const hint = document.getElementById('trig-tier-hint');
+  if (hint) hint.textContent = `tier: ${ivTier(iv)} · adx=${d.adx} cd=${d.cooldown}`;
+  // Set placeholders to show tier defaults; leave value blank (user can override)
+  const adxEl = document.getElementById('trig-adx');
+  const cdEl  = document.getElementById('trig-cd');
+  if (adxEl) adxEl.placeholder = d.adx;
+  if (cdEl)  cdEl.placeholder  = d.cooldown;
+}
+
+document.getElementById('iv-select').addEventListener('change', e => {
+  currentInterval = e.target.value;
+  applyTierToSensitivityBar(currentInterval);
+  connect(currentSymbol, currentInterval);
+});
 
 // ── Sensitivity controls ──────────────────────────────────────────────────────
 
@@ -498,43 +527,34 @@ function activateBtn(selector, activeBtn) {
   activeBtn.classList.add('active');
 }
 
-function restoreSensitivityUI() {
-  document.querySelectorAll('.adx-btn').forEach(b => {
-    b.classList.toggle('active', parseFloat(b.dataset.adx) === currentAdxMin);
-  });
-  document.querySelectorAll('.conf-btn').forEach(b => {
-    b.classList.toggle('active', parseInt(b.dataset.conf, 10) === currentMinConf);
-  });
-  document.querySelectorAll('.cd-btn').forEach(b => {
-    b.classList.toggle('active', parseInt(b.dataset.cd, 10) === currentCooldown);
-  });
-}
-
-restoreSensitivityUI();
+// Initialise display from stored/default state
+updateSensitivityDisplay();
 
 document.querySelectorAll('.adx-btn').forEach(btn => {
   btn.addEventListener('click', () => {
-    activateBtn('.adx-btn', btn);
-    currentAdxMin = parseFloat(btn.dataset.adx);
+    const delta = parseFloat(btn.dataset.adx);   // e.g. -5 or +5
+    currentAdxMin = Math.max(0, currentAdxMin + delta);
     localStorage.setItem('adxMin', currentAdxMin);
+    updateSensitivityDisplay();
     connect(currentSymbol, currentInterval);
   });
 });
 
 document.querySelectorAll('.conf-btn').forEach(btn => {
   btn.addEventListener('click', () => {
-    activateBtn('.conf-btn', btn);
     currentMinConf = parseInt(btn.dataset.conf, 10);
     localStorage.setItem('minConf', currentMinConf);
+    updateSensitivityDisplay();
     connect(currentSymbol, currentInterval);
   });
 });
 
 document.querySelectorAll('.cd-btn').forEach(btn => {
   btn.addEventListener('click', () => {
-    activateBtn('.cd-btn', btn);
-    currentCooldown = parseInt(btn.dataset.cd, 10);
+    const delta = parseInt(btn.dataset.cd, 10);  // e.g. -1 or +1
+    currentCooldown = Math.max(0, currentCooldown + delta);
     localStorage.setItem('cooldown', currentCooldown);
+    updateSensitivityDisplay();
     connect(currentSymbol, currentInterval);
   });
 });
@@ -568,10 +588,13 @@ function renderTriggers(list) {
     const row = document.createElement('div');
     row.className = `trig-row${t.active ? '' : ' inactive'}`;
     row.dataset.id = t.id;
+    const adxHint = t.adx_threshold != null ? ` adx≥${t.adx_threshold}` : '';
+    const cdHint  = t.cooldown_bars  != null ? ` cd${t.cooldown_bars}`   : '';
     row.innerHTML =
       `<span class="trig-sym">${t.symbol}</span>` +
       `<span class="trig-iv">${t.interval}</span>` +
       `<span class="trig-conf trig-conf-${t.min_confidence}">${t.min_confidence}</span>` +
+      (adxHint || cdHint ? `<span style="font-size:8px;color:#4C525E">${adxHint}${cdHint}</span>` : '') +
       `<span class="trig-edit" title="Edit">✏</span>` +
       `<span class="trig-toggle" title="${t.active ? 'Disable' : 'Enable'}">${t.active ? '✓' : '○'}</span>` +
       `<span class="trig-del" title="Delete">✕</span>`;
@@ -595,6 +618,11 @@ function renderTriggers(list) {
   });
 }
 
+// Auto-fill tier hints when interval changes inside the trigger form
+document.getElementById('trig-iv').addEventListener('change', e => {
+  applyTierToTriggerForm(e.target.value);
+});
+
 function openEditForm(t) {
   currentEditId = t.id;
   document.getElementById('trig-sym').value = t.symbol;
@@ -602,6 +630,10 @@ function openEditForm(t) {
     opt.selected = opt.value === t.interval;
   for (const opt of document.getElementById('trig-conf').options)
     opt.selected = opt.value === t.min_confidence;
+  // Populate ADX / cooldown (show stored value or blank for "tier default")
+  document.getElementById('trig-adx').value = t.adx_threshold != null ? t.adx_threshold : '';
+  document.getElementById('trig-cd').value  = t.cooldown_bars  != null ? t.cooldown_bars  : '';
+  applyTierToTriggerForm(t.interval);
   document.getElementById('trig-save-btn').textContent = 'Update Trigger';
   const form = document.getElementById('trig-add-form');
   form.classList.add('open');
@@ -616,8 +648,11 @@ document.getElementById('trig-add-btn').addEventListener('click', () => {
   document.getElementById('trig-save-btn').textContent = 'Save Trigger';
   if (opening) {
     document.getElementById('trig-sym').value = currentSymbol;
+    document.getElementById('trig-adx').value = '';
+    document.getElementById('trig-cd').value  = '';
     for (const opt of document.getElementById('trig-iv').options)
       opt.selected = opt.value === currentInterval;
+    applyTierToTriggerForm(currentInterval);
     form.classList.add('open');
     form.scrollIntoView({ block: 'nearest' });
   } else {
@@ -652,10 +687,18 @@ document.getElementById('trig-save-btn').addEventListener('click', () => {
   const url    = editId ? `/api/triggers/${editId}` : '/api/triggers';
   const method = editId ? 'PUT' : 'POST';
 
+  const adxRaw = document.getElementById('trig-adx').value.trim();
+  const cdRaw  = document.getElementById('trig-cd').value.trim();
+  const payload = {
+    symbol: sym, interval: iv, min_confidence: conf,
+    adx_threshold: adxRaw !== '' ? parseFloat(adxRaw) : null,
+    cooldown_bars: cdRaw  !== '' ? parseInt(cdRaw, 10) : null,
+  };
+
   fetch(url, {
     method,
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ symbol: sym, interval: iv, min_confidence: conf }),
+    body: JSON.stringify(payload),
   })
   .then(r => {
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -920,5 +963,14 @@ function renderSimulation(s) {
 }
 
 // ── Start ─────────────────────────────────────────────────────────────────────
+
+// Sync interval dropdown and sensitivity bar to initial state
+(function initUI() {
+  const sel = document.getElementById('iv-select');
+  if (sel) {
+    for (const opt of sel.options) opt.selected = opt.value === currentInterval;
+  }
+  updateSensitivityDisplay();
+})();
 
 connect(currentSymbol, currentInterval);

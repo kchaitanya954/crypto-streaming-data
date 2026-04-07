@@ -41,13 +41,17 @@ static_dir = Path(__file__).parent / "static"
 class TriggerCreate(BaseModel):
     symbol:         str
     interval:       str
-    min_confidence: str = "MEDIUM"
+    min_confidence: str            = "MEDIUM"
+    adx_threshold:  Optional[float] = None   # None = use interval-tier default
+    cooldown_bars:  Optional[int]   = None   # None = use interval-tier default
 
 class TriggerUpdate(BaseModel):
-    symbol:         Optional[str]  = None
-    interval:       Optional[str]  = None
-    min_confidence: Optional[str]  = None
-    active:         Optional[bool] = None
+    symbol:         Optional[str]   = None
+    interval:       Optional[str]   = None
+    min_confidence: Optional[str]   = None
+    active:         Optional[bool]  = None
+    adx_threshold:  Optional[float] = None
+    cooldown_bars:  Optional[int]   = None
 
 app = FastAPI()
 app.mount("/static", StaticFiles(directory=static_dir), name="static")
@@ -107,11 +111,20 @@ async def api_create_trigger(request: Request, body: TriggerCreate):
     sym  = body.symbol.upper()
     iv   = body.interval
     conf = body.min_confidence.upper()
-    tid  = await queries.create_trigger(db, sym, iv, conf)
+    tid  = await queries.create_trigger(
+        db, sym, iv, conf,
+        adx_threshold=body.adx_threshold,
+        cooldown_bars=body.cooldown_bars,
+    )
     if tg_bot and settings:
         from telegram_bot.alerts import send_trigger_alert
         await send_trigger_alert(tg_bot, settings.telegram_chat_id, "created", sym, iv, conf)
-    return {"id": tid, "symbol": sym, "interval": iv, "min_confidence": conf, "active": True}
+    return {
+        "id": tid, "symbol": sym, "interval": iv,
+        "min_confidence": conf, "active": True,
+        "adx_threshold": body.adx_threshold,
+        "cooldown_bars": body.cooldown_bars,
+    }
 
 
 @app.put("/api/triggers/{trigger_id}")
@@ -127,6 +140,8 @@ async def api_update_trigger(request: Request, trigger_id: int, body: TriggerUpd
         db, trigger_id,
         symbol=body.symbol, interval=body.interval,
         min_confidence=body.min_confidence, active=body.active,
+        adx_threshold=body.adx_threshold,
+        cooldown_bars=body.cooldown_bars,
     )
     if tg_bot and settings and trig:
         from telegram_bot.alerts import send_trigger_alert
@@ -409,12 +424,16 @@ async def api_analytics(
 @app.websocket("/ws")
 async def ws_endpoint(
     websocket: WebSocket,
-    symbol:    str = Query(default="ethusdt"),
-    interval:  str = Query(default="1m"),
+    symbol:    str   = Query(default="ethusdt"),
+    interval:  str   = Query(default="1m"),
+    adx_min:   float = Query(default=None),
+    min_conf:  int   = Query(default=None),
+    cooldown:  int   = Query(default=None),
 ):
     await websocket.accept()
     task = asyncio.create_task(
-        _connection_loop(websocket, symbol.lower(), interval, websocket.app)
+        _connection_loop(websocket, symbol.lower(), interval, websocket.app,
+                         adx_min=adx_min, min_conf=min_conf, cooldown=cooldown)
     )
     try:
         while True:
@@ -426,13 +445,23 @@ async def ws_endpoint(
         await asyncio.gather(task, return_exceptions=True)
 
 
-async def _connection_loop(ws: WebSocket, symbol: str, interval: str, app_state) -> None:
+async def _connection_loop(
+    ws: WebSocket, symbol: str, interval: str, app_state, *,
+    adx_min: Optional[float] = None,
+    min_conf: Optional[int]  = None,
+    cooldown: Optional[int]  = None,
+) -> None:
     """Fetch history, send it, then stream live candles + signals to one client."""
     db       = getattr(app_state.state, "db",           None)
     tg_bot   = getattr(app_state.state, "telegram_bot", None)
     settings = getattr(app_state.state, "settings",     None)
 
-    detector = SignalDetector(**params_for_interval(interval))
+    # Start from tier defaults, then apply any manual overrides from the UI
+    det_params = params_for_interval(interval)
+    if adx_min  is not None: det_params["adx_threshold"]     = adx_min
+    if min_conf is not None: det_params["min_confirmations"] = min_conf
+    if cooldown is not None: det_params["cooldown_bars"]     = cooldown
+    detector = SignalDetector(**det_params)
     try:
         await ws.send_json({"type": "meta", "symbol": symbol.upper(), "interval": interval})
 
@@ -477,7 +506,7 @@ async def _connection_loop(ws: WebSocket, symbol: str, interval: str, app_state)
                         try:
                             active_triggers = await queries.get_triggers(db)
                             trigger_matched = any(
-                                queries.trigger_matches(t, symbol, interval, signal.confidence)
+                                queries.trigger_matches(t, symbol, interval, signal.confidence, signal.adx_val)
                                 for t in active_triggers
                             )
                         except Exception:

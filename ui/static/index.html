@@ -473,19 +473,25 @@
   <button id="sidebar-toggle" title="Menu">☰</button>
   <input id="symbol-input" type="text" value="BTCUSDT" title="Press Enter to apply" spellcheck="false" />
   <div class="sep"></div>
-  <input  id="iv-num"  type="number" min="1" max="999" value="1"
-    style="width:46px;background:#131722;color:#D1D4DC;border:1px solid #2A2E39;border-radius:4px;padding:3px 6px;font-size:12px;outline:none;-moz-appearance:textfield" />
-  <select id="iv-unit"
-    style="background:#131722;color:#D1D4DC;border:1px solid #2A2E39;border-radius:4px;padding:3px 6px;font-size:12px;outline:none;cursor:pointer">
-    <option value="s">sec</option>
-    <option value="m" selected>min</option>
-    <option value="h">hour</option>
-    <option value="d">day</option>
-    <option value="w">week</option>
+  <select id="iv-select"
+    style="background:#131722;color:#D1D4DC;border:1px solid #2A2E39;border-radius:4px;padding:3px 8px;font-size:12px;outline:none;cursor:pointer">
+    <option value="1s">1s</option>
+    <option value="1m" selected>1m</option>
+    <option value="3m">3m</option>
+    <option value="5m">5m</option>
+    <option value="15m">15m</option>
+    <option value="30m">30m</option>
+    <option value="1h">1h</option>
+    <option value="2h">2h</option>
+    <option value="4h">4h</option>
+    <option value="6h">6h</option>
+    <option value="8h">8h</option>
+    <option value="12h">12h</option>
+    <option value="1d">1d</option>
+    <option value="3d">3d</option>
+    <option value="1w">1w</option>
+    <option value="1M">1M</option>
   </select>
-  <button id="iv-go" class="iv-btn active" style="font-size:11px;padding:3px 10px">Apply</button>
-  <span   id="iv-err" style="font-size:10px;color:#EF5350"></span>
-  <span   id="iv-tier" style="font-size:9px;color:#4C525E;background:#1E222D;border:1px solid #2A2E39;border-radius:3px;padding:2px 5px">scalping</span>
   <div id="status-wrap">
     <button id="analytics-btn" title="Signal performance analytics">Analytics</button>
     <div id="status-dot"></div>
@@ -495,12 +501,13 @@
 
 <!-- Sensitivity bar -->
 <div id="sensitivity-bar">
+  <span id="tier-badge" style="font-size:10px;color:#787B86;background:#1E222D;border:1px solid #2A2E39;border-radius:3px;padding:2px 6px;white-space:nowrap">scalping</span>
+  <div class="sens-sep"></div>
   <div class="sens-group">
     <span class="sens-label">ADX ≥</span>
-    <button class="sens-btn adx-btn" data-adx="20">20</button>
-    <button class="sens-btn adx-btn" data-adx="25">25</button>
-    <button class="sens-btn adx-btn active" data-adx="30">30</button>
-    <button class="sens-btn adx-btn" data-adx="35">35</button>
+    <span id="adx-val-display" style="font-size:12px;color:#26a69a;font-weight:600;min-width:24px;text-align:center">12</span>
+    <button class="sens-btn adx-btn" data-adx="-5" title="Lower ADX threshold">−5</button>
+    <button class="sens-btn adx-btn" data-adx="+5" title="Raise ADX threshold">+5</button>
   </div>
   <div class="sens-sep"></div>
   <div class="sens-group">
@@ -512,10 +519,9 @@
   <div class="sens-sep"></div>
   <div class="sens-group">
     <span class="sens-label">Cooldown</span>
-    <button class="sens-btn cd-btn" data-cd="0">0</button>
-    <button class="sens-btn cd-btn active" data-cd="3">3</button>
-    <button class="sens-btn cd-btn" data-cd="5">5</button>
-    <button class="sens-btn cd-btn" data-cd="10">10</button>
+    <span id="cd-val-display" style="font-size:12px;color:#26a69a;font-weight:600;min-width:18px;text-align:center">2</span>
+    <button class="sens-btn cd-btn" data-cd="-1" title="Fewer cooldown bars">−1</button>
+    <button class="sens-btn cd-btn" data-cd="+1" title="More cooldown bars">+1</button>
   </div>
 </div>
 
@@ -550,13 +556,23 @@
           <select id="trig-iv"   class="trig-sel">
             <option>1s</option><option selected>1m</option><option>3m</option>
             <option>5m</option><option>15m</option><option>30m</option>
-            <option>1h</option><option>4h</option>
+            <option>1h</option><option>2h</option><option>4h</option>
+            <option>6h</option><option>12h</option><option>1d</option>
           </select>
           <select id="trig-conf" class="trig-sel">
             <option value="LOW">LOW</option>
             <option value="MEDIUM" selected>MEDIUM</option>
             <option value="HIGH">HIGH</option>
           </select>
+        </div>
+        <div class="trig-form-row" style="gap:6px;align-items:center">
+          <span style="font-size:9px;color:#787B86">ADX ≥</span>
+          <input id="trig-adx" class="trig-inp" type="number" min="0" max="100" step="1"
+            style="width:44px" placeholder="—" title="Min ADX (blank = tier default)" />
+          <span style="font-size:9px;color:#787B86">Cooldown</span>
+          <input id="trig-cd" class="trig-inp" type="number" min="0" max="50" step="1"
+            style="width:40px" placeholder="—" title="Cooldown bars (blank = tier default)" />
+          <span id="trig-tier-hint" style="font-size:9px;color:#4C525E;margin-left:auto"></span>
         </div>
         <button class="trig-save-btn" id="trig-save-btn">Save Trigger</button>
       </div>

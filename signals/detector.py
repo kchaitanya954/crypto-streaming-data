@@ -191,6 +191,7 @@ class SignalDetector:
         self.bb_period         = bb_period
         self.bb_std            = bb_std
         self.cooldown_bars     = cooldown_bars
+        self._bar_count:       int = 0
         self._last_signal_bar: int = -999   # bar index when last signal fired
 
         self.opens:      list[float] = []
