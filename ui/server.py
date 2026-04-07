@@ -188,40 +188,82 @@ def _simulate_portfolio(
     sell_pct: float,
 ) -> dict:
     """
-    Slicing portfolio simulation.
+    Adaptive DCA portfolio simulation.
 
-    BUY signal  → spend buy_pct% of available USDT on that coin.
-    SELL signal → sell sell_pct% of that coin's holdings back to USDT.
+    Each (symbol, interval) stream is treated as an independent position.
 
-    Holdings are tracked per base currency (e.g. BTC for BTCUSDT).
-    USDT pool is shared across all symbols.
+    BUY rules:
+      - Entry 1 (flat):  spend buy_pct% of total USDT
+      - Entry 2 (DCA):   spend buy_pct/2% (half size to average down)
+      - Entry 3 (DCA):   spend buy_pct/4% (quarter size)
+      - Entry 4+: skipped — max 3 DCA entries per stream
+
+    SELL rules (confidence-weighted partial exits):
+      - HIGH:   close 100% of this stream's position
+      - MEDIUM: close 60%
+      - LOW:    close 30%
+      Consecutive SELLs keep reducing until position is flat, then skip.
+
+    Holdings and P&L are tracked per stream (symbol+interval).
+    USDT pool is shared across all streams.
     """
-    usdt: float = initial_usdt
-    holdings: dict[str, float] = {}   # base_currency → coin amount
-    sim_trades: list[dict] = []
+    _MAX_DCA      = 3
+    _DCA_SCALE    = [1.0, 0.5, 0.25]        # fraction of buy_pct for each DCA entry
+    _SELL_RATIO   = {"HIGH": 1.0, "MEDIUM": 0.6, "LOW": 0.3}
 
-    # track last seen price per symbol for final valuation
+    usdt: float             = initial_usdt
+    # Per-stream state
+    stream_coins:   dict[tuple, float] = {}  # (sym, iv) → coins held
+    stream_entries: dict[tuple, int]   = {}  # (sym, iv) → DCA entry count
+    stream_avg:     dict[tuple, float] = {}  # (sym, iv) → avg entry price
+    # Per-symbol last price (shared across intervals for valuation)
     last_price: dict[str, float] = {}
+    # Global coin holdings (base → total coins, across all intervals)
+    holdings: dict[str, float] = {}
+
+    sim_trades:   list[dict] = []
+    skipped_buys: int = 0
+    skipped_sells: int = 0
 
     for sig in signals:   # oldest-first
-        sym   = sig["symbol"]           # e.g. "BTCUSDT"
-        price = sig["entry_price"]
+        sym      = sig["symbol"]
+        interval = sig["interval"]
+        price    = sig["entry_price"]
+        conf     = sig["confidence"]
+        stream   = (sym, interval)
         last_price[sym] = price
 
-        # Derive base currency: strip known quote suffixes
+        # Derive base currency
         base = sym
         for quote in ("USDT", "BTC", "ETH", "BNB", "INR"):
             if sym.endswith(quote):
                 base = sym[: -len(quote)]
                 break
 
+        entries     = stream_entries.get(stream, 0)
+        coins_held  = stream_coins.get(stream, 0.0)
+
         if sig["direction"] == "BUY":
-            spend = usdt * (buy_pct / 100.0)
-            if spend < 0.001:
+            if entries >= _MAX_DCA:
+                skipped_buys += 1
+                continue                        # position at max — skip
+            scale   = _DCA_SCALE[entries]
+            spend   = usdt * (buy_pct / 100.0) * scale
+            if spend < 0.0001 or usdt < spend:
+                skipped_buys += 1
                 continue
-            coins = spend / price
-            usdt -= spend
-            holdings[base] = holdings.get(base, 0.0) + coins
+            coins   = spend / price
+            usdt   -= spend
+            # Update stream & global state
+            stream_entries[stream] = entries + 1
+            stream_coins[stream]   = coins_held + coins
+            holdings[base]         = holdings.get(base, 0.0) + coins
+            # Update average entry price (volume-weighted)
+            prev_avg = stream_avg.get(stream, 0.0)
+            stream_avg[stream] = (
+                (prev_avg * coins_held + price * coins) / (coins_held + coins)
+                if coins_held + coins > 0 else price
+            )
             portfolio_val = usdt + sum(
                 holdings.get(b, 0) * last_price.get(b + "USDT", last_price.get(sym, price))
                 for b in holdings
@@ -229,9 +271,10 @@ def _simulate_portfolio(
             sim_trades.append({
                 "time":          sig["open_time"] // 1000,
                 "symbol":        sym,
-                "interval":      sig["interval"],
+                "interval":      interval,
                 "direction":     "BUY",
-                "confidence":    sig["confidence"],
+                "confidence":    conf,
+                "dca_entry":     entries + 1,
                 "price":         round(price, 4),
                 "usdt_spent":    round(spend, 4),
                 "coins_bought":  round(coins, 8),
@@ -240,13 +283,29 @@ def _simulate_portfolio(
             })
 
         elif sig["direction"] == "SELL":
-            coin_held = holdings.get(base, 0.0)
-            if coin_held < 1e-10:
-                continue
-            coins_sold = coin_held * (sell_pct / 100.0)
+            if coins_held < 1e-10:
+                skipped_sells += 1
+                continue                        # already flat — skip
+
+            ratio      = _SELL_RATIO.get(conf, 0.6)
+            coins_sold = coins_held * ratio
             received   = coins_sold * price
-            usdt      += received
-            holdings[base] = coin_held - coins_sold
+            avg_entry  = stream_avg.get(stream, price)
+            pnl_pct    = (price - avg_entry) / avg_entry * 100 if avg_entry else 0.0
+
+            usdt   += received
+            stream_coins[stream] = coins_held - coins_sold
+            holdings[base]       = max(0.0, holdings.get(base, 0.0) - coins_sold)
+
+            # Update entry count proportionally (or zero on full exit)
+            if ratio >= 1.0 or stream_coins[stream] < 1e-10:
+                stream_entries[stream] = 0
+                stream_avg[stream]     = 0.0
+                stream_coins[stream]   = 0.0
+            else:
+                new_count = max(0, round(entries * (1.0 - ratio)))
+                stream_entries[stream] = new_count
+
             portfolio_val = usdt + sum(
                 holdings.get(b, 0) * last_price.get(b + "USDT", last_price.get(sym, price))
                 for b in holdings
@@ -254,23 +313,24 @@ def _simulate_portfolio(
             sim_trades.append({
                 "time":           sig["open_time"] // 1000,
                 "symbol":         sym,
-                "interval":       sig["interval"],
+                "interval":       interval,
                 "direction":      "SELL",
-                "confidence":     sig["confidence"],
+                "confidence":     conf,
+                "exit_pct":       round(ratio * 100),
                 "price":          round(price, 4),
                 "usdt_received":  round(received, 4),
                 "coins_sold":     round(coins_sold, 8),
+                "pnl_pct":        round(pnl_pct, 3),
                 "usdt_balance":   round(usdt, 4),
                 "portfolio_val":  round(portfolio_val, 4),
             })
 
-    # Final valuation: cash + mark holdings at last seen price
+    # Final valuation
     holding_value = sum(
-        holdings.get(base, 0) * last_price.get(base + "USDT", 0)
-        for base in holdings
+        holdings.get(b, 0) * last_price.get(b + "USDT", 0) for b in holdings
     )
-    final_value   = usdt + holding_value
-    total_return  = (final_value - initial_usdt) / initial_usdt * 100
+    final_value  = usdt + holding_value
+    total_return = (final_value - initial_usdt) / initial_usdt * 100
 
     return {
         "initial_usdt":       round(initial_usdt, 2),
@@ -281,6 +341,8 @@ def _simulate_portfolio(
         "final_value_usdt":   round(final_value, 4),
         "total_return_pct":   round(total_return, 3),
         "holdings":           {k: round(v, 8) for k, v in holdings.items() if v > 1e-10},
+        "skipped_buys":       skipped_buys,
+        "skipped_sells":      skipped_sells,
         "sim_trades":         sim_trades[-100:],
         "sim_trade_count":    len(sim_trades),
     }
@@ -402,9 +464,12 @@ async def api_analytics(
         for sym in sorted({t["symbol"] for t in all_trades})
     }
 
+    all_symbols = sorted({s["symbol"] for s in signals})
+
     return {
         "total_signals":  len(signals),
         "total_trades":   n,
+        "all_symbols":    all_symbols,
         "open_positions": open_positions,
         "win_rate":       round(len(wins) / n * 100, 1) if n else 0,
         "avg_gain_pct":   round(sum(t["pnl_pct"] for t in wins)   / len(wins)   if wins   else 0, 3),
