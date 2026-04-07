@@ -402,9 +402,12 @@ async def api_analytics(
         for sym in sorted({t["symbol"] for t in all_trades})
     }
 
+    all_symbols = sorted({s["symbol"] for s in signals})
+
     return {
         "total_signals":  len(signals),
         "total_trades":   n,
+        "all_symbols":    all_symbols,
         "open_positions": open_positions,
         "win_rate":       round(len(wins) / n * 100, 1) if n else 0,
         "avg_gain_pct":   round(sum(t["pnl_pct"] for t in wins)   / len(wins)   if wins   else 0, 3),

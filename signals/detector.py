@@ -91,6 +91,7 @@ def params_for_interval(interval: str) -> dict:
             adx_period=7,   adx_threshold=12.0,
             min_histogram=0.0,
             min_confirmations=1, cooldown_bars=2,
+            take_profit_pct=0.8,  stop_loss_pct=0.4,
         )
     elif minutes < 60:       # ── Intraday (3m – 30m) ──
         return dict(
@@ -100,6 +101,7 @@ def params_for_interval(interval: str) -> dict:
             adx_period=10,  adx_threshold=18.0,
             min_histogram=0.02,
             min_confirmations=1, cooldown_bars=3,
+            take_profit_pct=2.0,  stop_loss_pct=1.0,
         )
     elif minutes < 360:      # ── Swing (1h – 4h) ──
         return dict(
@@ -109,6 +111,7 @@ def params_for_interval(interval: str) -> dict:
             adx_period=14,  adx_threshold=20.0,
             min_histogram=0.1,
             min_confirmations=1, cooldown_bars=5,
+            take_profit_pct=4.0,  stop_loss_pct=2.0,
         )
     else:                    # ── Position (6h, 12h, 1d, 1w …) ──
         return dict(
@@ -118,6 +121,7 @@ def params_for_interval(interval: str) -> dict:
             adx_period=14,  adx_threshold=22.0,
             min_histogram=1.0,
             min_confirmations=1, cooldown_bars=3,
+            take_profit_pct=8.0,  stop_loss_pct=4.0,
         )
 
 
@@ -175,6 +179,8 @@ class SignalDetector:
         bb_period:         int   = BB_PERIOD,
         bb_std:            float = BB_STD,
         cooldown_bars:     int   = COOLDOWN_BARS,
+        take_profit_pct:   float = 3.0,
+        stop_loss_pct:     float = 1.5,
     ) -> None:
         self.macd_fast         = macd_fast
         self.macd_slow         = macd_slow
@@ -191,8 +197,13 @@ class SignalDetector:
         self.bb_period         = bb_period
         self.bb_std            = bb_std
         self.cooldown_bars     = cooldown_bars
+        self.take_profit_pct   = take_profit_pct
+        self.stop_loss_pct     = stop_loss_pct
         self._bar_count:       int = 0
         self._last_signal_bar: int = -999   # bar index when last signal fired
+        # Position tracking — prevents consecutive same-direction signals
+        self._open_position:   Optional[str]   = None   # "LONG", "SHORT", or None
+        self._entry_price:     Optional[float] = None   # price at which position was entered
 
         self.opens:      list[float] = []
         self.closes:     list[float] = []
@@ -223,6 +234,21 @@ class SignalDetector:
         signal = self._detect()
         if signal:
             self._last_signal_bar = self._bar_count
+            # Update position state so the next signal must be in the opposite direction
+            if signal.direction == "BUY":
+                if self._open_position is None:
+                    self._open_position = "LONG"
+                    self._entry_price = signal.entry_price
+                elif self._open_position == "SHORT":
+                    self._open_position = None
+                    self._entry_price = None
+            else:  # SELL
+                if self._open_position is None:
+                    self._open_position = "SHORT"
+                    self._entry_price = signal.entry_price
+                elif self._open_position == "LONG":
+                    self._open_position = None
+                    self._entry_price = None
         return signal
 
     def history_snapshots(self) -> list[IndicatorSnapshot]:
@@ -270,7 +296,92 @@ class SignalDetector:
 
     # ── Private ───────────────────────────────────────────────────────────────
 
+    def _check_position_exit(self) -> Optional[Signal]:
+        """
+        When in an open position, check for exit conditions:
+          1. Take-profit: price moved >= take_profit_pct in our favour
+          2. Stop-loss:   price moved >= stop_loss_pct against us
+          3. Technical:   MACD crosses in the exit direction
+
+        Exit signals use relaxed criteria — no EMA or ADX filter needed
+        because we're closing an existing position, not opening a new one.
+        """
+        if self._open_position is None or self._entry_price is None:
+            return None
+
+        closes = self.closes
+        highs  = self.highs
+        lows   = self.lows
+        n      = len(closes)
+        price  = closes[-1]
+
+        if n < 2:
+            return None
+
+        pct_change = (price - self._entry_price) / self._entry_price * 100
+        is_long    = self._open_position == "LONG"
+        exit_reason: Optional[str] = None
+
+        # --- Price-based exits ---
+        if is_long:
+            profit_pct = pct_change
+        else:
+            profit_pct = -pct_change   # short profits when price falls
+
+        if profit_pct >= self.take_profit_pct:
+            exit_reason = f"Take-profit +{profit_pct:.2f}% (target {self.take_profit_pct}%)"
+        elif profit_pct <= -self.stop_loss_pct:
+            exit_reason = f"Stop-loss {profit_pct:.2f}% (limit -{self.stop_loss_pct}%)"
+
+        # --- MACD technical exit (in addition to or instead of price exits) ---
+        macd_res  = macd(closes, fast_period=self.macd_fast,
+                         slow_period=self.macd_slow, signal_period=self.macd_signal)
+        macd_prev = macd_res.macd_line[n - 2]
+        macd_curr = macd_res.macd_line[n - 1]
+        sig_prev  = macd_res.signal_line[n - 2]
+        sig_curr  = macd_res.signal_line[n - 1]
+
+        if all(v is not None for v in (macd_prev, macd_curr, sig_prev, sig_curr)):
+            if is_long and macd_prev >= sig_prev and macd_curr < sig_curr:
+                if exit_reason is None:
+                    exit_reason = "MACD cross-down: closing long"
+            elif not is_long and macd_prev <= sig_prev and macd_curr > sig_curr:
+                if exit_reason is None:
+                    exit_reason = "MACD cross-up: closing short"
+
+        if exit_reason is None:
+            return None
+
+        # Build the closing signal
+        adx_res = adx(highs, lows, closes, period=self.adx_period)
+        adx_val = adx_res.adx[n - 1] or 0.0
+        hist    = (macd_curr - sig_curr) if (macd_curr is not None and sig_curr is not None) else 0.0
+        direction = "SELL" if is_long else "BUY"
+
+        return self._build_signal(
+            direction=direction,
+            price=price,
+            macd_curr=macd_curr or 0.0,
+            sig_curr=sig_curr or 0.0,
+            histogram=hist,
+            adx_val=adx_val,
+            trend_note=(
+                f"Position exit · entry={self._entry_price:.4f} · "
+                f"change={pct_change:+.2f}%"
+            ),
+            confirmations=[
+                (True, exit_reason),
+                (True, f"Position mgmt ({self._open_position})"),
+            ],
+        )
+
     def _detect(self) -> Optional[Signal]:
+        # If in an open position, only look for exit signals
+        if self._open_position is not None:
+            if self._bar_count - self._last_signal_bar < self.cooldown_bars:
+                return None
+            return self._check_position_exit()
+
         # Cooldown gate — prevent whipsaw signals on consecutive candles
         if self._bar_count - self._last_signal_bar < self.cooldown_bars:
             return None

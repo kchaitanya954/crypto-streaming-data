@@ -32,11 +32,13 @@ async def create_bot(settings, db, exchange) -> Application:
     app.bot_data["settings"] = settings
 
     # Command handlers
-    app.add_handler(CommandHandler("start",   handlers.cmd_start))
-    app.add_handler(CommandHandler("status",  handlers.cmd_status))
-    app.add_handler(CommandHandler("buy",     handlers.cmd_buy))
-    app.add_handler(CommandHandler("sell",    handlers.cmd_sell))
-    app.add_handler(CommandHandler("history", handlers.cmd_history))
+    app.add_handler(CommandHandler("start",     handlers.cmd_start))
+    app.add_handler(CommandHandler("status",    handlers.cmd_status))
+    app.add_handler(CommandHandler("portfolio", handlers.cmd_portfolio))
+    app.add_handler(CommandHandler("triggers",  handlers.cmd_triggers))
+    app.add_handler(CommandHandler("buy",       handlers.cmd_buy))
+    app.add_handler(CommandHandler("sell",      handlers.cmd_sell))
+    app.add_handler(CommandHandler("history",   handlers.cmd_history))
 
     # Inline keyboard callbacks
     app.add_handler(CallbackQueryHandler(handlers.on_confirm_trade, pattern=r"^confirm_"))

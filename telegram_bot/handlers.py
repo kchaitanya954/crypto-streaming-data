@@ -42,6 +42,8 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         "*Crypto Trading Bot*\n\n"
         "Commands:\n"
         "/status — balances + recent signals\n"
+        "/portfolio — full portfolio breakdown\n"
+        "/triggers — list all alert triggers\n"
         "/buy `MARKET QTY PRICE` — place a buy order\n"
         "  e.g. `/buy BTCUSDT 0.001 67000`\n"
         "/sell `MARKET QTY PRICE` — place a sell order\n"
@@ -93,6 +95,73 @@ async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                     )
         except Exception:
             pass
+
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+
+
+# ── /portfolio ────────────────────────────────────────────────────────────────
+
+async def cmd_portfolio(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Full portfolio: all non-zero balances with USDT equivalent estimates."""
+    exchange = _exchange(ctx)
+    if exchange is None:
+        await update.message.reply_text("_Exchange not configured._", parse_mode=ParseMode.MARKDOWN)
+        return
+
+    lines = ["*Portfolio (CoinDCX)*"]
+    try:
+        balances = await exchange.get_balances()
+        non_zero = [b for b in balances if float(b.get("balance", 0)) + float(b.get("locked_balance", 0)) > 1e-8]
+        if not non_zero:
+            lines.append("  _No balances found._")
+        else:
+            for b in non_zero:
+                avail  = float(b.get("balance", 0))
+                locked = float(b.get("locked_balance", 0))
+                total  = avail + locked
+                lock_str = f" 🔒{locked:.6f}" if locked > 0 else ""
+                lines.append(f"  `{b['currency']}` {total:.6f}{lock_str}")
+    except Exception as e:
+        lines.append(f"  _Error fetching balances: {e}_")
+
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+
+
+# ── /triggers ─────────────────────────────────────────────────────────────────
+
+async def cmd_triggers(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """List all triggers (active and inactive) with their settings."""
+    db = _db(ctx)
+    if db is None:
+        await update.message.reply_text("_Database not configured._", parse_mode=ParseMode.MARKDOWN)
+        return
+
+    from database import queries
+    triggers = await queries.get_triggers(db, active_only=False)
+
+    if not triggers:
+        await update.message.reply_text("No triggers configured.", parse_mode=ParseMode.MARKDOWN)
+        return
+
+    active   = [t for t in triggers if t.get("active")]
+    inactive = [t for t in triggers if not t.get("active")]
+
+    lines = [f"*Triggers ({len(triggers)} total)*"]
+
+    def _fmt(t: dict) -> str:
+        adx_str = f" adx≥{t['adx_threshold']}" if t.get("adx_threshold") else ""
+        cd_str  = f" cd={t['cooldown_bars']}"   if t.get("cooldown_bars") is not None else ""
+        return (
+            f"  `#{t['id']}` {t['symbol']} {t['interval']} "
+            f"{t['min_confidence']}{adx_str}{cd_str}"
+        )
+
+    if active:
+        lines.append("\n✅ *Active*")
+        lines.extend(_fmt(t) for t in active)
+    if inactive:
+        lines.append("\n⏸ *Inactive*")
+        lines.extend(_fmt(t) for t in inactive)
 
     await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
 

@@ -740,7 +740,8 @@ loadTriggers();
 
 // ── Analytics ─────────────────────────────────────────────────────────────────
 
-let analyticsOpen = false;
+let analyticsOpen   = false;
+const knownSymbols  = new Set();   // accumulates all symbols ever seen; never cleared
 
 document.getElementById('analytics-btn').addEventListener('click', () => {
   document.getElementById('analytics-modal').classList.add('open');
@@ -798,17 +799,20 @@ function loadAnalytics() {
 function renderAnalytics(d) {
   if (d.error) return;
 
-  // Populate symbol dropdown from by_symbol keys (keep ALL + seen symbols)
+  // Accumulate symbols from all_signals (never shrink the dropdown)
   const symSel = document.getElementById('an-symbol');
   const curSym = symSel.value;
-  const known  = new Set(Object.keys(d.by_symbol));
-  [...symSel.options].forEach(o => { if (o.value !== 'ALL') o.remove(); });
-  known.forEach(s => {
-    const o = document.createElement('option');
-    o.value = o.textContent = s;
-    if (s === curSym) o.selected = true;
-    symSel.appendChild(o);
+  const newSyms = [...(d.all_symbols || []), ...Object.keys(d.by_symbol)];
+  newSyms.forEach(s => {
+    if (!knownSymbols.has(s)) {
+      knownSymbols.add(s);
+      const o = document.createElement('option');
+      o.value = o.textContent = s;
+      symSel.appendChild(o);
+    }
   });
+  // Restore selected value in case DOM order changed
+  symSel.value = curSym;
 
   // Summary cards
   const n = d.total_trades;
