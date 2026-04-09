@@ -293,8 +293,11 @@ function onSignal(msg) {
   markers.sort((a, b) => a.time - b.time);
   candleSeries.setMarkers(markers);
 
-  addSignalCard(msg, msg.trigger_matched);
-  pushNotification(msg);
+  // Sidebar card + push notification only when a trigger matches
+  if (msg.trigger_matched) {
+    addSignalCard(msg, true);
+    pushNotification(msg);
+  }
   mainChart.timeScale().scrollToRealTime();
   if (analyticsOpen) loadAnalytics();
 }
