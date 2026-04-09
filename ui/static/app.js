@@ -711,6 +711,59 @@ document.getElementById('symbol-input').addEventListener('keydown', e => {
   }
 });
 
+// ── Trigger multi-select + bulk delete ───────────────────────────────────────
+
+let selectedTriggers = new Set();
+
+function updateTrigBulkBar() {
+  const n   = selectedTriggers.size;
+  const bar = document.getElementById('trig-bulk-bar');
+  bar.style.display = n > 0 ? 'flex' : 'none';
+  document.getElementById('trig-bulk-info').textContent = `${n} selected`;
+  // Sync select-all checkbox state
+  const allCbs = [...document.querySelectorAll('.trig-row-cb')];
+  const selAll = document.getElementById('trig-select-all');
+  if (allCbs.length === 0) {
+    selAll.indeterminate = false; selAll.checked = false;
+  } else if (n === 0) {
+    selAll.indeterminate = false; selAll.checked = false;
+  } else if (n === allCbs.length) {
+    selAll.indeterminate = false; selAll.checked = true;
+  } else {
+    selAll.indeterminate = true;
+  }
+}
+
+async function deleteSelectedTriggers() {
+  const ids = [...selectedTriggers];
+  if (ids.length === 0) return;
+  try {
+    await fetch('/api/triggers/bulk-delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids }),
+    });
+    selectedTriggers.clear();
+    loadTriggers();
+  } catch (e) { /* ignore */ }
+}
+
+document.getElementById('trig-del-sel-btn').addEventListener('click', deleteSelectedTriggers);
+
+document.getElementById('trig-select-all').addEventListener('change', e => {
+  const cbs = document.querySelectorAll('.trig-row-cb');
+  if (e.target.checked) {
+    cbs.forEach(cb => {
+      cb.checked = true;
+      selectedTriggers.add(parseInt(cb.dataset.id, 10));
+    });
+  } else {
+    cbs.forEach(cb => { cb.checked = false; });
+    selectedTriggers.clear();
+  }
+  updateTrigBulkBar();
+});
+
 // ── Signal filter + bulk controls ────────────────────────────────────────────
 
 document.querySelectorAll('.cf-btn').forEach(btn => {
@@ -750,6 +803,12 @@ function loadTriggers() {
 
 function renderTriggers(list) {
   const el = document.getElementById('triggers-list');
+  // Clear selection state on every re-render
+  selectedTriggers.clear();
+  document.getElementById('trig-select-all').checked       = false;
+  document.getElementById('trig-select-all').indeterminate = false;
+  document.getElementById('trig-bulk-bar').style.display   = 'none';
+
   if (!Array.isArray(list) || list.length === 0) {
     el.innerHTML = '<div class="trig-empty">No triggers</div>';
     return;
@@ -762,6 +821,7 @@ function renderTriggers(list) {
     const adxHint = t.adx_threshold != null ? ` adx≥${t.adx_threshold}` : '';
     const cdHint  = t.cooldown_bars  != null ? ` cd${t.cooldown_bars}`   : '';
     row.innerHTML =
+      `<input type="checkbox" class="trig-cb trig-row-cb" data-id="${t.id}" />` +
       `<span class="trig-sym">${t.symbol}</span>` +
       `<span class="trig-iv">${t.interval}</span>` +
       `<span class="trig-conf trig-conf-${t.min_confidence}">${t.min_confidence}</span>` +
@@ -769,6 +829,13 @@ function renderTriggers(list) {
       `<span class="trig-edit" title="Edit">✏</span>` +
       `<span class="trig-toggle" title="${t.active ? 'Disable' : 'Enable'}">${t.active ? '✓' : '○'}</span>` +
       `<span class="trig-del" title="Delete">✕</span>`;
+
+    row.querySelector('.trig-row-cb').addEventListener('change', e => {
+      const id = parseInt(e.target.dataset.id, 10);
+      if (e.target.checked) selectedTriggers.add(id);
+      else                   selectedTriggers.delete(id);
+      updateTrigBulkBar();
+    });
 
     row.querySelector('.trig-edit').addEventListener('click', () => openEditForm(t));
 
