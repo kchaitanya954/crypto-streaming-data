@@ -271,6 +271,16 @@
     .trig-row.inactive { opacity: 0.45; }
     .trig-empty { font-size: 11px; color: #4C525E; text-align: center; padding: 8px 0; }
 
+    /* Trigger checkbox + bulk bar */
+    .trig-cb { accent-color: #2196F3; cursor: pointer; flex-shrink: 0; }
+    #trig-select-all { margin-right: 4px; }
+    #trig-bulk-bar {
+      display: none; align-items: center; gap: 4px;
+      padding: 3px 8px; background: #1A1D27;
+      border-bottom: 1px solid #2A2E39; flex-shrink: 0;
+    }
+    #trig-bulk-info { font-size: 10px; color: #B2B5BE; flex: 1; }
+
     #trig-add-form {
       display: none; padding: 6px 8px 8px;
       border-top: 1px solid #2A2E39; background: #131722;
@@ -664,9 +674,14 @@
 
     <!-- Triggers panel -->
     <div id="triggers-panel">
-      <div class="sidebar-title" style="display:flex;align-items:center;justify-content:space-between;cursor:default">
-        <span>Triggers</span>
+      <div class="sidebar-title" style="display:flex;align-items:center;gap:4px;cursor:default">
+        <input type="checkbox" id="trig-select-all" class="trig-cb" title="Select / deselect all" />
+        <span style="flex:1">Triggers</span>
         <span id="trig-add-btn" style="cursor:pointer;color:#2196F3;font-size:14px;line-height:1" title="Add trigger">+</span>
+      </div>
+      <div id="trig-bulk-bar">
+        <span id="trig-bulk-info">0 selected</span>
+        <button class="bulk-act-btn danger" id="trig-del-sel-btn">Delete Selected</button>
       </div>
       <div id="trig-add-form">
         <div class="trig-form-row">

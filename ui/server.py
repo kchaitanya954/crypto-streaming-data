@@ -45,6 +45,9 @@ class TriggerCreate(BaseModel):
     adx_threshold:  Optional[float] = None   # None = use interval-tier default
     cooldown_bars:  Optional[int]   = None   # None = use interval-tier default
 
+class TriggerBulkDelete(BaseModel):
+    ids: list[int]
+
 class TriggerUpdate(BaseModel):
     symbol:         Optional[str]   = None
     interval:       Optional[str]   = None
@@ -155,6 +158,17 @@ async def api_update_trigger(request: Request, trigger_id: int, body: TriggerUpd
         conf = (body.min_confidence or trig["min_confidence"]).upper()
         await send_trigger_alert(tg_bot, settings.telegram_chat_id, action, sym, iv, conf)
     return {"ok": True}
+
+
+@app.post("/api/triggers/bulk-delete")
+async def api_bulk_delete_triggers(request: Request, body: TriggerBulkDelete):
+    """Delete multiple triggers in one request."""
+    db       = getattr(request.app.state, "db", None)
+    if db is None:
+        return JSONResponse({"error": "DB not configured"}, status_code=503)
+    for tid in body.ids:
+        await queries.delete_trigger(db, tid)
+    return {"deleted": len(body.ids)}
 
 
 @app.delete("/api/triggers/{trigger_id}")
@@ -587,8 +601,8 @@ async def _connection_loop(
                         except Exception:
                             pass
 
-                    # Send Telegram alert
-                    if tg_bot is not None and settings is not None:
+                    # Send Telegram alert — ONLY when a trigger matches this signal
+                    if tg_bot is not None and settings is not None and trigger_matched:
                         try:
                             from telegram_bot.alerts import send_signal_alert
                             await send_signal_alert(
