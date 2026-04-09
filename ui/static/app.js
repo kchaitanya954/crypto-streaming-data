@@ -14,6 +14,11 @@ let currentAdxMin  = parseFloat(localStorage.getItem('adxMin')  ?? '12');
 let currentMinConf = parseInt(  localStorage.getItem('minConf') ?? '1', 10);
 let currentCooldown= parseInt(  localStorage.getItem('cooldown') ?? '2', 10);
 
+// Signal filter + selection state
+let sigConfFilter = '';   // '' = ALL, 'HIGH', 'MEDIUM', 'LOW'
+let sigTrigFilter = '';   // '' = ALL, 'RSI', 'Stoch', 'OBV'
+let selectedCards = new Set();
+
 // ── Chart creation ────────────────────────────────────────────────────────────
 
 const BASE = {
@@ -357,27 +362,165 @@ function fetchPortfolio() {
 fetchPortfolio();
 setInterval(fetchPortfolio, 30000);
 
-// ── Signal card ───────────────────────────────────────────────────────────────
+// ── Signal card + filter + manage ────────────────────────────────────────────
+
+function getCardTriggers(reasons) {
+  const cats = [];
+  if (reasons.some(r => r.startsWith('RSI')))   cats.push('RSI');
+  if (reasons.some(r => r.startsWith('Stoch'))) cats.push('Stoch');
+  if (reasons.some(r => r.startsWith('OBV')))   cats.push('OBV');
+  return cats;
+}
+
+function cardVisible(card) {
+  const confOk = !sigConfFilter || card.dataset.conf === sigConfFilter;
+  const trigs  = (card.dataset.triggers || '').split(',').filter(Boolean);
+  const trigOk = !sigTrigFilter || trigs.includes(sigTrigFilter);
+  return confOk && trigOk;
+}
+
+function applyCardFilter(card) {
+  card.style.display = cardVisible(card) ? '' : 'none';
+}
+
+function applyAllFilters() {
+  document.querySelectorAll('#signal-list .signal-card').forEach(applyCardFilter);
+}
+
+function toggleSelectCard(card) {
+  if (selectedCards.has(card)) {
+    selectedCards.delete(card);
+    card.classList.remove('sc-selected');
+  } else {
+    selectedCards.add(card);
+    card.classList.add('sc-selected');
+  }
+  updateBulkBar();
+}
+
+function updateBulkBar() {
+  const bar = document.getElementById('sig-bulk-bar');
+  const n   = selectedCards.size;
+  bar.style.display = n > 0 ? 'flex' : 'none';
+  document.getElementById('sig-bulk-info').textContent = `${n} selected`;
+}
+
+function checkEmptyList() {
+  const list = document.getElementById('signal-list');
+  if (!list.querySelector('.signal-card')) {
+    list.innerHTML = '<div class="no-sig">No signals</div>';
+  }
+}
+
+function closeDeleteMenus() {
+  document.querySelectorAll('.sc-del-menu').forEach(m => { m.hidden = true; });
+}
+
+function removeSignalCard(card) {
+  const t = parseFloat(card.dataset.time);
+  markers = markers.filter(m => m.time !== t);
+  if (candleSeries) candleSeries.setMarkers(markers);
+  selectedCards.delete(card);
+  card.remove();
+  updateBulkBar();
+  checkEmptyList();
+}
+
+function deleteByTrigger(trigger) {
+  closeDeleteMenus();
+  document.querySelectorAll('#signal-list .signal-card').forEach(card => {
+    if ((card.dataset.triggers || '').split(',').includes(trigger)) {
+      markers = markers.filter(m => m.time !== parseFloat(card.dataset.time));
+      selectedCards.delete(card);
+      card.remove();
+    }
+  });
+  if (candleSeries) candleSeries.setMarkers(markers);
+  updateBulkBar();
+  checkEmptyList();
+}
+
+function deleteAllSignals() {
+  closeDeleteMenus();
+  markers = [];
+  if (candleSeries) candleSeries.setMarkers([]);
+  selectedCards.clear();
+  document.getElementById('signal-list').innerHTML = '<div class="no-sig">No signals</div>';
+  updateBulkBar();
+}
+
+function deleteSelected() {
+  [...selectedCards].forEach(card => {
+    markers = markers.filter(m => m.time !== parseFloat(card.dataset.time));
+    card.remove();
+  });
+  if (candleSeries) candleSeries.setMarkers(markers);
+  selectedCards.clear();
+  updateBulkBar();
+  checkEmptyList();
+}
+
+document.addEventListener('click', closeDeleteMenus);
 
 function addSignalCard(msg, triggerMatch = false) {
-  const list = document.getElementById('signal-list');
+  const list    = document.getElementById('signal-list');
   list.querySelector('.no-sig')?.remove();
 
-  const time  = new Date(msg.time * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-  const price = msg.entry_price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const time    = new Date(msg.time * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  const price   = msg.entry_price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const reasons = msg.reasons || [];
+  const triggers = getCardTriggers(reasons);
+
+  const trigItems = triggers.map(t =>
+    `<div class="sc-del-item del-trigger" data-action="trigger" data-trig="${t}">Delete all ${t} signals</div>`
+  ).join('');
 
   const card = document.createElement('div');
-  card.className = `signal-card ${msg.direction}${triggerMatch ? ' trigger-match' : ''}`;
+  card.className        = `signal-card ${msg.direction}${triggerMatch ? ' trigger-match' : ''}`;
+  card.dataset.conf     = msg.confidence;
+  card.dataset.triggers = triggers.join(',');
+  card.dataset.time     = msg.time;
+
   card.innerHTML = `
+    <button class="sc-del-btn" title="Delete options">✕</button>
+    <div class="sc-del-menu" hidden>
+      <div class="sc-del-item" data-action="one">Delete this signal</div>
+      ${trigItems}
+      <div class="sc-del-item del-all" data-action="all">Delete all signals</div>
+    </div>
     <div class="sc-row">
       <span class="sc-dir">${msg.direction}</span>
       <span class="sc-conf-${msg.confidence}">${msg.confidence}</span>
     </div>
     <div class="sc-price">$${price}</div>
     <div class="sc-time">${time}</div>
-    ${msg.reasons.length ? `<div class="sc-reason">${msg.reasons.join(' &nbsp;·&nbsp; ')}</div>` : ''}
-    <div class="sc-trend">${msg.trend_note}</div>
+    ${reasons.length ? `<div class="sc-reason">${reasons.join(' &nbsp;·&nbsp; ')}</div>` : ''}
+    <div class="sc-trend">${msg.trend_note || ''}</div>
   `;
+
+  card.querySelector('.sc-del-btn').addEventListener('click', e => {
+    e.stopPropagation();
+    const menu    = card.querySelector('.sc-del-menu');
+    const wasOpen = !menu.hidden;
+    closeDeleteMenus();
+    menu.hidden = wasOpen;
+  });
+
+  card.querySelector('.sc-del-menu').addEventListener('click', e => {
+    e.stopPropagation();
+    const item = e.target.closest('.sc-del-item');
+    if (!item) return;
+    if      (item.dataset.action === 'one')     removeSignalCard(card);
+    else if (item.dataset.action === 'trigger') deleteByTrigger(item.dataset.trig);
+    else if (item.dataset.action === 'all')     deleteAllSignals();
+  });
+
+  card.addEventListener('click', e => {
+    if (e.target.closest('.sc-del-btn, .sc-del-menu')) return;
+    toggleSelectCard(card);
+  });
+
+  applyCardFilter(card);
   list.prepend(card);
 }
 
@@ -566,6 +709,34 @@ document.getElementById('symbol-input').addEventListener('keydown', e => {
     currentSymbol = val;
     connect(currentSymbol, currentInterval);
   }
+});
+
+// ── Signal filter + bulk controls ────────────────────────────────────────────
+
+document.querySelectorAll('.cf-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.cf-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    sigConfFilter = btn.dataset.cf;
+    applyAllFilters();
+  });
+});
+
+document.querySelectorAll('.tf-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.tf-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    sigTrigFilter = btn.dataset.tf;
+    applyAllFilters();
+  });
+});
+
+document.getElementById('sig-del-all').addEventListener('click',     () => deleteAllSignals());
+document.getElementById('sig-del-sel-btn').addEventListener('click', () => deleteSelected());
+document.getElementById('sig-desel-btn').addEventListener('click', () => {
+  selectedCards.forEach(c => c.classList.remove('sc-selected'));
+  selectedCards.clear();
+  updateBulkBar();
 });
 
 // ── Triggers panel ────────────────────────────────────────────────────────────

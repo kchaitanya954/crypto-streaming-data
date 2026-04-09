@@ -154,6 +154,94 @@
     .sc-trend  { font-size: 9px;  color: #4C525E; margin-top: 2px; }
     .no-sig    { font-size: 11px; color: #4C525E; text-align: center; margin-top: 24px; }
 
+    /* ── Signal filter + manage ── */
+    .sidebar-title-row {
+      display: flex; align-items: center;
+      padding: 7px 12px;
+      border-bottom: 1px solid #2A2E39;
+      font-size: 10px; font-weight: 600;
+      letter-spacing: 1px; text-transform: uppercase;
+      color: #4C525E; flex-shrink: 0;
+    }
+    #sig-del-all {
+      margin-left: auto;
+      background: transparent; border: none;
+      color: #4C525E; cursor: pointer; font-size: 10px;
+      padding: 1px 4px; border-radius: 3px;
+      font-weight: normal; text-transform: none; letter-spacing: 0;
+    }
+    #sig-del-all:hover { color: #EF5350; }
+
+    #sig-filter-bar {
+      padding: 4px 8px 5px;
+      border-bottom: 1px solid #2A2E39;
+      flex-shrink: 0;
+    }
+    .sf-row { display: flex; align-items: center; gap: 3px; margin-bottom: 3px; }
+    .sf-row:last-child { margin-bottom: 0; }
+    .sf-label { font-size: 9px; color: #4C525E; min-width: 26px; }
+    .sf-btn {
+      background: transparent; color: #787B86;
+      border: 1px solid #2A2E39; border-radius: 3px;
+      padding: 1px 5px; font-size: 9px; cursor: pointer;
+      transition: background 0.1s, color 0.1s;
+    }
+    .sf-btn:hover  { background: #2A2E39; color: #D1D4DC; }
+    .sf-btn.active { background: #2A2E39; color: #D1D4DC; }
+    .sf-btn.cf-HIGH.active   { border-color: #26A69A; color: #26A69A; }
+    .sf-btn.cf-MEDIUM.active { border-color: #FF9800; color: #FF9800; }
+    .sf-btn.cf-LOW.active    { border-color: #4C525E; color: #B2B5BE; }
+
+    #sig-bulk-bar {
+      display: none; align-items: center; gap: 4px;
+      padding: 3px 8px;
+      background: #1A1D27; border-bottom: 1px solid #2A2E39;
+      flex-shrink: 0;
+    }
+    #sig-bulk-info { font-size: 10px; color: #B2B5BE; flex: 1; }
+    .bulk-act-btn {
+      background: #2A2E39; color: #D1D4DC; border: none;
+      border-radius: 3px; padding: 2px 7px; font-size: 10px; cursor: pointer;
+    }
+    .bulk-act-btn:hover  { background: #364153; }
+    .bulk-act-btn.danger { color: #EF5350; }
+
+    /* Card delete button + menu */
+    .signal-card { position: relative; cursor: pointer; }
+    .sc-del-btn {
+      position: absolute; top: 5px; right: 5px;
+      background: transparent; border: none;
+      color: #4C525E; cursor: pointer;
+      font-size: 10px; line-height: 1; padding: 1px 3px;
+      opacity: 0; transition: opacity 0.12s; border-radius: 2px;
+    }
+    .signal-card:hover .sc-del-btn { opacity: 1; }
+    .sc-del-btn:hover { color: #EF5350; background: rgba(239,83,80,0.1); }
+
+    .sc-del-menu {
+      position: absolute; right: 0; top: 21px;
+      background: #1A1D27; border: 1px solid #2A2E39;
+      border-radius: 4px; z-index: 200;
+      min-width: 168px;
+      box-shadow: 0 4px 14px rgba(0,0,0,0.45);
+    }
+    .sc-del-item {
+      padding: 6px 11px; font-size: 10px; color: #B2B5BE;
+      cursor: pointer; white-space: nowrap;
+    }
+    .sc-del-item:first-child { border-radius: 4px 4px 0 0; }
+    .sc-del-item:last-child  { border-radius: 0 0 4px 4px; }
+    .sc-del-item:hover { background: #2A2E39; color: #D1D4DC; }
+    .sc-del-item.del-trigger,
+    .sc-del-item.del-all     { color: #EF5350; }
+    .sc-del-item.del-trigger:hover,
+    .sc-del-item.del-all:hover { background: rgba(239,83,80,0.1); }
+
+    /* Card selected state */
+    .signal-card.sc-selected { outline: 1px solid #364153; }
+    .signal-card.BUY.sc-selected  { background: rgba(38,166,154,0.14); }
+    .signal-card.SELL.sc-selected { background: rgba(239,83,80,0.14);  }
+
     /* ── Triggers panel ── */
     #triggers-panel {
       border-top: 1px solid #2A2E39;
@@ -530,7 +618,37 @@
 
   <!-- Sidebar: signals + portfolio -->
   <div id="sidebar">
-    <div class="sidebar-title">Signals</div>
+    <!-- Signals header -->
+    <div class="sidebar-title-row">
+      <span>Signals</span>
+      <button id="sig-del-all" title="Delete all signals">✕ All</button>
+    </div>
+
+    <!-- Filter bar -->
+    <div id="sig-filter-bar">
+      <div class="sf-row">
+        <span class="sf-label">Conf</span>
+        <button class="sf-btn cf-btn cf-ALL active" data-cf="">ALL</button>
+        <button class="sf-btn cf-btn cf-HIGH"        data-cf="HIGH">HIGH</button>
+        <button class="sf-btn cf-btn cf-MEDIUM"      data-cf="MEDIUM">MED</button>
+        <button class="sf-btn cf-btn cf-LOW"         data-cf="LOW">LOW</button>
+      </div>
+      <div class="sf-row">
+        <span class="sf-label">Trig</span>
+        <button class="sf-btn tf-btn active" data-tf="">ALL</button>
+        <button class="sf-btn tf-btn"        data-tf="RSI">RSI</button>
+        <button class="sf-btn tf-btn"        data-tf="Stoch">Stoch</button>
+        <button class="sf-btn tf-btn"        data-tf="OBV">OBV</button>
+      </div>
+    </div>
+
+    <!-- Bulk action bar (shown when cards are selected) -->
+    <div id="sig-bulk-bar">
+      <span id="sig-bulk-info">0 selected</span>
+      <button class="bulk-act-btn" id="sig-desel-btn">Deselect</button>
+      <button class="bulk-act-btn danger" id="sig-del-sel-btn">Delete</button>
+    </div>
+
     <div id="signal-list">
       <div class="no-sig">Waiting for signals…</div>
     </div>
