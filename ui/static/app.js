@@ -15,8 +15,8 @@ let currentMinConf = parseInt(  localStorage.getItem('minConf') ?? '1', 10);
 let currentCooldown= parseInt(  localStorage.getItem('cooldown') ?? '2', 10);
 
 // Signal filter + selection state
-let sigConfFilter = '';   // '' = ALL, 'HIGH', 'MEDIUM', 'LOW'
-let sigTrigFilter = '';   // '' = ALL, 'RSI', 'Stoch', 'OBV'
+let sigConfFilter = '';     // '' = ALL, 'HIGH', 'MEDIUM', 'LOW'
+let sigTrigFilter = null;   // null = ALL, {sym, iv} = specific trigger
 let selectedCards = new Set();
 
 // ── Chart creation ────────────────────────────────────────────────────────────
@@ -313,17 +313,18 @@ function loadHistoricalSignals(symbol, interval) {
       signals.forEach(s => {
         // Normalise field names from DB row to match WebSocket signal shape
         addSignalCard({
-          id:          s.id,
-          symbol:      s.symbol,
-          interval:    s.interval,
-          direction:   s.direction,
-          confidence:  s.confidence,
-          entry_price: s.entry_price,
-          time:        s.open_time / 1000,   // open_time is ms epoch
-          reasons:     Array.isArray(s.reasons) ? s.reasons : [],
-          trend_note:  s.trend_note || '',
-          macd_val:    s.macd_val,
-          adx_val:     s.adx_val,
+          id:            s.id,
+          symbol:        s.symbol,
+          interval:      s.interval,
+          direction:     s.direction,
+          confidence:    s.confidence,
+          entry_price:   s.entry_price,
+          time:          s.open_time / 1000,
+          reasons:       Array.isArray(s.reasons) ? s.reasons : [],
+          trend_note:    s.trend_note || '',
+          macd_val:      s.macd_val,
+          adx_val:       s.adx_val,
+          trigger_names: [],   // historical signals: no trigger name stored; matches all filters
         });
       });
     })
@@ -380,8 +381,12 @@ function getCardTriggers(reasons) {
 
 function cardVisible(card) {
   const confOk = !sigConfFilter || card.dataset.conf === sigConfFilter;
-  const trigs  = (card.dataset.triggers || '').split(',').filter(Boolean);
-  const trigOk = !sigTrigFilter || trigs.includes(sigTrigFilter);
+  let trigOk = true;
+  if (sigTrigFilter) {
+    // Filter by trigger: match on the signal's symbol + interval
+    trigOk = card.dataset.symbol === sigTrigFilter.sym
+          && card.dataset.interval === sigTrigFilter.iv;
+  }
   return confOk && trigOk;
 }
 
@@ -501,9 +506,10 @@ function addSignalCard(msg, triggerMatch = false) {
   card.dataset.conf     = msg.confidence;
   card.dataset.triggers = triggers.join(',');
   card.dataset.time     = msg.time;
-  if (msg.id       != null) card.dataset.id       = msg.id;
-  if (msg.symbol)           card.dataset.symbol   = msg.symbol;
-  if (msg.interval)         card.dataset.interval = msg.interval;
+  if (msg.id       != null) card.dataset.id            = msg.id;
+  if (msg.symbol)           card.dataset.symbol        = msg.symbol;
+  if (msg.interval)         card.dataset.interval      = msg.interval;
+  if (msg.trigger_names)    card.dataset.triggerNames  = msg.trigger_names.join(',');
 
   card.innerHTML = `
     <button class="sc-del-btn" title="Delete options">✕</button>
@@ -799,14 +805,20 @@ document.querySelectorAll('.cf-btn').forEach(btn => {
   });
 });
 
-document.querySelectorAll('.tf-btn').forEach(btn => {
-  btn.addEventListener('click', () => {
-    document.querySelectorAll('.tf-btn').forEach(b => b.classList.remove('active'));
-    btn.classList.add('active');
-    sigTrigFilter = btn.dataset.tf;
-    applyAllFilters();
+function bindTriggerFilterBtns() {
+  const container = document.getElementById('trig-filter-btns');
+  container.querySelectorAll('.tf-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      container.querySelectorAll('.tf-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      const sym = btn.dataset.tfSym;
+      const iv  = btn.dataset.tfIv;
+      sigTrigFilter = (sym && iv) ? { sym, iv } : null;
+      applyAllFilters();
+    });
   });
-});
+}
+bindTriggerFilterBtns(); // bind the initial ALL button
 
 document.getElementById('sig-del-all').addEventListener('click',     () => deleteAllSignals());
 document.getElementById('sig-del-sel-btn').addEventListener('click', () => deleteSelected());
@@ -818,10 +830,30 @@ document.getElementById('sig-desel-btn').addEventListener('click', () => {
 
 // ── Triggers panel ────────────────────────────────────────────────────────────
 
+function renderTriggerFilterBtns(list) {
+  const container = document.getElementById('trig-filter-btns');
+  // Reset to ALL
+  container.innerHTML = '<button class="sf-btn tf-btn active" data-tf-sym="" data-tf-iv="">ALL</button>';
+  (list || []).filter(t => t.active).forEach(t => {
+    const label = t.name || `${t.symbol} ${t.interval}`;
+    const btn = document.createElement('button');
+    btn.className    = 'sf-btn tf-btn';
+    btn.textContent  = label;
+    btn.dataset.tfSym = t.symbol;
+    btn.dataset.tfIv  = t.interval;
+    btn.title = `${t.symbol} ${t.interval} ≥${t.min_confidence}`;
+    container.appendChild(btn);
+  });
+  bindTriggerFilterBtns();
+}
+
 function loadTriggers() {
   fetch('/api/triggers')
     .then(r => r.json())
-    .then(renderTriggers)
+    .then(list => {
+      renderTriggers(list);
+      renderTriggerFilterBtns(list);
+    })
     .catch(() => {});
 }
 
@@ -842,10 +874,12 @@ function renderTriggers(list) {
     const row = document.createElement('div');
     row.className = `trig-row${t.active ? '' : ' inactive'}`;
     row.dataset.id = t.id;
-    const adxHint = t.adx_threshold != null ? ` adx≥${t.adx_threshold}` : '';
-    const cdHint  = t.cooldown_bars  != null ? ` cd${t.cooldown_bars}`   : '';
+    const adxHint  = t.adx_threshold != null ? ` adx≥${t.adx_threshold}` : '';
+    const cdHint   = t.cooldown_bars  != null ? ` cd${t.cooldown_bars}`   : '';
+    const nameLabel = t.name ? `<span style="font-size:10px;color:#D1D4DC;font-weight:600;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${t.name}">${t.name}</span>` : '';
     row.innerHTML =
       `<input type="checkbox" class="trig-cb trig-row-cb" data-id="${t.id}" />` +
+      nameLabel +
       `<span class="trig-sym">${t.symbol}</span>` +
       `<span class="trig-iv">${t.interval}</span>` +
       `<span class="trig-conf trig-conf-${t.min_confidence}">${t.min_confidence}</span>` +
@@ -889,7 +923,8 @@ document.getElementById('trig-iv').addEventListener('change', e => {
 
 function openEditForm(t) {
   currentEditId = t.id;
-  document.getElementById('trig-sym').value = t.symbol;
+  document.getElementById('trig-name').value = t.name || '';
+  document.getElementById('trig-sym').value  = t.symbol;
   for (const opt of document.getElementById('trig-iv').options)
     opt.selected = opt.value === t.interval;
   for (const opt of document.getElementById('trig-conf').options)
@@ -911,9 +946,10 @@ document.getElementById('trig-add-btn').addEventListener('click', () => {
   currentEditId = null;
   document.getElementById('trig-save-btn').textContent = 'Save Trigger';
   if (opening) {
-    document.getElementById('trig-sym').value = currentSymbol;
-    document.getElementById('trig-adx').value = '';
-    document.getElementById('trig-cd').value  = '';
+    document.getElementById('trig-name').value = '';
+    document.getElementById('trig-sym').value  = currentSymbol;
+    document.getElementById('trig-adx').value  = '';
+    document.getElementById('trig-cd').value   = '';
     for (const opt of document.getElementById('trig-iv').options)
       opt.selected = opt.value === currentInterval;
     applyTierToTriggerForm(currentInterval);
@@ -926,10 +962,24 @@ document.getElementById('trig-add-btn').addEventListener('click', () => {
 
 document.getElementById('trig-save-btn').addEventListener('click', () => {
   const btn    = document.getElementById('trig-save-btn');
+  const name   = document.getElementById('trig-name').value.trim();
   const sym    = document.getElementById('trig-sym').value.trim().toUpperCase() || currentSymbol;
   const iv     = document.getElementById('trig-iv').value;
   const conf   = document.getElementById('trig-conf').value;
   const editId = currentEditId;
+
+  // Name is required
+  const nameInput = document.getElementById('trig-name');
+  if (!name) {
+    nameInput.style.borderColor = '#EF5350';
+    btn.textContent = '✕ Name is required';
+    setTimeout(() => {
+      nameInput.style.borderColor = '';
+      btn.textContent = editId ? 'Update Trigger' : 'Save Trigger';
+    }, 2500);
+    return;
+  }
+  nameInput.style.borderColor = '';
 
   // Basic symbol validation: 3-12 uppercase letters/digits, must end with USDT/BTC/ETH/BNB/INR
   const symInput = document.getElementById('trig-sym');
@@ -954,7 +1004,7 @@ document.getElementById('trig-save-btn').addEventListener('click', () => {
   const adxRaw = document.getElementById('trig-adx').value.trim();
   const cdRaw  = document.getElementById('trig-cd').value.trim();
   const payload = {
-    symbol: sym, interval: iv, min_confidence: conf,
+    name, symbol: sym, interval: iv, min_confidence: conf,
     adx_threshold: adxRaw !== '' ? parseFloat(adxRaw) : null,
     cooldown_bars: cdRaw  !== '' ? parseInt(cdRaw, 10) : null,
   };
@@ -970,7 +1020,8 @@ document.getElementById('trig-save-btn').addEventListener('click', () => {
   })
   .then(() => {
     document.getElementById('trig-add-form').classList.remove('open');
-    document.getElementById('trig-sym').value = '';
+    document.getElementById('trig-name').value = '';
+    document.getElementById('trig-sym').value  = '';
     btn.disabled    = false;
     btn.textContent = 'Save Trigger';
     currentEditId   = null;
@@ -1233,6 +1284,16 @@ function renderSimulation(s) {
       ? `<span style="color:#EF5350">-$${(t.usdt_spent||0).toFixed(2)}</span>`
       : `<span style="color:#26A69A">+$${(t.usdt_received||0).toFixed(2)}</span>`;
 
+    // Avg Entry — only meaningful for SELLs (shows what we paid vs what we sold at)
+    const avgEntryCell = isBuy
+      ? '<td style="color:#4C525E">—</td>'
+      : `<td style="color:#787B86;font-size:10px" title="Avg buy price">$${(t.avg_entry||t.price).toFixed(2)}</td>`;
+
+    // Qty column
+    const qty = isBuy
+      ? (t.coins_bought || 0).toPrecision(4)
+      : (t.coins_sold   || 0).toPrecision(4);
+
     // P&L cell only for sells
     const pnlCell = isBuy
       ? '<td style="color:#4C525E">—</td>'
@@ -1244,6 +1305,8 @@ function renderSimulation(s) {
       <td style="color:${dirColor};font-weight:700">${actionLabel}</td>
       <td style="color:${confColors[t.confidence]||'#D1D4DC'};font-size:9px;font-weight:700">${t.confidence}</td>
       <td>$${t.price.toFixed(2)}</td>
+      ${avgEntryCell}
+      <td style="color:#787B86;font-size:10px">${qty}</td>
       <td>${usdtDelta}</td>
       ${pnlCell}
       <td style="color:#B2B5BE">$${t.usdt_balance.toFixed(2)}</td>

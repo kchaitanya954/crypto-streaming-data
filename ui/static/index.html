@@ -643,12 +643,11 @@
         <button class="sf-btn cf-btn cf-MEDIUM"      data-cf="MEDIUM">MED</button>
         <button class="sf-btn cf-btn cf-LOW"         data-cf="LOW">LOW</button>
       </div>
-      <div class="sf-row">
+      <div class="sf-row" id="trig-filter-row" style="flex-wrap:wrap;gap:4px">
         <span class="sf-label">Trig</span>
-        <button class="sf-btn tf-btn active" data-tf="">ALL</button>
-        <button class="sf-btn tf-btn"        data-tf="RSI">RSI</button>
-        <button class="sf-btn tf-btn"        data-tf="Stoch">Stoch</button>
-        <button class="sf-btn tf-btn"        data-tf="OBV">OBV</button>
+        <div id="trig-filter-btns" style="display:flex;flex-wrap:wrap;gap:3px">
+          <button class="sf-btn tf-btn active" data-tf-sym="" data-tf-iv="">ALL</button>
+        </div>
       </div>
     </div>
 
@@ -684,6 +683,9 @@
         <button class="bulk-act-btn danger" id="trig-del-sel-btn">Delete Selected</button>
       </div>
       <div id="trig-add-form">
+        <div class="trig-form-row">
+          <input id="trig-name" class="trig-inp" type="text" placeholder="Name (e.g. BTC Scalp)" style="width:100%" />
+        </div>
         <div class="trig-form-row">
           <input  id="trig-sym"  class="trig-inp" type="text"   placeholder="BTCUSDT" />
           <select id="trig-iv"   class="trig-sel">
@@ -890,7 +892,7 @@
       <!-- Sim trade log -->
       <div class="an-trades-wrap" style="max-height:240px">
         <table class="an-table" style="width:100%">
-          <thead><tr><th>Symbol</th><th>IV</th><th>Dir</th><th>Conf</th><th>Price</th><th>USDT ±</th><th>P&amp;L</th><th>Balance</th><th>Portfolio</th><th>Time</th></tr></thead>
+          <thead><tr><th>Symbol</th><th>IV</th><th>Dir</th><th>Conf</th><th>Price</th><th>Avg Entry</th><th>Qty</th><th>USDT ±</th><th>P&amp;L</th><th>Balance</th><th>Portfolio</th><th>Time</th></tr></thead>
           <tbody id="sim-trades"></tbody>
         </table>
         <div class="an-no-data" id="sim-no-data" style="display:none">No simulation trades yet — need BUY/SELL signals in the selected period.</div>

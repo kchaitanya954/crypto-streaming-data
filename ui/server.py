@@ -39,6 +39,7 @@ static_dir = Path(__file__).parent / "static"
 # ── Trigger request models ──────────────────────────────────────────────────────
 
 class TriggerCreate(BaseModel):
+    name:           str                      # required display name for filtering
     symbol:         str
     interval:       str
     min_confidence: str            = "MEDIUM"
@@ -49,6 +50,7 @@ class TriggerBulkDelete(BaseModel):
     ids: list[int]
 
 class TriggerUpdate(BaseModel):
+    name:           Optional[str]   = None
     symbol:         Optional[str]   = None
     interval:       Optional[str]   = None
     min_confidence: Optional[str]   = None
@@ -150,12 +152,13 @@ async def api_create_trigger(request: Request, body: TriggerCreate):
         db, sym, iv, conf,
         adx_threshold=body.adx_threshold,
         cooldown_bars=body.cooldown_bars,
+        name=body.name,
     )
     if tg_bot and settings:
         from telegram_bot.alerts import send_trigger_alert
         await send_trigger_alert(tg_bot, settings.telegram_chat_id, "created", sym, iv, conf)
     return {
-        "id": tid, "symbol": sym, "interval": iv,
+        "id": tid, "name": body.name, "symbol": sym, "interval": iv,
         "min_confidence": conf, "active": True,
         "adx_threshold": body.adx_threshold,
         "cooldown_bars": body.cooldown_bars,
@@ -177,6 +180,7 @@ async def api_update_trigger(request: Request, trigger_id: int, body: TriggerUpd
         min_confidence=body.min_confidence, active=body.active,
         adx_threshold=body.adx_threshold,
         cooldown_bars=body.cooldown_bars,
+        name=body.name,
     )
     if tg_bot and settings and trig:
         from telegram_bot.alerts import send_trigger_alert
@@ -373,6 +377,7 @@ def _simulate_portfolio(
                 "confidence":     conf,
                 "exit_pct":       round(ratio * 100),
                 "price":          round(price, 4),
+                "avg_entry":      round(avg_entry, 4),
                 "usdt_received":  round(received, 4),
                 "coins_sold":     round(coins_sold, 8),
                 "pnl_pct":        round(pnl_pct, 3),
@@ -615,17 +620,24 @@ async def _connection_loop(
                         except Exception:
                             pass
 
-                    # Check if any active trigger matches this signal
-                    trigger_matched = False
+                    # Check which active triggers match this signal
+                    matched_triggers: list[dict] = []
                     if db is not None:
                         try:
                             active_triggers = await queries.get_triggers(db)
-                            trigger_matched = any(
-                                queries.trigger_matches(t, symbol, interval, signal.confidence, signal.adx_val)
-                                for t in active_triggers
-                            )
+                            matched_triggers = [
+                                t for t in active_triggers
+                                if queries.trigger_matches(
+                                    t, symbol, interval, signal.confidence, signal.adx_val
+                                )
+                            ]
                         except Exception:
                             pass
+                    trigger_matched = bool(matched_triggers)
+                    trigger_names   = [
+                        t.get("name") or f"{t['symbol']} {t['interval']}"
+                        for t in matched_triggers
+                    ]
 
                     signal_payload = {
                         "type":            "signal",
@@ -643,6 +655,7 @@ async def _connection_loop(
                         "reasons":         signal.reasons,
                         "trend_note":      signal.trend_note,
                         "trigger_matched": trigger_matched,
+                        "trigger_names":   trigger_names,
                     }
                     await ws.send_json(signal_payload)
 

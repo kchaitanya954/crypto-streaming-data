@@ -273,14 +273,15 @@ async def create_trigger(
     min_confidence: str = "MEDIUM",
     adx_threshold: Optional[float] = None,
     cooldown_bars: Optional[int] = None,
+    name: Optional[str] = None,
 ) -> int:
     """Insert a new trigger. Returns the new row id."""
     cursor = await db.execute(
         """INSERT INTO triggers
-               (symbol, interval, min_confidence, adx_threshold, cooldown_bars, active, created_at)
-           VALUES (?, ?, ?, ?, ?, 1, ?)""",
+               (symbol, interval, min_confidence, adx_threshold, cooldown_bars, name, active, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, 1, ?)""",
         (symbol.upper(), interval, min_confidence.upper(),
-         adx_threshold, cooldown_bars, int(time.time())),
+         adx_threshold, cooldown_bars, name, int(time.time())),
     )
     await db.commit()
     return cursor.lastrowid
@@ -298,6 +299,7 @@ async def update_trigger(
     active: Optional[bool] = None,
     adx_threshold = _SENTINEL,
     cooldown_bars  = _SENTINEL,
+    name: Optional[str] = None,
 ) -> None:
     """Update any subset of trigger fields."""
     fields, params = [], []
@@ -307,6 +309,7 @@ async def update_trigger(
     if active         is not None:      fields.append("active = ?");         params.append(1 if active else 0)
     if adx_threshold  is not _SENTINEL: fields.append("adx_threshold = ?");  params.append(adx_threshold)
     if cooldown_bars  is not _SENTINEL: fields.append("cooldown_bars = ?");  params.append(cooldown_bars)
+    if name           is not None:      fields.append("name = ?");           params.append(name)
     if not fields:
         return
     params.append(trigger_id)

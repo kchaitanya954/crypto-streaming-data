@@ -91,7 +91,7 @@ async def init_db(db_path: str) -> aiosqlite.Connection:
     await db.executescript(_SCHEMA)
     await db.commit()
     # Safe migrations — add new columns if they don't exist yet
-    for col, defn in [("adx_threshold", "REAL"), ("cooldown_bars", "INTEGER")]:
+    for col, defn in [("adx_threshold", "REAL"), ("cooldown_bars", "INTEGER"), ("name", "TEXT")]:
         try:
             await db.execute(f"ALTER TABLE triggers ADD COLUMN {col} {defn}")
             await db.commit()
