@@ -313,6 +313,9 @@ function loadHistoricalSignals(symbol, interval) {
       signals.forEach(s => {
         // Normalise field names from DB row to match WebSocket signal shape
         addSignalCard({
+          id:          s.id,
+          symbol:      s.symbol,
+          interval:    s.interval,
           direction:   s.direction,
           confidence:  s.confidence,
           entry_price: s.entry_price,
@@ -427,6 +430,9 @@ function removeSignalCard(card) {
   card.remove();
   updateBulkBar();
   checkEmptyList();
+  if (card.dataset.id) {
+    fetch(`/api/signals/${card.dataset.id}`, { method: 'DELETE' }).catch(() => {});
+  }
 }
 
 function deleteByTrigger(trigger) {
@@ -435,6 +441,9 @@ function deleteByTrigger(trigger) {
     if ((card.dataset.triggers || '').split(',').includes(trigger)) {
       markers = markers.filter(m => m.time !== parseFloat(card.dataset.time));
       selectedCards.delete(card);
+      if (card.dataset.id) {
+        fetch(`/api/signals/${card.dataset.id}`, { method: 'DELETE' }).catch(() => {});
+      }
       card.remove();
     }
   });
@@ -450,11 +459,20 @@ function deleteAllSignals() {
   selectedCards.clear();
   document.getElementById('signal-list').innerHTML = '<div class="no-sig">No signals</div>';
   updateBulkBar();
+  // Persist: delete all signals for the current symbol+interval
+  const params = new URLSearchParams({
+    symbol:   currentSymbol,
+    interval: currentInterval,
+  });
+  fetch(`/api/signals?${params}`, { method: 'DELETE' }).catch(() => {});
 }
 
 function deleteSelected() {
   [...selectedCards].forEach(card => {
     markers = markers.filter(m => m.time !== parseFloat(card.dataset.time));
+    if (card.dataset.id) {
+      fetch(`/api/signals/${card.dataset.id}`, { method: 'DELETE' }).catch(() => {});
+    }
     card.remove();
   });
   if (candleSeries) candleSeries.setMarkers(markers);
@@ -483,6 +501,9 @@ function addSignalCard(msg, triggerMatch = false) {
   card.dataset.conf     = msg.confidence;
   card.dataset.triggers = triggers.join(',');
   card.dataset.time     = msg.time;
+  if (msg.id       != null) card.dataset.id       = msg.id;
+  if (msg.symbol)           card.dataset.symbol   = msg.symbol;
+  if (msg.interval)         card.dataset.interval = msg.interval;
 
   card.innerHTML = `
     <button class="sc-del-btn" title="Delete options">✕</button>
@@ -851,7 +872,9 @@ function renderTriggers(list) {
     });
 
     row.querySelector('.trig-del').addEventListener('click', () => {
-      fetch(`/api/triggers/${t.id}`, { method: 'DELETE' })
+      if (!confirm(`Delete trigger "${t.symbol} ${t.interval}"?`)) return;
+      const delSigs = confirm(`Also delete all signals for ${t.symbol} ${t.interval}?\nOK = delete signals too, Cancel = keep signals.`);
+      fetch(`/api/triggers/${t.id}?delete_signals=${delSigs}`, { method: 'DELETE' })
         .then(r => { if (r.ok) loadTriggers(); });
     });
 

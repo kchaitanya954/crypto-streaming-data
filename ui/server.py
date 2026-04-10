@@ -94,6 +94,38 @@ async def api_signals_history(
     return await queries.get_recent_signals(db, symbol=symbol, interval=interval, limit=limit)
 
 
+@app.delete("/api/signals/{signal_id}")
+async def api_delete_signal(request: Request, signal_id: int):
+    """Hard-delete a single signal by DB id."""
+    db = getattr(request.app.state, "db", None)
+    if db is None:
+        return JSONResponse({"error": "DB not configured"}, status_code=503)
+    await queries.delete_signal(db, signal_id)
+    return {"ok": True}
+
+
+@app.delete("/api/signals")
+async def api_delete_signals(
+    request:    Request,
+    symbol:     Optional[str] = Query(default=None),
+    interval:   Optional[str] = Query(default=None),
+    direction:  Optional[str] = Query(default=None),
+    confidence: Optional[str] = Query(default=None),
+):
+    """Bulk-delete signals matching any combination of query filters."""
+    db = getattr(request.app.state, "db", None)
+    if db is None:
+        return JSONResponse({"error": "DB not configured"}, status_code=503)
+    deleted = await queries.delete_signals(
+        db,
+        symbol=symbol,
+        interval=interval,
+        direction=direction,
+        confidence=confidence,
+    )
+    return {"deleted": deleted}
+
+
 @app.get("/api/triggers")
 async def api_get_triggers(request: Request):
     """List ALL triggers (active and inactive)."""
@@ -172,14 +204,23 @@ async def api_bulk_delete_triggers(request: Request, body: TriggerBulkDelete):
 
 
 @app.delete("/api/triggers/{trigger_id}")
-async def api_delete_trigger(request: Request, trigger_id: int):
-    """Delete a trigger and send a Telegram alert."""
+async def api_delete_trigger(
+    request: Request,
+    trigger_id: int,
+    delete_signals: bool = Query(default=False),
+):
+    """Delete a trigger. Pass delete_signals=true to also purge its associated signals."""
     db       = getattr(request.app.state, "db",           None)
     tg_bot   = getattr(request.app.state, "telegram_bot", None)
     settings = getattr(request.app.state, "settings",     None)
     if db is None:
         return JSONResponse({"error": "DB not configured"}, status_code=503)
     trig = await queries.get_trigger(db, trigger_id)
+    signals_deleted = 0
+    if delete_signals and trig:
+        signals_deleted = await queries.delete_signals(
+            db, symbol=trig["symbol"], interval=trig["interval"]
+        )
     await queries.delete_trigger(db, trigger_id)
     if tg_bot and settings and trig:
         from telegram_bot.alerts import send_trigger_alert
@@ -187,7 +228,7 @@ async def api_delete_trigger(request: Request, trigger_id: int):
             tg_bot, settings.telegram_chat_id, "deleted",
             trig["symbol"], trig["interval"], trig["min_confidence"],
         )
-    return {"ok": True}
+    return {"ok": True, "signals_deleted": signals_deleted}
 
 
 # ── Analytics endpoint ─────────────────────────────────────────────────────────
@@ -566,19 +607,14 @@ async def _connection_loop(
                         pass
 
                 if signal:
-                    signal_payload = {
-                        "type":        "signal",
-                        "direction":   signal.direction,
-                        "confidence":  signal.confidence,
-                        "entry_price": signal.entry_price,
-                        "time":        signal.open_time // 1000,
-                        "macd_val":    signal.macd_val,
-                        "signal_val":  signal.signal_val,
-                        "histogram":   signal.histogram,
-                        "adx_val":     signal.adx_val,
-                        "reasons":     signal.reasons,
-                        "trend_note":  signal.trend_note,
-                    }
+                    # Persist signal to DB first so we have the id
+                    signal_id: Optional[int] = None
+                    if db is not None:
+                        try:
+                            signal_id = await queries.insert_signal(db, symbol, interval, signal)
+                        except Exception:
+                            pass
+
                     # Check if any active trigger matches this signal
                     trigger_matched = False
                     if db is not None:
@@ -590,16 +626,25 @@ async def _connection_loop(
                             )
                         except Exception:
                             pass
-                    signal_payload["trigger_matched"] = trigger_matched
-                    await ws.send_json(signal_payload)
 
-                    # Persist signal to DB
-                    signal_id: Optional[int] = None
-                    if db is not None:
-                        try:
-                            signal_id = await queries.insert_signal(db, symbol, interval, signal)
-                        except Exception:
-                            pass
+                    signal_payload = {
+                        "type":            "signal",
+                        "id":              signal_id,
+                        "symbol":          symbol.upper(),
+                        "interval":        interval,
+                        "direction":       signal.direction,
+                        "confidence":      signal.confidence,
+                        "entry_price":     signal.entry_price,
+                        "time":            signal.open_time // 1000,
+                        "macd_val":        signal.macd_val,
+                        "signal_val":      signal.signal_val,
+                        "histogram":       signal.histogram,
+                        "adx_val":         signal.adx_val,
+                        "reasons":         signal.reasons,
+                        "trend_note":      signal.trend_note,
+                        "trigger_matched": trigger_matched,
+                    }
+                    await ws.send_json(signal_payload)
 
                     # Send Telegram alert — ONLY when a trigger matches this signal
                     if tg_bot is not None and settings is not None and trigger_matched:

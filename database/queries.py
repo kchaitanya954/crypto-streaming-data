@@ -131,6 +131,33 @@ async def insert_trade(
     return cursor.lastrowid
 
 
+async def delete_signal(db: aiosqlite.Connection, signal_id: int) -> None:
+    """Hard-delete a single signal row."""
+    await db.execute("DELETE FROM signals WHERE id = ?", (signal_id,))
+    await db.commit()
+
+
+async def delete_signals(
+    db: aiosqlite.Connection,
+    symbol:     Optional[str] = None,
+    interval:   Optional[str] = None,
+    direction:  Optional[str] = None,
+    confidence: Optional[str] = None,
+    before_ts:  Optional[int] = None,   # Unix seconds — delete signals created before this
+) -> int:
+    """Bulk-delete signals matching any combination of filters. Returns row count deleted."""
+    conditions, params = [], []
+    if symbol:     conditions.append("symbol = ?");    params.append(symbol.upper())
+    if interval:   conditions.append("interval = ?");  params.append(interval)
+    if direction:  conditions.append("direction = ?"); params.append(direction.upper())
+    if confidence: conditions.append("confidence = ?");params.append(confidence.upper())
+    if before_ts:  conditions.append("created_at < ?");params.append(before_ts)
+    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    cursor = await db.execute(f"DELETE FROM signals {where}", params)
+    await db.commit()
+    return cursor.rowcount
+
+
 async def get_recent_signals(
     db: aiosqlite.Connection,
     symbol: str,
