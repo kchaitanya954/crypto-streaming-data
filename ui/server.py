@@ -557,8 +557,16 @@ async def api_adaptive_state(request: Request):
 
 @app.on_event("startup")
 async def _on_startup():
-    """Load persisted adaptive state and start the monitor background task."""
-    import asyncio
+    """
+    Auto-init DB if not already injected by orchestrator (covers run_ui.py standalone mode).
+    Then restore adaptive engine state and start the background monitor.
+    """
+    import asyncio, os
+    # Standalone mode: no orchestrator set app.state.db — initialise it now
+    if getattr(app.state, "db", None) is None:
+        from database.db import init_db
+        db_path = os.environ.get("DB_PATH", "data/crypto.db")
+        app.state.db = await init_db(db_path)
     asyncio.create_task(_load_adaptive_state_when_ready())
 
 
