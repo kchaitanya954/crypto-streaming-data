@@ -85,11 +85,11 @@ async def api_portfolio(request: Request):
 @app.get("/api/signals/history")
 async def api_signals_history(
     request: Request,
-    symbol:   str = Query(...),
-    interval: str = Query(default="1m"),
-    limit:    int = Query(default=50),
+    symbol:   Optional[str] = Query(default=None),
+    interval: Optional[str] = Query(default=None),
+    limit:    int            = Query(default=100),
 ):
-    """Return recent signals from SQLite for pre-populating the dashboard sidebar."""
+    """Return recent signals from SQLite. All filters optional — omit for all symbols/intervals."""
     db = getattr(request.app.state, "db", None)
     if db is None:
         return []

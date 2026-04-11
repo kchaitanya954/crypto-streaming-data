@@ -160,29 +160,19 @@ async def delete_signals(
 
 async def get_recent_signals(
     db: aiosqlite.Connection,
-    symbol: str,
+    symbol: Optional[str] = None,
     interval: Optional[str] = None,
-    limit: int = 50,
+    limit: int = 100,
 ) -> list[dict]:
-    """Return recent signals for a symbol, newest first."""
-    if interval:
-        cursor = await db.execute(
-            """
-            SELECT * FROM signals
-            WHERE symbol = ? AND interval = ?
-            ORDER BY created_at DESC LIMIT ?
-            """,
-            (symbol.upper(), interval, limit),
-        )
-    else:
-        cursor = await db.execute(
-            """
-            SELECT * FROM signals
-            WHERE symbol = ?
-            ORDER BY created_at DESC LIMIT ?
-            """,
-            (symbol.upper(), limit),
-        )
+    """Return recent signals, newest first. All filters are optional."""
+    conditions, params = [], []
+    if symbol:   conditions.append("symbol = ?");   params.append(symbol.upper())
+    if interval: conditions.append("interval = ?"); params.append(interval)
+    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    cursor = await db.execute(
+        f"SELECT * FROM signals {where} ORDER BY created_at DESC LIMIT ?",
+        params + [limit],
+    )
     rows = await cursor.fetchall()
     result = []
     for row in rows:

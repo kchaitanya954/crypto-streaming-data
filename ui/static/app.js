@@ -16,8 +16,10 @@ let currentCooldown= parseInt(  localStorage.getItem('cooldown') ?? '2', 10);
 
 // Signal filter + selection state
 let sigConfFilter = '';     // '' = ALL, 'HIGH', 'MEDIUM', 'LOW'
+let sigIvFilter   = '';     // '' = ALL, e.g. '1s', '1m', '15m'
 let sigTrigFilter = null;   // null = ALL, {sym, iv} = specific trigger
 let selectedCards = new Set();
+const knownIntervals = new Set();   // tracks intervals seen so far
 
 // ── Chart creation ────────────────────────────────────────────────────────────
 
@@ -278,7 +280,7 @@ function onLive(msg) {
 
 function onReady() {
   [mainChart, macdChart, rsiChart].forEach(c => c.timeScale().scrollToRealTime());
-  loadHistoricalSignals(currentSymbol, currentInterval);
+  loadHistoricalSignals();
 }
 
 function onSignal(msg) {
@@ -293,25 +295,23 @@ function onSignal(msg) {
   markers.sort((a, b) => a.time - b.time);
   candleSeries.setMarkers(markers);
 
-  // Sidebar card + push notification only when a trigger matches
-  if (msg.trigger_matched) {
-    addSignalCard(msg, true);
-    pushNotification(msg);
-  }
+  // Always show signal card; highlight trigger-matched ones
+  addSignalCard(msg, msg.trigger_matched);
+  if (msg.trigger_matched) pushNotification(msg);
   mainChart.timeScale().scrollToRealTime();
   if (analyticsOpen) loadAnalytics();
 }
 
 // ── Historical signal pre-load ────────────────────────────────────────────────
 
-function loadHistoricalSignals(symbol, interval) {
-  fetch(`/api/signals/history?symbol=${encodeURIComponent(symbol)}&interval=${encodeURIComponent(interval)}&limit=50`)
+function loadHistoricalSignals() {
+  // Load all recent signals across all symbols and intervals
+  fetch('/api/signals/history?limit=150')
     .then(r => r.json())
     .then(signals => {
       if (!Array.isArray(signals) || signals.length === 0) return;
-      // Signals are newest-first from API; prepend in that order so newest is on top
+      // Newest-first from API; prepend so newest is on top
       signals.forEach(s => {
-        // Normalise field names from DB row to match WebSocket signal shape
         addSignalCard({
           id:            s.id,
           symbol:        s.symbol,
@@ -324,11 +324,11 @@ function loadHistoricalSignals(symbol, interval) {
           trend_note:    s.trend_note || '',
           macd_val:      s.macd_val,
           adx_val:       s.adx_val,
-          trigger_names: [],   // historical signals: no trigger name stored; matches all filters
+          trigger_names: [],
         });
       });
     })
-    .catch(() => {});  // DB not configured — silently ignore
+    .catch(() => {});
 }
 
 // ── Portfolio panel ───────────────────────────────────────────────────────────
@@ -380,14 +380,14 @@ function getCardTriggers(reasons) {
 }
 
 function cardVisible(card) {
-  const confOk = !sigConfFilter || card.dataset.conf === sigConfFilter;
+  const confOk = !sigConfFilter || card.dataset.conf     === sigConfFilter;
+  const ivOk   = !sigIvFilter   || card.dataset.interval === sigIvFilter;
   let trigOk = true;
   if (sigTrigFilter) {
-    // Filter by trigger: match on the signal's symbol + interval
-    trigOk = card.dataset.symbol === sigTrigFilter.sym
+    trigOk = card.dataset.symbol   === sigTrigFilter.sym
           && card.dataset.interval === sigTrigFilter.iv;
   }
-  return confOk && trigOk;
+  return confOk && ivOk && trigOk;
 }
 
 function applyCardFilter(card) {
@@ -510,6 +510,7 @@ function addSignalCard(msg, triggerMatch = false) {
   if (msg.symbol)           card.dataset.symbol        = msg.symbol;
   if (msg.interval)         card.dataset.interval      = msg.interval;
   if (msg.trigger_names)    card.dataset.triggerNames  = msg.trigger_names.join(',');
+  if (msg.interval)         registerIntervalFilter(msg.interval);
 
   card.innerHTML = `
     <button class="sc-del-btn" title="Delete options">✕</button>
@@ -804,6 +805,32 @@ document.querySelectorAll('.cf-btn').forEach(btn => {
     sigConfFilter = btn.dataset.cf;
     applyAllFilters();
   });
+});
+
+// Called whenever a new interval appears in the signal list
+function registerIntervalFilter(interval) {
+  if (!interval || knownIntervals.has(interval)) return;
+  knownIntervals.add(interval);
+  const container = document.getElementById('iv-filter-btns');
+  const btn = document.createElement('button');
+  btn.className    = 'sf-btn ivf-btn';
+  btn.textContent  = interval;
+  btn.dataset.iv   = interval;
+  btn.addEventListener('click', () => {
+    container.querySelectorAll('.ivf-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    sigIvFilter = interval;
+    applyAllFilters();
+  });
+  container.appendChild(btn);
+}
+
+// Bind the static ALL button for IV filter
+document.getElementById('iv-filter-btns').querySelector('.ivf-btn').addEventListener('click', function () {
+  document.getElementById('iv-filter-btns').querySelectorAll('.ivf-btn').forEach(b => b.classList.remove('active'));
+  this.classList.add('active');
+  sigIvFilter = '';
+  applyAllFilters();
 });
 
 function bindTriggerFilterBtns() {
