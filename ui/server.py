@@ -349,7 +349,7 @@ def _simulate_portfolio(
             coins_sold = coins_held * ratio
             received   = coins_sold * price
             avg_entry  = stream_avg.get(stream, price)
-            pnl_pct    = (price - avg_entry) / avg_entry * 100 if avg_entry else 0.0
+            pnl_pct    = round((price - avg_entry) / avg_entry * 100, 6) if avg_entry else 0.0
 
             usdt += received
             stream_coins[stream] = coins_held - coins_sold
@@ -438,7 +438,7 @@ def _pair_signals(signals: list[dict]) -> tuple[list[dict], Optional[dict]]:
                 "direction":   open_trade["direction"],
                 "entry_price": open_trade["entry_price"],
                 "exit_price":  sig["entry_price"],
-                "pnl_pct":     round(pnl_pct, 3),
+                "pnl_pct":     round(pnl_pct, 6),
                 "won":         pnl_pct > 0,
                 "confidence":  open_trade["confidence"],
             })
@@ -513,8 +513,8 @@ async def api_analytics(
             "trades":    len(subset),
             "wins":      len(w),
             "win_rate":  round(len(w) / len(subset) * 100, 1),
-            "total_pnl": round(sum(t["pnl_pct"] for t in subset), 3),
-            "avg_pnl":   round(sum(t["pnl_pct"] for t in subset) / len(subset), 3),
+            "total_pnl": round(sum(t["pnl_pct"] for t in subset), 6),
+            "avg_pnl":   round(sum(t["pnl_pct"] for t in subset) / len(subset), 6),
         }
 
     by_confidence = {
@@ -536,11 +536,11 @@ async def api_analytics(
         "all_symbols":    all_symbols,
         "open_positions": open_positions,
         "win_rate":       round(len(wins) / n * 100, 1) if n else 0,
-        "avg_gain_pct":   round(sum(t["pnl_pct"] for t in wins)   / len(wins)   if wins   else 0, 3),
-        "avg_loss_pct":   round(sum(t["pnl_pct"] for t in losses) / len(losses) if losses else 0, 3),
-        "total_pnl_pct":  round(sum(t["pnl_pct"] for t in all_trades), 3),
-        "best_trade_pct": round(max((t["pnl_pct"] for t in all_trades), default=0), 3),
-        "worst_trade_pct":round(min((t["pnl_pct"] for t in all_trades), default=0), 3),
+        "avg_gain_pct":   round(sum(t["pnl_pct"] for t in wins)   / len(wins),   6) if wins   else None,
+        "avg_loss_pct":   round(sum(t["pnl_pct"] for t in losses) / len(losses), 6) if losses else None,
+        "total_pnl_pct":  round(sum(t["pnl_pct"] for t in all_trades), 6),
+        "best_trade_pct": round(max((t["pnl_pct"] for t in all_trades), default=0), 6),
+        "worst_trade_pct":round(min((t["pnl_pct"] for t in all_trades), default=0), 6),
         "by_confidence":  by_confidence,
         "by_symbol":      by_symbol,
         "trades":         all_trades[-100:],   # most recent 100 trades
@@ -565,7 +565,7 @@ async def _on_startup():
     # Standalone mode: no orchestrator set app.state.db — initialise it now
     if getattr(app.state, "db", None) is None:
         from database.db import init_db
-        db_path = os.environ.get("DB_PATH", "data/crypto.db")
+        db_path = os.environ.get("DB_PATH", "data/trading.db")
         app.state.db = await init_db(db_path)
     asyncio.create_task(_load_adaptive_state_when_ready())
 

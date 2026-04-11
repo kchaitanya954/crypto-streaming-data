@@ -1109,9 +1109,13 @@ function closeAnalytics() {
   analyticsOpen = false;
 }
 
-function pct(v, decimals = 2) {
-  const s = (v >= 0 ? '+' : '') + v.toFixed(decimals) + '%';
-  return s;
+function pct(v, decimals) {
+  // Auto-scale decimals for tiny values so they never display as "+0.00%"
+  if (decimals === undefined) {
+    const abs = Math.abs(v);
+    decimals = abs === 0 ? 2 : abs < 0.001 ? 6 : abs < 0.1 ? 4 : 2;
+  }
+  return (v >= 0 ? '+' : '') + v.toFixed(decimals) + '%';
 }
 function pctClass(v) { return v > 0 ? 'pos' : v < 0 ? 'neg' : 'neu'; }
 
@@ -1170,10 +1174,10 @@ function renderAnalytics(d) {
   setCard('an-v-trades',  n || '—');
   setCard('an-v-winrate', n ? d.win_rate + '%' : '—',  n ? pctClass(d.win_rate - 50) : '');
   setCard('an-v-pnl',     n ? pct(d.total_pnl_pct) : '—', n ? pctClass(d.total_pnl_pct) : '');
-  setCard('an-v-gain',    d.avg_gain_pct ? pct(d.avg_gain_pct) : '—', 'pos');
-  setCard('an-v-loss',    d.avg_loss_pct ? pct(d.avg_loss_pct) : '—', 'neg');
-  setCard('an-v-best',    d.best_trade_pct  ? pct(d.best_trade_pct)  : '—', 'pos');
-  setCard('an-v-worst',   d.worst_trade_pct ? pct(d.worst_trade_pct) : '—', 'neg');
+  setCard('an-v-gain',    d.avg_gain_pct != null ? pct(d.avg_gain_pct) : '—', d.avg_gain_pct != null ? 'pos' : '');
+  setCard('an-v-loss',    d.avg_loss_pct != null ? pct(d.avg_loss_pct) : '—', d.avg_loss_pct != null ? 'neg' : '');
+  setCard('an-v-best',    n ? pct(d.best_trade_pct)  : '—', n ? pctClass(d.best_trade_pct)  : '');
+  setCard('an-v-worst',   n ? pct(d.worst_trade_pct) : '—', n ? pctClass(d.worst_trade_pct) : '');
   setCard('an-v-sigs',    d.total_signals || '—');
 
   // Open positions
