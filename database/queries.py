@@ -323,6 +323,24 @@ async def delete_trigger(db: aiosqlite.Connection, trigger_id: int) -> None:
     await db.commit()
 
 
+async def load_adaptive_state(db: aiosqlite.Connection) -> Optional[dict]:
+    """Load persisted adaptive engine state. Returns None if not yet saved."""
+    cursor = await db.execute("SELECT state_json FROM adaptive_state WHERE id = 1")
+    row = await cursor.fetchone()
+    if row:
+        return json.loads(row[0])
+    return None
+
+
+async def save_adaptive_state(db: aiosqlite.Connection, state_dict: dict) -> None:
+    """Upsert adaptive engine state to DB."""
+    await db.execute(
+        "INSERT OR REPLACE INTO adaptive_state (id, state_json, updated_at) VALUES (1, ?, ?)",
+        (json.dumps(state_dict), int(time.time())),
+    )
+    await db.commit()
+
+
 def trigger_matches(
     trigger: dict,
     symbol: str,

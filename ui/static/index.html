@@ -448,7 +448,7 @@
     .an-card-val.pos { color: #26A69A; }
     .an-card-val.neg { color: #EF5350; }
     .an-card-val.neu { color: #FF9800; }
-    .an-card-lbl { font-size: 10px; color: #4C525E; margin-top: 3px; text-transform: uppercase; letter-spacing: 0.5px; }
+    .an-card-lbl, .an-card-label { font-size: 10px; color: #4C525E; margin-top: 3px; text-transform: uppercase; letter-spacing: 0.5px; }
 
     /* Open positions */
     .an-open-pos {
@@ -851,7 +851,23 @@
 
     <!-- Portfolio Simulation -->
     <div class="an-section" style="border-top:1px solid #2A2E39;">
-      <div class="an-section-title" style="margin-bottom:10px">Portfolio Simulation (Slicing Strategy)</div>
+      <!-- Adaptive Engine State -->
+      <div class="an-section-title">Adaptive Engine</div>
+      <div class="an-cards" id="adaptive-cards">
+        <div class="an-card"><div class="an-card-label">Win Rate</div><div class="an-card-val" id="adp-winrate">—</div></div>
+        <div class="an-card"><div class="an-card-label">Kelly %</div><div class="an-card-val" id="adp-kelly">—</div></div>
+        <div class="an-card"><div class="an-card-label">Perf Mult</div><div class="an-card-val" id="adp-perf">—</div></div>
+        <div class="an-card"><div class="an-card-label">Drawdown</div><div class="an-card-val" id="adp-dd">—</div></div>
+        <div class="an-card"><div class="an-card-label">Trades</div><div class="an-card-val" id="adp-trades">—</div></div>
+      </div>
+      <div class="an-cards" style="margin-top:4px">
+        <div class="an-card"><div class="an-card-label">Rec HIGH</div><div class="an-card-val" id="adp-rec-high">—</div></div>
+        <div class="an-card"><div class="an-card-label">Rec MED</div><div class="an-card-val" id="adp-rec-med">—</div></div>
+        <div class="an-card"><div class="an-card-label">Rec LOW</div><div class="an-card-val" id="adp-rec-low">—</div></div>
+        <div class="an-card"><div class="an-card-label" id="adp-cb-label">Circuit Breaker</div><div class="an-card-val" id="adp-cb">OFF</div></div>
+      </div>
+
+      <div class="an-section-title" style="margin-bottom:10px;margin-top:14px">Portfolio Simulation (Slicing Strategy)</div>
 
       <!-- Sim controls -->
       <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:12px">

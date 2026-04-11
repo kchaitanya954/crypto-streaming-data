@@ -526,6 +526,7 @@ function addSignalCard(msg, triggerMatch = false) {
     <div class="sc-time">${time}</div>
     ${reasons.length ? `<div class="sc-reason">${reasons.join(' &nbsp;·&nbsp; ')}</div>` : ''}
     <div class="sc-trend">${msg.trend_note || ''}</div>
+    ${msg.rec_buy_pct != null ? `<div class="sc-rec">Rec: ${msg.rec_buy_pct}% of portfolio</div>` : ''}
   `;
 
   card.querySelector('.sc-del-btn').addEventListener('click', e => {
@@ -1062,6 +1063,7 @@ document.getElementById('analytics-btn').addEventListener('click', () => {
   document.getElementById('analytics-modal').classList.add('open');
   analyticsOpen = true;
   loadAnalytics();
+  fetch('/api/adaptive').then(r => r.json()).then(renderAdaptiveState).catch(() => {});
 });
 
 document.getElementById('an-close').addEventListener('click', closeAnalytics);
@@ -1187,6 +1189,7 @@ function renderAnalytics(d) {
 
   // Simulation
   if (d.simulation) renderSimulation(d.simulation);
+  if (d.simulation?.engine_state) renderAdaptiveState(d.simulation.engine_state);
 
   // Trades table
   const tradesBody = document.getElementById('an-trades');
@@ -1314,6 +1317,29 @@ function renderSimulation(s) {
       <td style="color:#4C525E;font-size:10px">${ts}</td>
     </tr>`;
   }).join('');
+}
+
+function renderAdaptiveState(eng) {
+  if (!eng) return;
+  const setV = (id, val, cls) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.textContent = val;
+    if (cls) el.className = 'an-card-val ' + cls;
+  };
+  setV('adp-winrate',  eng.win_rate_pct.toFixed(1) + '%',   eng.win_rate_pct >= 55 ? 'pos' : eng.win_rate_pct < 45 ? 'neg' : '');
+  setV('adp-kelly',    eng.kelly_fraction_pct.toFixed(2) + '%');
+  setV('adp-perf',     'x' + eng.perf_multiplier.toFixed(2), eng.perf_multiplier >= 1.0 ? 'pos' : 'neg');
+  setV('adp-dd',       eng.drawdown_pct.toFixed(1) + '%',    eng.drawdown_pct >= 10 ? 'neg' : '');
+  setV('adp-trades',   eng.trades_analyzed);
+  setV('adp-rec-high', eng.rec_buy.HIGH + '%');
+  setV('adp-rec-med',  eng.rec_buy.MEDIUM + '%');
+  setV('adp-rec-low',  eng.rec_buy.LOW + '%');
+  const cbEl = document.getElementById('adp-cb');
+  if (cbEl) {
+    cbEl.textContent  = eng.circuit_breaker ? 'ACTIVE' : 'OFF';
+    cbEl.style.color  = eng.circuit_breaker ? '#EF5350' : '#26A69A';
+  }
 }
 
 // ── Start ─────────────────────────────────────────────────────────────────────

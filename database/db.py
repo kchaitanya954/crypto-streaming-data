@@ -80,6 +80,12 @@ CREATE TABLE IF NOT EXISTS triggers (
     active         INTEGER NOT NULL DEFAULT 1,
     created_at     INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS adaptive_state (
+    id         INTEGER PRIMARY KEY CHECK (id = 1),
+    state_json TEXT    NOT NULL,
+    updated_at INTEGER NOT NULL
+);
 """
 
 
