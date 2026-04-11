@@ -448,7 +448,7 @@
     .an-card-val.pos { color: #26A69A; }
     .an-card-val.neg { color: #EF5350; }
     .an-card-val.neu { color: #FF9800; }
-    .an-card-lbl { font-size: 10px; color: #4C525E; margin-top: 3px; text-transform: uppercase; letter-spacing: 0.5px; }
+    .an-card-lbl, .an-card-label { font-size: 10px; color: #4C525E; margin-top: 3px; text-transform: uppercase; letter-spacing: 0.5px; }
 
     /* Open positions */
     .an-open-pos {
@@ -643,12 +643,17 @@
         <button class="sf-btn cf-btn cf-MEDIUM"      data-cf="MEDIUM">MED</button>
         <button class="sf-btn cf-btn cf-LOW"         data-cf="LOW">LOW</button>
       </div>
-      <div class="sf-row">
+      <div class="sf-row" style="flex-wrap:wrap;gap:4px">
+        <span class="sf-label">IV</span>
+        <div id="iv-filter-btns" style="display:flex;flex-wrap:wrap;gap:3px">
+          <button class="sf-btn ivf-btn active" data-iv="">ALL</button>
+        </div>
+      </div>
+      <div class="sf-row" id="trig-filter-row" style="flex-wrap:wrap;gap:4px">
         <span class="sf-label">Trig</span>
-        <button class="sf-btn tf-btn active" data-tf="">ALL</button>
-        <button class="sf-btn tf-btn"        data-tf="RSI">RSI</button>
-        <button class="sf-btn tf-btn"        data-tf="Stoch">Stoch</button>
-        <button class="sf-btn tf-btn"        data-tf="OBV">OBV</button>
+        <div id="trig-filter-btns" style="display:flex;flex-wrap:wrap;gap:3px">
+          <button class="sf-btn tf-btn active" data-tf-sym="" data-tf-iv="">ALL</button>
+        </div>
       </div>
     </div>
 
@@ -684,6 +689,9 @@
         <button class="bulk-act-btn danger" id="trig-del-sel-btn">Delete Selected</button>
       </div>
       <div id="trig-add-form">
+        <div class="trig-form-row">
+          <input id="trig-name" class="trig-inp" type="text" placeholder="Name (e.g. BTC Scalp)" style="width:100%" />
+        </div>
         <div class="trig-form-row">
           <input  id="trig-sym"  class="trig-inp" type="text"   placeholder="BTCUSDT" />
           <select id="trig-iv"   class="trig-sel">
@@ -849,7 +857,23 @@
 
     <!-- Portfolio Simulation -->
     <div class="an-section" style="border-top:1px solid #2A2E39;">
-      <div class="an-section-title" style="margin-bottom:10px">Portfolio Simulation (Slicing Strategy)</div>
+      <!-- Adaptive Engine State -->
+      <div class="an-section-title">Adaptive Engine</div>
+      <div class="an-cards" id="adaptive-cards">
+        <div class="an-card"><div class="an-card-label">Win Rate</div><div class="an-card-val" id="adp-winrate">—</div></div>
+        <div class="an-card"><div class="an-card-label">Kelly %</div><div class="an-card-val" id="adp-kelly">—</div></div>
+        <div class="an-card"><div class="an-card-label">Perf Mult</div><div class="an-card-val" id="adp-perf">—</div></div>
+        <div class="an-card"><div class="an-card-label">Drawdown</div><div class="an-card-val" id="adp-dd">—</div></div>
+        <div class="an-card"><div class="an-card-label">Trades</div><div class="an-card-val" id="adp-trades">—</div></div>
+      </div>
+      <div class="an-cards" style="margin-top:4px">
+        <div class="an-card"><div class="an-card-label">Rec HIGH</div><div class="an-card-val" id="adp-rec-high">—</div></div>
+        <div class="an-card"><div class="an-card-label">Rec MED</div><div class="an-card-val" id="adp-rec-med">—</div></div>
+        <div class="an-card"><div class="an-card-label">Rec LOW</div><div class="an-card-val" id="adp-rec-low">—</div></div>
+        <div class="an-card"><div class="an-card-label" id="adp-cb-label">Circuit Breaker</div><div class="an-card-val" id="adp-cb">OFF</div></div>
+      </div>
+
+      <div class="an-section-title" style="margin-bottom:10px;margin-top:14px">Portfolio Simulation (Slicing Strategy)</div>
 
       <!-- Sim controls -->
       <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:12px">
@@ -890,7 +914,7 @@
       <!-- Sim trade log -->
       <div class="an-trades-wrap" style="max-height:240px">
         <table class="an-table" style="width:100%">
-          <thead><tr><th>Symbol</th><th>IV</th><th>Dir</th><th>Conf</th><th>Price</th><th>USDT ±</th><th>P&amp;L</th><th>Balance</th><th>Portfolio</th><th>Time</th></tr></thead>
+          <thead><tr><th>Symbol</th><th>IV</th><th>Dir</th><th>Conf</th><th>Price</th><th>Avg Entry</th><th>Qty</th><th>USDT ±</th><th>P&amp;L</th><th>Balance</th><th>Portfolio</th><th>Time</th></tr></thead>
           <tbody id="sim-trades"></tbody>
         </table>
         <div class="an-no-data" id="sim-no-data" style="display:none">No simulation trades yet — need BUY/SELL signals in the selected period.</div>

@@ -39,6 +39,7 @@ static_dir = Path(__file__).parent / "static"
 # ── Trigger request models ──────────────────────────────────────────────────────
 
 class TriggerCreate(BaseModel):
+    name:           str                      # required display name for filtering
     symbol:         str
     interval:       str
     min_confidence: str            = "MEDIUM"
@@ -49,6 +50,7 @@ class TriggerBulkDelete(BaseModel):
     ids: list[int]
 
 class TriggerUpdate(BaseModel):
+    name:           Optional[str]   = None
     symbol:         Optional[str]   = None
     interval:       Optional[str]   = None
     min_confidence: Optional[str]   = None
@@ -83,15 +85,47 @@ async def api_portfolio(request: Request):
 @app.get("/api/signals/history")
 async def api_signals_history(
     request: Request,
-    symbol:   str = Query(...),
-    interval: str = Query(default="1m"),
-    limit:    int = Query(default=50),
+    symbol:   Optional[str] = Query(default=None),
+    interval: Optional[str] = Query(default=None),
+    limit:    int            = Query(default=100),
 ):
-    """Return recent signals from SQLite for pre-populating the dashboard sidebar."""
+    """Return recent signals from SQLite. All filters optional — omit for all symbols/intervals."""
     db = getattr(request.app.state, "db", None)
     if db is None:
         return []
     return await queries.get_recent_signals(db, symbol=symbol, interval=interval, limit=limit)
+
+
+@app.delete("/api/signals/{signal_id}")
+async def api_delete_signal(request: Request, signal_id: int):
+    """Hard-delete a single signal by DB id."""
+    db = getattr(request.app.state, "db", None)
+    if db is None:
+        return JSONResponse({"error": "DB not configured"}, status_code=503)
+    await queries.delete_signal(db, signal_id)
+    return {"ok": True}
+
+
+@app.delete("/api/signals")
+async def api_delete_signals(
+    request:    Request,
+    symbol:     Optional[str] = Query(default=None),
+    interval:   Optional[str] = Query(default=None),
+    direction:  Optional[str] = Query(default=None),
+    confidence: Optional[str] = Query(default=None),
+):
+    """Bulk-delete signals matching any combination of query filters."""
+    db = getattr(request.app.state, "db", None)
+    if db is None:
+        return JSONResponse({"error": "DB not configured"}, status_code=503)
+    deleted = await queries.delete_signals(
+        db,
+        symbol=symbol,
+        interval=interval,
+        direction=direction,
+        confidence=confidence,
+    )
+    return {"deleted": deleted}
 
 
 @app.get("/api/triggers")
@@ -118,12 +152,13 @@ async def api_create_trigger(request: Request, body: TriggerCreate):
         db, sym, iv, conf,
         adx_threshold=body.adx_threshold,
         cooldown_bars=body.cooldown_bars,
+        name=body.name,
     )
     if tg_bot and settings:
         from telegram_bot.alerts import send_trigger_alert
         await send_trigger_alert(tg_bot, settings.telegram_chat_id, "created", sym, iv, conf)
     return {
-        "id": tid, "symbol": sym, "interval": iv,
+        "id": tid, "name": body.name, "symbol": sym, "interval": iv,
         "min_confidence": conf, "active": True,
         "adx_threshold": body.adx_threshold,
         "cooldown_bars": body.cooldown_bars,
@@ -145,6 +180,7 @@ async def api_update_trigger(request: Request, trigger_id: int, body: TriggerUpd
         min_confidence=body.min_confidence, active=body.active,
         adx_threshold=body.adx_threshold,
         cooldown_bars=body.cooldown_bars,
+        name=body.name,
     )
     if tg_bot and settings and trig:
         from telegram_bot.alerts import send_trigger_alert
@@ -172,14 +208,23 @@ async def api_bulk_delete_triggers(request: Request, body: TriggerBulkDelete):
 
 
 @app.delete("/api/triggers/{trigger_id}")
-async def api_delete_trigger(request: Request, trigger_id: int):
-    """Delete a trigger and send a Telegram alert."""
+async def api_delete_trigger(
+    request: Request,
+    trigger_id: int,
+    delete_signals: bool = Query(default=False),
+):
+    """Delete a trigger. Pass delete_signals=true to also purge its associated signals."""
     db       = getattr(request.app.state, "db",           None)
     tg_bot   = getattr(request.app.state, "telegram_bot", None)
     settings = getattr(request.app.state, "settings",     None)
     if db is None:
         return JSONResponse({"error": "DB not configured"}, status_code=503)
     trig = await queries.get_trigger(db, trigger_id)
+    signals_deleted = 0
+    if delete_signals and trig:
+        signals_deleted = await queries.delete_signals(
+            db, symbol=trig["symbol"], interval=trig["interval"]
+        )
     await queries.delete_trigger(db, trigger_id)
     if tg_bot and settings and trig:
         from telegram_bot.alerts import send_trigger_alert
@@ -187,7 +232,7 @@ async def api_delete_trigger(request: Request, trigger_id: int):
             tg_bot, settings.telegram_chat_id, "deleted",
             trig["symbol"], trig["interval"], trig["min_confidence"],
         )
-    return {"ok": True}
+    return {"ok": True, "signals_deleted": signals_deleted}
 
 
 # ── Analytics endpoint ─────────────────────────────────────────────────────────
@@ -198,81 +243,78 @@ _PERIOD_SECS = {"1h": 3600, "4h": 14400, "1d": 86400, "7d": 604800, "30d": 25920
 def _simulate_portfolio(
     signals: list[dict],
     initial_usdt: float,
-    buy_pct: float,
-    sell_pct: float,
+    buy_pct: float,    # used as fallback base before Kelly has enough data
+    sell_pct: float,   # unused directly — sell ratio comes from adaptive engine
 ) -> dict:
     """
-    Adaptive DCA portfolio simulation.
+    Adaptive walk-forward portfolio simulation.
 
-    Each (symbol, interval) stream is treated as an independent position.
+    Uses Half-Kelly Criterion with live performance feedback:
+    - Buy size = engine.buy_pct_for(confidence, adx_val) % of USDT
+    - Sell ratio = engine.sell_ratio_for(confidence)
+    - Engine updates after each completed BUY→SELL cycle
 
-    BUY rules:
-      - Entry 1 (flat):  spend buy_pct% of total USDT
-      - Entry 2 (DCA):   spend buy_pct/2% (half size to average down)
-      - Entry 3 (DCA):   spend buy_pct/4% (quarter size)
-      - Entry 4+: skipped — max 3 DCA entries per stream
-
-    SELL rules (confidence-weighted partial exits):
-      - HIGH:   close 100% of this stream's position
-      - MEDIUM: close 60%
-      - LOW:    close 30%
-      Consecutive SELLs keep reducing until position is flat, then skip.
-
-    Holdings and P&L are tracked per stream (symbol+interval).
-    USDT pool is shared across all streams.
+    DCA rules (same as before):
+    - Max 3 DCA entries per (symbol, interval) stream
+    - Entry 1: full Kelly size, Entry 2: half, Entry 3: quarter
     """
-    _MAX_DCA      = 3
-    _DCA_SCALE    = [1.0, 0.5, 0.25]        # fraction of buy_pct for each DCA entry
-    _SELL_RATIO   = {"HIGH": 1.0, "MEDIUM": 0.6, "LOW": 0.3}
+    from signals.adaptive_strategy import AdaptiveState
 
-    usdt: float             = initial_usdt
-    # Per-stream state
-    stream_coins:   dict[tuple, float] = {}  # (sym, iv) → coins held
-    stream_entries: dict[tuple, int]   = {}  # (sym, iv) → DCA entry count
-    stream_avg:     dict[tuple, float] = {}  # (sym, iv) → avg entry price
-    # Per-symbol last price (shared across intervals for valuation)
-    last_price: dict[str, float] = {}
-    # Global coin holdings (base → total coins, across all intervals)
-    holdings: dict[str, float] = {}
+    _MAX_DCA   = 3
+    _DCA_SCALE = [1.0, 0.5, 0.25]
 
-    sim_trades:   list[dict] = []
-    skipped_buys: int = 0
+    # Local walk-forward engine (starts fresh for simulation)
+    sim_engine = AdaptiveState()
+
+    usdt: float = initial_usdt
+    stream_coins:   dict = {}   # (sym, iv) → coins held
+    stream_entries: dict = {}   # (sym, iv) → DCA entry count
+    stream_avg:     dict = {}   # (sym, iv) → avg entry price
+    last_price:     dict = {}   # sym → last price
+    holdings:       dict = {}   # base → total coins across all streams
+
+    # Track completed trades for engine updates
+    completed_for_engine: list = []
+
+    sim_trades:   list = []
+    skipped_buys:  int = 0
     skipped_sells: int = 0
+    portfolio_val  = initial_usdt
 
-    for sig in signals:   # oldest-first
+    for sig in signals:  # oldest-first
         sym      = sig["symbol"]
         interval = sig["interval"]
         price    = sig["entry_price"]
         conf     = sig["confidence"]
+        adx_val  = sig.get("adx_val")
         stream   = (sym, interval)
         last_price[sym] = price
 
-        # Derive base currency
         base = sym
         for quote in ("USDT", "BTC", "ETH", "BNB", "INR"):
             if sym.endswith(quote):
-                base = sym[: -len(quote)]
+                base = sym[:-len(quote)]
                 break
 
-        entries     = stream_entries.get(stream, 0)
-        coins_held  = stream_coins.get(stream, 0.0)
+        entries    = stream_entries.get(stream, 0)
+        coins_held = stream_coins.get(stream, 0.0)
 
         if sig["direction"] == "BUY":
             if entries >= _MAX_DCA:
                 skipped_buys += 1
-                continue                        # position at max — skip
+                continue
+            # Adaptive sizing: engine.buy_pct_for × DCA scale
+            adaptive_pct = sim_engine.buy_pct_for(conf, adx_val)
             scale   = _DCA_SCALE[entries]
-            spend   = usdt * (buy_pct / 100.0) * scale
+            spend   = usdt * (adaptive_pct / 100.0) * scale
             if spend < 0.0001 or usdt < spend:
                 skipped_buys += 1
                 continue
-            coins   = spend / price
-            usdt   -= spend
-            # Update stream & global state
+            coins = spend / price
+            usdt -= spend
             stream_entries[stream] = entries + 1
             stream_coins[stream]   = coins_held + coins
-            holdings[base]         = holdings.get(base, 0.0) + coins
-            # Update average entry price (volume-weighted)
+            holdings[base] = holdings.get(base, 0.0) + coins
             prev_avg = stream_avg.get(stream, 0.0)
             stream_avg[stream] = (
                 (prev_avg * coins_held + price * coins) / (coins_held + coins)
@@ -288,8 +330,11 @@ def _simulate_portfolio(
                 "interval":      interval,
                 "direction":     "BUY",
                 "confidence":    conf,
+                "adx_val":       round(adx_val, 1) if adx_val else None,
                 "dca_entry":     entries + 1,
                 "price":         round(price, 4),
+                "avg_entry":     None,
+                "adaptive_pct":  adaptive_pct,
                 "usdt_spent":    round(spend, 4),
                 "coins_bought":  round(coins, 8),
                 "usdt_balance":  round(usdt, 4),
@@ -299,47 +344,53 @@ def _simulate_portfolio(
         elif sig["direction"] == "SELL":
             if coins_held < 1e-10:
                 skipped_sells += 1
-                continue                        # already flat — skip
-
-            ratio      = _SELL_RATIO.get(conf, 0.6)
+                continue
+            ratio      = sim_engine.sell_ratio_for(conf)
             coins_sold = coins_held * ratio
             received   = coins_sold * price
             avg_entry  = stream_avg.get(stream, price)
             pnl_pct    = (price - avg_entry) / avg_entry * 100 if avg_entry else 0.0
 
-            usdt   += received
+            usdt += received
             stream_coins[stream] = coins_held - coins_sold
-            holdings[base]       = max(0.0, holdings.get(base, 0.0) - coins_sold)
+            holdings[base] = max(0.0, holdings.get(base, 0.0) - coins_sold)
 
-            # Update entry count proportionally (or zero on full exit)
             if ratio >= 1.0 or stream_coins[stream] < 1e-10:
                 stream_entries[stream] = 0
                 stream_avg[stream]     = 0.0
                 stream_coins[stream]   = 0.0
             else:
-                new_count = max(0, round(entries * (1.0 - ratio)))
-                stream_entries[stream] = new_count
+                stream_entries[stream] = max(0, round(entries * (1.0 - ratio)))
 
             portfolio_val = usdt + sum(
                 holdings.get(b, 0) * last_price.get(b + "USDT", last_price.get(sym, price))
                 for b in holdings
             )
             sim_trades.append({
-                "time":           sig["open_time"] // 1000,
-                "symbol":         sym,
-                "interval":       interval,
-                "direction":      "SELL",
-                "confidence":     conf,
-                "exit_pct":       round(ratio * 100),
-                "price":          round(price, 4),
-                "usdt_received":  round(received, 4),
-                "coins_sold":     round(coins_sold, 8),
-                "pnl_pct":        round(pnl_pct, 3),
-                "usdt_balance":   round(usdt, 4),
-                "portfolio_val":  round(portfolio_val, 4),
+                "time":          sig["open_time"] // 1000,
+                "symbol":        sym,
+                "interval":      interval,
+                "direction":     "SELL",
+                "confidence":    conf,
+                "adx_val":       round(adx_val, 1) if adx_val else None,
+                "exit_pct":      round(ratio * 100),
+                "price":         round(price, 4),
+                "avg_entry":     round(avg_entry, 4),
+                "usdt_received": round(received, 4),
+                "coins_sold":    round(coins_sold, 8),
+                "pnl_pct":       round(pnl_pct, 3),
+                "usdt_balance":  round(usdt, 4),
+                "portfolio_val": round(portfolio_val, 4),
             })
 
-    # Final valuation
+            # Feed completed trade into walk-forward engine
+            completed_for_engine.append({
+                "pnl_pct":       pnl_pct,
+                "portfolio_val": portfolio_val,
+            })
+            if len(completed_for_engine) >= 5:
+                sim_engine.update(completed_for_engine)
+
     holding_value = sum(
         holdings.get(b, 0) * last_price.get(b + "USDT", 0) for b in holdings
     )
@@ -348,8 +399,6 @@ def _simulate_portfolio(
 
     return {
         "initial_usdt":       round(initial_usdt, 2),
-        "buy_pct":            buy_pct,
-        "sell_pct":           sell_pct,
         "final_cash_usdt":    round(usdt, 4),
         "final_holding_usdt": round(holding_value, 4),
         "final_value_usdt":   round(final_value, 4),
@@ -359,6 +408,7 @@ def _simulate_portfolio(
         "skipped_sells":      skipped_sells,
         "sim_trades":         sim_trades[-100:],
         "sim_trade_count":    len(sim_trades),
+        "engine_state":       sim_engine.summary(),
     }
 
 
@@ -498,6 +548,101 @@ async def api_analytics(
     }
 
 
+@app.get("/api/adaptive")
+async def api_adaptive_state(request: Request):
+    """Return current adaptive engine state and position-size recommendations."""
+    from signals.adaptive_strategy import engine as _adaptive_engine
+    return _adaptive_engine.summary()
+
+
+@app.on_event("startup")
+async def _on_startup():
+    """Load persisted adaptive state and start the monitor background task."""
+    import asyncio
+    asyncio.create_task(_load_adaptive_state_when_ready())
+
+
+async def _load_adaptive_state_when_ready() -> None:
+    """Wait for DB to be available then restore adaptive engine state."""
+    import asyncio
+    import logging
+    from signals.adaptive_strategy import engine as _adaptive_engine
+    for _ in range(30):   # retry for up to 30 seconds
+        await asyncio.sleep(1)
+        db = getattr(app.state, "db", None)
+        if db is None:
+            continue
+        try:
+            saved = await queries.load_adaptive_state(db)
+            if saved:
+                _adaptive_engine.from_dict(saved)
+                logging.getLogger("adaptive_monitor").info(
+                    "Adaptive engine restored: WR=%.0f%%  Kelly=%.1f%%",
+                    _adaptive_engine.win_rate * 100,
+                    _adaptive_engine.kelly_fraction() * 100,
+                )
+        except Exception:
+            pass
+        asyncio.create_task(_adaptive_monitor_loop())
+        return
+
+
+async def _adaptive_monitor_loop() -> None:
+    """
+    Background task: every 5 min, read recent signals, pair into trades,
+    update the adaptive engine, persist to DB.
+    """
+    import asyncio
+    import logging
+    from collections import defaultdict
+    from signals.adaptive_strategy import engine as _adaptive_engine
+    log = logging.getLogger("adaptive_monitor")
+
+    while True:
+        await asyncio.sleep(300)   # 5-minute cycle
+        db = getattr(app.state, "db", None)
+        if db is None:
+            continue
+        try:
+            signals = await queries.get_signals_for_analytics(db)
+            if not signals:
+                continue
+
+            groups: dict = defaultdict(list)
+            for sig in signals:
+                groups[(sig["symbol"], sig["interval"])].append(sig)
+
+            all_trades = []
+            for grp in groups.values():
+                trades, _ = _pair_signals(grp)
+                all_trades.extend(trades)
+
+            if not all_trades:
+                continue
+
+            all_trades.sort(key=lambda t: t["close_time"])
+
+            # Enrich with running portfolio value (starts at 100 for relative calc)
+            running = 100.0
+            for t in all_trades:
+                running = running * (1 + t["pnl_pct"] / 100)
+                t["portfolio_val"] = running
+
+            _adaptive_engine.update(all_trades)
+            await queries.save_adaptive_state(db, _adaptive_engine.to_dict())
+            log.info(
+                "Adaptive engine: %d trades  WR=%.0f%%  Kelly=%.1f%%  DD=%.1f%%  perf=%.2f  CB=%s",
+                len(all_trades),
+                _adaptive_engine.win_rate * 100,
+                _adaptive_engine.kelly_fraction() * 100,
+                _adaptive_engine.current_drawdown_pct,
+                _adaptive_engine.perf_multiplier,
+                _adaptive_engine.consecutive_losses >= 3 or _adaptive_engine.current_drawdown_pct >= 10,
+            )
+        except Exception as exc:
+            log.error("Adaptive monitor error: %s", exc)
+
+
 # ── WebSocket endpoint ─────────────────────────────────────────────────────────
 
 @app.websocket("/ws")
@@ -566,40 +711,56 @@ async def _connection_loop(
                         pass
 
                 if signal:
-                    signal_payload = {
-                        "type":        "signal",
-                        "direction":   signal.direction,
-                        "confidence":  signal.confidence,
-                        "entry_price": signal.entry_price,
-                        "time":        signal.open_time // 1000,
-                        "macd_val":    signal.macd_val,
-                        "signal_val":  signal.signal_val,
-                        "histogram":   signal.histogram,
-                        "adx_val":     signal.adx_val,
-                        "reasons":     signal.reasons,
-                        "trend_note":  signal.trend_note,
-                    }
-                    # Check if any active trigger matches this signal
-                    trigger_matched = False
-                    if db is not None:
-                        try:
-                            active_triggers = await queries.get_triggers(db)
-                            trigger_matched = any(
-                                queries.trigger_matches(t, symbol, interval, signal.confidence, signal.adx_val)
-                                for t in active_triggers
-                            )
-                        except Exception:
-                            pass
-                    signal_payload["trigger_matched"] = trigger_matched
-                    await ws.send_json(signal_payload)
-
-                    # Persist signal to DB
+                    # Persist signal to DB first so we have the id
                     signal_id: Optional[int] = None
                     if db is not None:
                         try:
                             signal_id = await queries.insert_signal(db, symbol, interval, signal)
                         except Exception:
                             pass
+
+                    # Check which active triggers match this signal
+                    matched_triggers: list[dict] = []
+                    if db is not None:
+                        try:
+                            active_triggers = await queries.get_triggers(db)
+                            matched_triggers = [
+                                t for t in active_triggers
+                                if queries.trigger_matches(
+                                    t, symbol, interval, signal.confidence, signal.adx_val
+                                )
+                            ]
+                        except Exception:
+                            pass
+                    trigger_matched = bool(matched_triggers)
+                    trigger_names   = [
+                        t.get("name") or f"{t['symbol']} {t['interval']}"
+                        for t in matched_triggers
+                    ]
+
+                    from signals.adaptive_strategy import engine as _adaptive_engine
+                    rec_buy_pct = _adaptive_engine.buy_pct_for(signal.confidence, signal.adx_val)
+
+                    signal_payload = {
+                        "type":            "signal",
+                        "id":              signal_id,
+                        "symbol":          symbol.upper(),
+                        "interval":        interval,
+                        "direction":       signal.direction,
+                        "confidence":      signal.confidence,
+                        "entry_price":     signal.entry_price,
+                        "time":            signal.open_time // 1000,
+                        "macd_val":        signal.macd_val,
+                        "signal_val":      signal.signal_val,
+                        "histogram":       signal.histogram,
+                        "adx_val":         signal.adx_val,
+                        "reasons":         signal.reasons,
+                        "trend_note":      signal.trend_note,
+                        "trigger_matched": trigger_matched,
+                        "trigger_names":   trigger_names,
+                        "rec_buy_pct":     rec_buy_pct,
+                    }
+                    await ws.send_json(signal_payload)
 
                     # Send Telegram alert — ONLY when a trigger matches this signal
                     if tg_bot is not None and settings is not None and trigger_matched:

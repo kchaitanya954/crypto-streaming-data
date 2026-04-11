@@ -15,9 +15,11 @@ let currentMinConf = parseInt(  localStorage.getItem('minConf') ?? '1', 10);
 let currentCooldown= parseInt(  localStorage.getItem('cooldown') ?? '2', 10);
 
 // Signal filter + selection state
-let sigConfFilter = '';   // '' = ALL, 'HIGH', 'MEDIUM', 'LOW'
-let sigTrigFilter = '';   // '' = ALL, 'RSI', 'Stoch', 'OBV'
+let sigConfFilter = '';     // '' = ALL, 'HIGH', 'MEDIUM', 'LOW'
+let sigIvFilter   = '';     // '' = ALL, e.g. '1s', '1m', '15m'
+let sigTrigFilter = null;   // null = ALL, {sym, iv} = specific trigger
 let selectedCards = new Set();
+const knownIntervals = new Set();   // tracks intervals seen so far
 
 // ── Chart creation ────────────────────────────────────────────────────────────
 
@@ -278,7 +280,7 @@ function onLive(msg) {
 
 function onReady() {
   [mainChart, macdChart, rsiChart].forEach(c => c.timeScale().scrollToRealTime());
-  loadHistoricalSignals(currentSymbol, currentInterval);
+  loadHistoricalSignals();
 }
 
 function onSignal(msg) {
@@ -293,38 +295,40 @@ function onSignal(msg) {
   markers.sort((a, b) => a.time - b.time);
   candleSeries.setMarkers(markers);
 
-  // Sidebar card + push notification only when a trigger matches
-  if (msg.trigger_matched) {
-    addSignalCard(msg, true);
-    pushNotification(msg);
-  }
+  // Always show signal card; highlight trigger-matched ones
+  addSignalCard(msg, msg.trigger_matched);
+  if (msg.trigger_matched) pushNotification(msg);
   mainChart.timeScale().scrollToRealTime();
   if (analyticsOpen) loadAnalytics();
 }
 
 // ── Historical signal pre-load ────────────────────────────────────────────────
 
-function loadHistoricalSignals(symbol, interval) {
-  fetch(`/api/signals/history?symbol=${encodeURIComponent(symbol)}&interval=${encodeURIComponent(interval)}&limit=50`)
+function loadHistoricalSignals() {
+  // Load all recent signals across all symbols and intervals
+  fetch('/api/signals/history?limit=150')
     .then(r => r.json())
     .then(signals => {
       if (!Array.isArray(signals) || signals.length === 0) return;
-      // Signals are newest-first from API; prepend in that order so newest is on top
+      // Newest-first from API; prepend so newest is on top
       signals.forEach(s => {
-        // Normalise field names from DB row to match WebSocket signal shape
         addSignalCard({
-          direction:   s.direction,
-          confidence:  s.confidence,
-          entry_price: s.entry_price,
-          time:        s.open_time / 1000,   // open_time is ms epoch
-          reasons:     Array.isArray(s.reasons) ? s.reasons : [],
-          trend_note:  s.trend_note || '',
-          macd_val:    s.macd_val,
-          adx_val:     s.adx_val,
+          id:            s.id,
+          symbol:        s.symbol,
+          interval:      s.interval,
+          direction:     s.direction,
+          confidence:    s.confidence,
+          entry_price:   s.entry_price,
+          time:          s.open_time / 1000,
+          reasons:       Array.isArray(s.reasons) ? s.reasons : [],
+          trend_note:    s.trend_note || '',
+          macd_val:      s.macd_val,
+          adx_val:       s.adx_val,
+          trigger_names: [],
         });
       });
     })
-    .catch(() => {});  // DB not configured — silently ignore
+    .catch(() => {});
 }
 
 // ── Portfolio panel ───────────────────────────────────────────────────────────
@@ -376,10 +380,14 @@ function getCardTriggers(reasons) {
 }
 
 function cardVisible(card) {
-  const confOk = !sigConfFilter || card.dataset.conf === sigConfFilter;
-  const trigs  = (card.dataset.triggers || '').split(',').filter(Boolean);
-  const trigOk = !sigTrigFilter || trigs.includes(sigTrigFilter);
-  return confOk && trigOk;
+  const confOk = !sigConfFilter || card.dataset.conf     === sigConfFilter;
+  const ivOk   = !sigIvFilter   || card.dataset.interval === sigIvFilter;
+  let trigOk = true;
+  if (sigTrigFilter) {
+    trigOk = card.dataset.symbol   === sigTrigFilter.sym
+          && card.dataset.interval === sigTrigFilter.iv;
+  }
+  return confOk && ivOk && trigOk;
 }
 
 function applyCardFilter(card) {
@@ -427,6 +435,9 @@ function removeSignalCard(card) {
   card.remove();
   updateBulkBar();
   checkEmptyList();
+  if (card.dataset.id) {
+    fetch(`/api/signals/${card.dataset.id}`, { method: 'DELETE' }).catch(() => {});
+  }
 }
 
 function deleteByTrigger(trigger) {
@@ -435,6 +446,9 @@ function deleteByTrigger(trigger) {
     if ((card.dataset.triggers || '').split(',').includes(trigger)) {
       markers = markers.filter(m => m.time !== parseFloat(card.dataset.time));
       selectedCards.delete(card);
+      if (card.dataset.id) {
+        fetch(`/api/signals/${card.dataset.id}`, { method: 'DELETE' }).catch(() => {});
+      }
       card.remove();
     }
   });
@@ -450,11 +464,20 @@ function deleteAllSignals() {
   selectedCards.clear();
   document.getElementById('signal-list').innerHTML = '<div class="no-sig">No signals</div>';
   updateBulkBar();
+  // Persist: delete all signals for the current symbol+interval
+  const params = new URLSearchParams({
+    symbol:   currentSymbol,
+    interval: currentInterval,
+  });
+  fetch(`/api/signals?${params}`, { method: 'DELETE' }).catch(() => {});
 }
 
 function deleteSelected() {
   [...selectedCards].forEach(card => {
     markers = markers.filter(m => m.time !== parseFloat(card.dataset.time));
+    if (card.dataset.id) {
+      fetch(`/api/signals/${card.dataset.id}`, { method: 'DELETE' }).catch(() => {});
+    }
     card.remove();
   });
   if (candleSeries) candleSeries.setMarkers(markers);
@@ -483,6 +506,11 @@ function addSignalCard(msg, triggerMatch = false) {
   card.dataset.conf     = msg.confidence;
   card.dataset.triggers = triggers.join(',');
   card.dataset.time     = msg.time;
+  if (msg.id       != null) card.dataset.id            = msg.id;
+  if (msg.symbol)           card.dataset.symbol        = msg.symbol;
+  if (msg.interval)         card.dataset.interval      = msg.interval;
+  if (msg.trigger_names)    card.dataset.triggerNames  = msg.trigger_names.join(',');
+  if (msg.interval)         registerIntervalFilter(msg.interval);
 
   card.innerHTML = `
     <button class="sc-del-btn" title="Delete options">✕</button>
@@ -499,6 +527,7 @@ function addSignalCard(msg, triggerMatch = false) {
     <div class="sc-time">${time}</div>
     ${reasons.length ? `<div class="sc-reason">${reasons.join(' &nbsp;·&nbsp; ')}</div>` : ''}
     <div class="sc-trend">${msg.trend_note || ''}</div>
+    ${msg.rec_buy_pct != null ? `<div class="sc-rec">Rec: ${msg.rec_buy_pct}% of portfolio</div>` : ''}
   `;
 
   card.querySelector('.sc-del-btn').addEventListener('click', e => {
@@ -778,14 +807,46 @@ document.querySelectorAll('.cf-btn').forEach(btn => {
   });
 });
 
-document.querySelectorAll('.tf-btn').forEach(btn => {
+// Called whenever a new interval appears in the signal list
+function registerIntervalFilter(interval) {
+  if (!interval || knownIntervals.has(interval)) return;
+  knownIntervals.add(interval);
+  const container = document.getElementById('iv-filter-btns');
+  const btn = document.createElement('button');
+  btn.className    = 'sf-btn ivf-btn';
+  btn.textContent  = interval;
+  btn.dataset.iv   = interval;
   btn.addEventListener('click', () => {
-    document.querySelectorAll('.tf-btn').forEach(b => b.classList.remove('active'));
+    container.querySelectorAll('.ivf-btn').forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
-    sigTrigFilter = btn.dataset.tf;
+    sigIvFilter = interval;
     applyAllFilters();
   });
+  container.appendChild(btn);
+}
+
+// Bind the static ALL button for IV filter
+document.getElementById('iv-filter-btns').querySelector('.ivf-btn').addEventListener('click', function () {
+  document.getElementById('iv-filter-btns').querySelectorAll('.ivf-btn').forEach(b => b.classList.remove('active'));
+  this.classList.add('active');
+  sigIvFilter = '';
+  applyAllFilters();
 });
+
+function bindTriggerFilterBtns() {
+  const container = document.getElementById('trig-filter-btns');
+  container.querySelectorAll('.tf-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      container.querySelectorAll('.tf-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      const sym = btn.dataset.tfSym;
+      const iv  = btn.dataset.tfIv;
+      sigTrigFilter = (sym && iv) ? { sym, iv } : null;
+      applyAllFilters();
+    });
+  });
+}
+bindTriggerFilterBtns(); // bind the initial ALL button
 
 document.getElementById('sig-del-all').addEventListener('click',     () => deleteAllSignals());
 document.getElementById('sig-del-sel-btn').addEventListener('click', () => deleteSelected());
@@ -797,10 +858,30 @@ document.getElementById('sig-desel-btn').addEventListener('click', () => {
 
 // ── Triggers panel ────────────────────────────────────────────────────────────
 
+function renderTriggerFilterBtns(list) {
+  const container = document.getElementById('trig-filter-btns');
+  // Reset to ALL
+  container.innerHTML = '<button class="sf-btn tf-btn active" data-tf-sym="" data-tf-iv="">ALL</button>';
+  (list || []).filter(t => t.active).forEach(t => {
+    const label = t.name || `${t.symbol} ${t.interval}`;
+    const btn = document.createElement('button');
+    btn.className    = 'sf-btn tf-btn';
+    btn.textContent  = label;
+    btn.dataset.tfSym = t.symbol;
+    btn.dataset.tfIv  = t.interval;
+    btn.title = `${t.symbol} ${t.interval} ≥${t.min_confidence}`;
+    container.appendChild(btn);
+  });
+  bindTriggerFilterBtns();
+}
+
 function loadTriggers() {
   fetch('/api/triggers')
     .then(r => r.json())
-    .then(renderTriggers)
+    .then(list => {
+      renderTriggers(list);
+      renderTriggerFilterBtns(list);
+    })
     .catch(() => {});
 }
 
@@ -821,10 +902,12 @@ function renderTriggers(list) {
     const row = document.createElement('div');
     row.className = `trig-row${t.active ? '' : ' inactive'}`;
     row.dataset.id = t.id;
-    const adxHint = t.adx_threshold != null ? ` adx≥${t.adx_threshold}` : '';
-    const cdHint  = t.cooldown_bars  != null ? ` cd${t.cooldown_bars}`   : '';
+    const adxHint  = t.adx_threshold != null ? ` adx≥${t.adx_threshold}` : '';
+    const cdHint   = t.cooldown_bars  != null ? ` cd${t.cooldown_bars}`   : '';
+    const nameLabel = t.name ? `<span style="font-size:10px;color:#D1D4DC;font-weight:600;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${t.name}">${t.name}</span>` : '';
     row.innerHTML =
       `<input type="checkbox" class="trig-cb trig-row-cb" data-id="${t.id}" />` +
+      nameLabel +
       `<span class="trig-sym">${t.symbol}</span>` +
       `<span class="trig-iv">${t.interval}</span>` +
       `<span class="trig-conf trig-conf-${t.min_confidence}">${t.min_confidence}</span>` +
@@ -851,7 +934,9 @@ function renderTriggers(list) {
     });
 
     row.querySelector('.trig-del').addEventListener('click', () => {
-      fetch(`/api/triggers/${t.id}`, { method: 'DELETE' })
+      if (!confirm(`Delete trigger "${t.symbol} ${t.interval}"?`)) return;
+      const delSigs = confirm(`Also delete all signals for ${t.symbol} ${t.interval}?\nOK = delete signals too, Cancel = keep signals.`);
+      fetch(`/api/triggers/${t.id}?delete_signals=${delSigs}`, { method: 'DELETE' })
         .then(r => { if (r.ok) loadTriggers(); });
     });
 
@@ -866,7 +951,8 @@ document.getElementById('trig-iv').addEventListener('change', e => {
 
 function openEditForm(t) {
   currentEditId = t.id;
-  document.getElementById('trig-sym').value = t.symbol;
+  document.getElementById('trig-name').value = t.name || '';
+  document.getElementById('trig-sym').value  = t.symbol;
   for (const opt of document.getElementById('trig-iv').options)
     opt.selected = opt.value === t.interval;
   for (const opt of document.getElementById('trig-conf').options)
@@ -888,9 +974,10 @@ document.getElementById('trig-add-btn').addEventListener('click', () => {
   currentEditId = null;
   document.getElementById('trig-save-btn').textContent = 'Save Trigger';
   if (opening) {
-    document.getElementById('trig-sym').value = currentSymbol;
-    document.getElementById('trig-adx').value = '';
-    document.getElementById('trig-cd').value  = '';
+    document.getElementById('trig-name').value = '';
+    document.getElementById('trig-sym').value  = currentSymbol;
+    document.getElementById('trig-adx').value  = '';
+    document.getElementById('trig-cd').value   = '';
     for (const opt of document.getElementById('trig-iv').options)
       opt.selected = opt.value === currentInterval;
     applyTierToTriggerForm(currentInterval);
@@ -903,10 +990,24 @@ document.getElementById('trig-add-btn').addEventListener('click', () => {
 
 document.getElementById('trig-save-btn').addEventListener('click', () => {
   const btn    = document.getElementById('trig-save-btn');
+  const name   = document.getElementById('trig-name').value.trim();
   const sym    = document.getElementById('trig-sym').value.trim().toUpperCase() || currentSymbol;
   const iv     = document.getElementById('trig-iv').value;
   const conf   = document.getElementById('trig-conf').value;
   const editId = currentEditId;
+
+  // Name is required
+  const nameInput = document.getElementById('trig-name');
+  if (!name) {
+    nameInput.style.borderColor = '#EF5350';
+    btn.textContent = '✕ Name is required';
+    setTimeout(() => {
+      nameInput.style.borderColor = '';
+      btn.textContent = editId ? 'Update Trigger' : 'Save Trigger';
+    }, 2500);
+    return;
+  }
+  nameInput.style.borderColor = '';
 
   // Basic symbol validation: 3-12 uppercase letters/digits, must end with USDT/BTC/ETH/BNB/INR
   const symInput = document.getElementById('trig-sym');
@@ -931,7 +1032,7 @@ document.getElementById('trig-save-btn').addEventListener('click', () => {
   const adxRaw = document.getElementById('trig-adx').value.trim();
   const cdRaw  = document.getElementById('trig-cd').value.trim();
   const payload = {
-    symbol: sym, interval: iv, min_confidence: conf,
+    name, symbol: sym, interval: iv, min_confidence: conf,
     adx_threshold: adxRaw !== '' ? parseFloat(adxRaw) : null,
     cooldown_bars: cdRaw  !== '' ? parseInt(cdRaw, 10) : null,
   };
@@ -947,7 +1048,8 @@ document.getElementById('trig-save-btn').addEventListener('click', () => {
   })
   .then(() => {
     document.getElementById('trig-add-form').classList.remove('open');
-    document.getElementById('trig-sym').value = '';
+    document.getElementById('trig-name').value = '';
+    document.getElementById('trig-sym').value  = '';
     btn.disabled    = false;
     btn.textContent = 'Save Trigger';
     currentEditId   = null;
@@ -988,6 +1090,7 @@ document.getElementById('analytics-btn').addEventListener('click', () => {
   document.getElementById('analytics-modal').classList.add('open');
   analyticsOpen = true;
   loadAnalytics();
+  fetch('/api/adaptive').then(r => r.json()).then(renderAdaptiveState).catch(() => {});
 });
 
 document.getElementById('an-close').addEventListener('click', closeAnalytics);
@@ -1113,6 +1216,7 @@ function renderAnalytics(d) {
 
   // Simulation
   if (d.simulation) renderSimulation(d.simulation);
+  if (d.simulation?.engine_state) renderAdaptiveState(d.simulation.engine_state);
 
   // Trades table
   const tradesBody = document.getElementById('an-trades');
@@ -1210,6 +1314,16 @@ function renderSimulation(s) {
       ? `<span style="color:#EF5350">-$${(t.usdt_spent||0).toFixed(2)}</span>`
       : `<span style="color:#26A69A">+$${(t.usdt_received||0).toFixed(2)}</span>`;
 
+    // Avg Entry — only meaningful for SELLs (shows what we paid vs what we sold at)
+    const avgEntryCell = isBuy
+      ? '<td style="color:#4C525E">—</td>'
+      : `<td style="color:#787B86;font-size:10px" title="Avg buy price">$${(t.avg_entry||t.price).toFixed(2)}</td>`;
+
+    // Qty column
+    const qty = isBuy
+      ? (t.coins_bought || 0).toPrecision(4)
+      : (t.coins_sold   || 0).toPrecision(4);
+
     // P&L cell only for sells
     const pnlCell = isBuy
       ? '<td style="color:#4C525E">—</td>'
@@ -1221,6 +1335,8 @@ function renderSimulation(s) {
       <td style="color:${dirColor};font-weight:700">${actionLabel}</td>
       <td style="color:${confColors[t.confidence]||'#D1D4DC'};font-size:9px;font-weight:700">${t.confidence}</td>
       <td>$${t.price.toFixed(2)}</td>
+      ${avgEntryCell}
+      <td style="color:#787B86;font-size:10px">${qty}</td>
       <td>${usdtDelta}</td>
       ${pnlCell}
       <td style="color:#B2B5BE">$${t.usdt_balance.toFixed(2)}</td>
@@ -1228,6 +1344,29 @@ function renderSimulation(s) {
       <td style="color:#4C525E;font-size:10px">${ts}</td>
     </tr>`;
   }).join('');
+}
+
+function renderAdaptiveState(eng) {
+  if (!eng) return;
+  const setV = (id, val, cls) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.textContent = val;
+    if (cls) el.className = 'an-card-val ' + cls;
+  };
+  setV('adp-winrate',  eng.win_rate_pct.toFixed(1) + '%',   eng.win_rate_pct >= 55 ? 'pos' : eng.win_rate_pct < 45 ? 'neg' : '');
+  setV('adp-kelly',    eng.kelly_fraction_pct.toFixed(2) + '%');
+  setV('adp-perf',     'x' + eng.perf_multiplier.toFixed(2), eng.perf_multiplier >= 1.0 ? 'pos' : 'neg');
+  setV('adp-dd',       eng.drawdown_pct.toFixed(1) + '%',    eng.drawdown_pct >= 10 ? 'neg' : '');
+  setV('adp-trades',   eng.trades_analyzed);
+  setV('adp-rec-high', eng.rec_buy.HIGH + '%');
+  setV('adp-rec-med',  eng.rec_buy.MEDIUM + '%');
+  setV('adp-rec-low',  eng.rec_buy.LOW + '%');
+  const cbEl = document.getElementById('adp-cb');
+  if (cbEl) {
+    cbEl.textContent  = eng.circuit_breaker ? 'ACTIVE' : 'OFF';
+    cbEl.style.color  = eng.circuit_breaker ? '#EF5350' : '#26A69A';
+  }
 }
 
 // ── Start ─────────────────────────────────────────────────────────────────────

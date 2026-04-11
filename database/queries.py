@@ -131,31 +131,48 @@ async def insert_trade(
     return cursor.lastrowid
 
 
+async def delete_signal(db: aiosqlite.Connection, signal_id: int) -> None:
+    """Hard-delete a single signal row."""
+    await db.execute("DELETE FROM signals WHERE id = ?", (signal_id,))
+    await db.commit()
+
+
+async def delete_signals(
+    db: aiosqlite.Connection,
+    symbol:     Optional[str] = None,
+    interval:   Optional[str] = None,
+    direction:  Optional[str] = None,
+    confidence: Optional[str] = None,
+    before_ts:  Optional[int] = None,   # Unix seconds — delete signals created before this
+) -> int:
+    """Bulk-delete signals matching any combination of filters. Returns row count deleted."""
+    conditions, params = [], []
+    if symbol:     conditions.append("symbol = ?");    params.append(symbol.upper())
+    if interval:   conditions.append("interval = ?");  params.append(interval)
+    if direction:  conditions.append("direction = ?"); params.append(direction.upper())
+    if confidence: conditions.append("confidence = ?");params.append(confidence.upper())
+    if before_ts:  conditions.append("created_at < ?");params.append(before_ts)
+    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    cursor = await db.execute(f"DELETE FROM signals {where}", params)
+    await db.commit()
+    return cursor.rowcount
+
+
 async def get_recent_signals(
     db: aiosqlite.Connection,
-    symbol: str,
+    symbol: Optional[str] = None,
     interval: Optional[str] = None,
-    limit: int = 50,
+    limit: int = 100,
 ) -> list[dict]:
-    """Return recent signals for a symbol, newest first."""
-    if interval:
-        cursor = await db.execute(
-            """
-            SELECT * FROM signals
-            WHERE symbol = ? AND interval = ?
-            ORDER BY created_at DESC LIMIT ?
-            """,
-            (symbol.upper(), interval, limit),
-        )
-    else:
-        cursor = await db.execute(
-            """
-            SELECT * FROM signals
-            WHERE symbol = ?
-            ORDER BY created_at DESC LIMIT ?
-            """,
-            (symbol.upper(), limit),
-        )
+    """Return recent signals, newest first. All filters are optional."""
+    conditions, params = [], []
+    if symbol:   conditions.append("symbol = ?");   params.append(symbol.upper())
+    if interval: conditions.append("interval = ?"); params.append(interval)
+    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    cursor = await db.execute(
+        f"SELECT * FROM signals {where} ORDER BY created_at DESC LIMIT ?",
+        params + [limit],
+    )
     rows = await cursor.fetchall()
     result = []
     for row in rows:
@@ -246,14 +263,15 @@ async def create_trigger(
     min_confidence: str = "MEDIUM",
     adx_threshold: Optional[float] = None,
     cooldown_bars: Optional[int] = None,
+    name: Optional[str] = None,
 ) -> int:
     """Insert a new trigger. Returns the new row id."""
     cursor = await db.execute(
         """INSERT INTO triggers
-               (symbol, interval, min_confidence, adx_threshold, cooldown_bars, active, created_at)
-           VALUES (?, ?, ?, ?, ?, 1, ?)""",
+               (symbol, interval, min_confidence, adx_threshold, cooldown_bars, name, active, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, 1, ?)""",
         (symbol.upper(), interval, min_confidence.upper(),
-         adx_threshold, cooldown_bars, int(time.time())),
+         adx_threshold, cooldown_bars, name, int(time.time())),
     )
     await db.commit()
     return cursor.lastrowid
@@ -271,6 +289,7 @@ async def update_trigger(
     active: Optional[bool] = None,
     adx_threshold = _SENTINEL,
     cooldown_bars  = _SENTINEL,
+    name: Optional[str] = None,
 ) -> None:
     """Update any subset of trigger fields."""
     fields, params = [], []
@@ -280,6 +299,7 @@ async def update_trigger(
     if active         is not None:      fields.append("active = ?");         params.append(1 if active else 0)
     if adx_threshold  is not _SENTINEL: fields.append("adx_threshold = ?");  params.append(adx_threshold)
     if cooldown_bars  is not _SENTINEL: fields.append("cooldown_bars = ?");  params.append(cooldown_bars)
+    if name           is not None:      fields.append("name = ?");           params.append(name)
     if not fields:
         return
     params.append(trigger_id)
@@ -290,6 +310,24 @@ async def update_trigger(
 async def delete_trigger(db: aiosqlite.Connection, trigger_id: int) -> None:
     """Hard-delete a trigger row."""
     await db.execute("DELETE FROM triggers WHERE id = ?", (trigger_id,))
+    await db.commit()
+
+
+async def load_adaptive_state(db: aiosqlite.Connection) -> Optional[dict]:
+    """Load persisted adaptive engine state. Returns None if not yet saved."""
+    cursor = await db.execute("SELECT state_json FROM adaptive_state WHERE id = 1")
+    row = await cursor.fetchone()
+    if row:
+        return json.loads(row[0])
+    return None
+
+
+async def save_adaptive_state(db: aiosqlite.Connection, state_dict: dict) -> None:
+    """Upsert adaptive engine state to DB."""
+    await db.execute(
+        "INSERT OR REPLACE INTO adaptive_state (id, state_json, updated_at) VALUES (1, ?, ?)",
+        (json.dumps(state_dict), int(time.time())),
+    )
     await db.commit()
 
 
