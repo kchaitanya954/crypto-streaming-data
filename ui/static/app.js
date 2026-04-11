@@ -464,12 +464,8 @@ function deleteAllSignals() {
   selectedCards.clear();
   document.getElementById('signal-list').innerHTML = '<div class="no-sig">No signals</div>';
   updateBulkBar();
-  // Persist: delete all signals for the current symbol+interval
-  const params = new URLSearchParams({
-    symbol:   currentSymbol,
-    interval: currentInterval,
-  });
-  fetch(`/api/signals?${params}`, { method: 'DELETE' }).catch(() => {});
+  // Delete ALL signals from DB (no filter — wipes entire signals table)
+  fetch('/api/signals', { method: 'DELETE' }).catch(() => {});
 }
 
 function deleteSelected() {
@@ -512,6 +508,10 @@ function addSignalCard(msg, triggerMatch = false) {
   if (msg.trigger_names)    card.dataset.triggerNames  = msg.trigger_names.join(',');
   if (msg.interval)         registerIntervalFilter(msg.interval);
 
+  const symLabel = msg.symbol
+    ? `<span class="sc-sym">${msg.symbol}${msg.interval ? ' · ' + msg.interval : ''}</span>`
+    : '';
+
   card.innerHTML = `
     <button class="sc-del-btn" title="Delete options">✕</button>
     <div class="sc-del-menu" hidden>
@@ -522,12 +522,13 @@ function addSignalCard(msg, triggerMatch = false) {
     <div class="sc-row">
       <span class="sc-dir">${msg.direction}</span>
       <span class="sc-conf-${msg.confidence}">${msg.confidence}</span>
+      ${symLabel}
     </div>
     <div class="sc-price">$${price}</div>
     <div class="sc-time">${time}</div>
-    ${reasons.length ? `<div class="sc-reason">${reasons.join(' &nbsp;·&nbsp; ')}</div>` : ''}
-    <div class="sc-trend">${msg.trend_note || ''}</div>
-    ${msg.rec_buy_pct != null ? `<div class="sc-rec">Rec: ${msg.rec_buy_pct}% of portfolio</div>` : ''}
+    ${reasons.length ? `<div class="sc-reason">${reasons.join(' · ')}</div>` : ''}
+    ${msg.trend_note ? `<div class="sc-trend">${msg.trend_note}</div>` : ''}
+    ${msg.rec_buy_pct != null ? `<div class="sc-rec">Rec: ${msg.rec_buy_pct}%</div>` : ''}
   `;
 
   card.querySelector('.sc-del-btn').addEventListener('click', e => {

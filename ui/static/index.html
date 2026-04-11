@@ -148,10 +148,12 @@
     .sc-conf-HIGH   { font-size: 10px; font-weight: 600; color: #26A69A; }
     .sc-conf-MEDIUM { font-size: 10px; font-weight: 600; color: #FF9800; }
     .sc-conf-LOW    { font-size: 10px; font-weight: 600; color: #787B86; }
+    .sc-sym    { font-size: 9px; color: #4C525E; margin-left: auto; font-weight: 500; }
     .sc-price  { font-size: 15px; font-weight: 600; margin: 2px 0 1px; }
     .sc-time   { font-size: 10px; color: #787B86; }
-    .sc-reason { font-size: 10px; color: #B2B5BE; margin-top: 3px; line-height: 1.5; }
+    .sc-reason { font-size: 10px; color: #B2B5BE; margin-top: 3px; line-height: 1.5; word-break: break-word; }
     .sc-trend  { font-size: 9px;  color: #4C525E; margin-top: 2px; }
+    .sc-rec    { font-size: 9px; color: #FF9800; margin-top: 3px; font-weight: 600; }
     .no-sig    { font-size: 11px; color: #4C525E; text-align: center; margin-top: 24px; }
 
     /* ── Signal filter + manage ── */
@@ -212,11 +214,15 @@
       position: absolute; top: 5px; right: 5px;
       background: transparent; border: none;
       color: #4C525E; cursor: pointer;
-      font-size: 10px; line-height: 1; padding: 1px 3px;
+      font-size: 10px; line-height: 1; padding: 3px 5px;
       opacity: 0; transition: opacity 0.12s; border-radius: 2px;
     }
     .signal-card:hover .sc-del-btn { opacity: 1; }
-    .sc-del-btn:hover { color: #EF5350; background: rgba(239,83,80,0.1); }
+    .sc-del-btn:hover  { color: #EF5350; background: rgba(239,83,80,0.1); }
+    @media (hover: none) {
+      /* Always show delete button on touch devices */
+      .sc-del-btn { opacity: 0.5; }
+    }
 
     .sc-del-menu {
       position: absolute; right: 0; top: 21px;
@@ -523,41 +529,86 @@
 
     /* ── Mobile responsive ── */
     @media (max-width: 767px) {
-      body { height: 100svh; }
+      body { height: 100svh; overflow: hidden; }
 
       #sidebar-toggle { display: block; }
 
-      /* Topbar scrolls horizontally so all buttons remain reachable */
+      /* Topbar: horizontal scroll, no wrap */
       #topbar {
         gap: 4px;
         padding: 5px 8px;
         overflow-x: auto;
         flex-wrap: nowrap;
+        -webkit-overflow-scrolling: touch;
       }
       #topbar::-webkit-scrollbar { display: none; }
-
-      #symbol-input { width: 80px; font-size: 11px; }
+      #symbol-input { width: 76px; font-size: 11px; }
       .iv-btn       { padding: 3px 6px; font-size: 10px; flex-shrink: 0; }
-      #status-text  { display: none; }   /* keep dot, drop label */
+      #status-text  { display: none; }
 
-      /* Sidebar slides in as an overlay */
+      /* Sensitivity bar: horizontal scroll on small screens */
+      #sensitivity-bar {
+        overflow-x: auto;
+        flex-wrap: nowrap;
+        padding: 4px 8px;
+        gap: 6px;
+        -webkit-overflow-scrolling: touch;
+      }
+      #sensitivity-bar::-webkit-scrollbar { display: none; }
+      .sens-sep { flex-shrink: 0; }
+
+      /* Sidebar slides in as a full-height overlay */
       #sidebar {
         position: fixed;
-        left: -82vw;
+        left: -88vw;
         top: 0;
         height: 100%;
-        width: 82vw;
-        max-width: 300px;
+        height: 100svh;
+        width: 88vw;
+        max-width: 320px;
         z-index: 100;
         transition: left 0.22s ease;
+        overflow-y: auto;
+        overflow-x: hidden;
+        -webkit-overflow-scrolling: touch;
       }
       #sidebar.mobile-open { left: 0; }
 
-      /* Charts fill the full width */
-      #charts { width: 100%; }
+      /* Signal list: take remaining space inside sidebar */
+      #signal-list {
+        max-height: none;
+        flex: 1;
+        min-height: 120px;
+      }
 
-      /* Slightly taller minimum for chart panels on small screens */
+      /* Filter rows: allow wrapping */
+      .sf-row { flex-wrap: wrap; }
+      #trig-filter-btns, #iv-filter-btns { flex-wrap: wrap; }
+
+      /* Triggers + portfolio: fixed max-height to avoid overflow */
+      #triggers-list { max-height: 120px; }
+      #portfolio-list { max-height: 120px; }
+
+      /* Charts fill full width */
+      #charts { width: 100%; }
       .chart-wrapper { min-height: 80px; }
+
+      /* Analytics modal: full-screen on mobile */
+      #analytics-modal { padding: 0; }
+      .an-panel {
+        border-radius: 0;
+        min-height: 100svh;
+      }
+      .an-tables { grid-template-columns: 1fr; }
+      .an-section + .an-section { border-left: none; border-top: 1px solid #2A2E39; }
+      .an-trades-wrap { max-height: none; padding: 10px; }
+      .an-header { gap: 6px; padding: 10px; }
+
+      /* Signal card delete menu: don't overflow viewport */
+      .sc-del-menu { right: 0; left: auto; max-width: 85vw; }
+
+      /* Bigger touch targets for signal cards */
+      .sc-del-item { padding: 10px 11px; font-size: 11px; }
     }
   </style>
 </head>
