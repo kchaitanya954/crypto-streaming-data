@@ -1,5 +1,31 @@
 /* Crypto Signal Dashboard */
 
+// ── Auth state ─────────────────────────────────────────────────────────────────
+
+let authToken    = localStorage.getItem('auth_token') || null;
+let authUsername = localStorage.getItem('auth_username') || null;
+
+function authHeaders() {
+  return authToken ? { 'Authorization': `Bearer ${authToken}` } : {};
+}
+
+/**
+ * Authenticated fetch wrapper. On 401, clears token and shows login modal.
+ * All API calls must go through this instead of raw fetch().
+ */
+function apiFetch(url, opts = {}) {
+  opts.headers = { ...authHeaders(), ...(opts.headers || {}) };
+  return fetch(url, opts).then(r => {
+    if (r.status === 401) {
+      authToken = null;
+      localStorage.removeItem('auth_token');
+      localStorage.removeItem('auth_username');
+      showAuthModal();
+    }
+    return r;
+  });
+}
+
 // ── State ─────────────────────────────────────────────────────────────────────
 
 let ws               = null;
@@ -306,7 +332,7 @@ function onSignal(msg) {
 
 function loadHistoricalSignals() {
   // Load all recent signals across all symbols and intervals
-  fetch('/api/signals/history?limit=150')
+  apiFetch('/api/signals/history?limit=150')
     .then(r => r.json())
     .then(signals => {
       if (!Array.isArray(signals) || signals.length === 0) return;
@@ -334,7 +360,7 @@ function loadHistoricalSignals() {
 // ── Portfolio panel ───────────────────────────────────────────────────────────
 
 function fetchPortfolio() {
-  fetch('/api/portfolio')
+  apiFetch('/api/portfolio')
     .then(r => r.json())
     .then(data => {
       if (!Array.isArray(data)) return;
@@ -436,7 +462,7 @@ function removeSignalCard(card) {
   updateBulkBar();
   checkEmptyList();
   if (card.dataset.id) {
-    fetch(`/api/signals/${card.dataset.id}`, { method: 'DELETE' }).catch(() => {});
+    apiFetch(`/api/signals/${card.dataset.id}`, { method: 'DELETE' }).catch(() => {});
   }
 }
 
@@ -447,7 +473,7 @@ function deleteByTrigger(trigger) {
       markers = markers.filter(m => m.time !== parseFloat(card.dataset.time));
       selectedCards.delete(card);
       if (card.dataset.id) {
-        fetch(`/api/signals/${card.dataset.id}`, { method: 'DELETE' }).catch(() => {});
+        apiFetch(`/api/signals/${card.dataset.id}`, { method: 'DELETE' }).catch(() => {});
       }
       card.remove();
     }
@@ -465,14 +491,14 @@ function deleteAllSignals() {
   document.getElementById('signal-list').innerHTML = '<div class="no-sig">No signals</div>';
   updateBulkBar();
   // Delete ALL signals from DB (no filter — wipes entire signals table)
-  fetch('/api/signals', { method: 'DELETE' }).catch(() => {});
+  apiFetch('/api/signals', { method: 'DELETE' }).catch(() => {});
 }
 
 function deleteSelected() {
   [...selectedCards].forEach(card => {
     markers = markers.filter(m => m.time !== parseFloat(card.dataset.time));
     if (card.dataset.id) {
-      fetch(`/api/signals/${card.dataset.id}`, { method: 'DELETE' }).catch(() => {});
+      apiFetch(`/api/signals/${card.dataset.id}`, { method: 'DELETE' }).catch(() => {});
     }
     card.remove();
   });
@@ -771,7 +797,7 @@ async function deleteSelectedTriggers() {
   const ids = [...selectedTriggers];
   if (ids.length === 0) return;
   try {
-    await fetch('/api/triggers/bulk-delete', {
+    await apiFetch('/api/triggers/bulk-delete', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ids }),
@@ -877,7 +903,7 @@ function renderTriggerFilterBtns(list) {
 }
 
 function loadTriggers() {
-  fetch('/api/triggers')
+  apiFetch('/api/triggers')
     .then(r => r.json())
     .then(list => {
       renderTriggers(list);
@@ -927,7 +953,7 @@ function renderTriggers(list) {
     row.querySelector('.trig-edit').addEventListener('click', () => openEditForm(t));
 
     row.querySelector('.trig-toggle').addEventListener('click', () => {
-      fetch(`/api/triggers/${t.id}`, {
+      apiFetch(`/api/triggers/${t.id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ active: !t.active }),
@@ -937,7 +963,7 @@ function renderTriggers(list) {
     row.querySelector('.trig-del').addEventListener('click', () => {
       if (!confirm(`Delete trigger "${t.symbol} ${t.interval}"?`)) return;
       const delSigs = confirm(`Also delete all signals for ${t.symbol} ${t.interval}?\nOK = delete signals too, Cancel = keep signals.`);
-      fetch(`/api/triggers/${t.id}?delete_signals=${delSigs}`, { method: 'DELETE' })
+      apiFetch(`/api/triggers/${t.id}?delete_signals=${delSigs}`, { method: 'DELETE' })
         .then(r => { if (r.ok) loadTriggers(); });
     });
 
@@ -959,8 +985,9 @@ function openEditForm(t) {
   for (const opt of document.getElementById('trig-conf').options)
     opt.selected = opt.value === t.min_confidence;
   // Populate ADX / cooldown (show stored value or blank for "tier default")
-  document.getElementById('trig-adx').value = t.adx_threshold != null ? t.adx_threshold : '';
-  document.getElementById('trig-cd').value  = t.cooldown_bars  != null ? t.cooldown_bars  : '';
+  document.getElementById('trig-adx').value    = t.adx_threshold    != null ? t.adx_threshold    : '';
+  document.getElementById('trig-cd').value      = t.cooldown_bars    != null ? t.cooldown_bars    : '';
+  document.getElementById('trig-amount').value  = t.trade_amount_usdt != null ? t.trade_amount_usdt : '';
   applyTierToTriggerForm(t.interval);
   document.getElementById('trig-save-btn').textContent = 'Update Trigger';
   const form = document.getElementById('trig-add-form');
@@ -1030,43 +1057,67 @@ document.getElementById('trig-save-btn').addEventListener('click', () => {
   const url    = editId ? `/api/triggers/${editId}` : '/api/triggers';
   const method = editId ? 'PUT' : 'POST';
 
-  const adxRaw = document.getElementById('trig-adx').value.trim();
-  const cdRaw  = document.getElementById('trig-cd').value.trim();
+  const adxRaw    = document.getElementById('trig-adx').value.trim();
+  const cdRaw     = document.getElementById('trig-cd').value.trim();
+  const amountRaw = document.getElementById('trig-amount').value.trim();
+  const amount    = amountRaw !== '' ? parseFloat(amountRaw) : 10;
+
+  // Amount required on create
+  if (!editId && (!amountRaw || amount < 1)) {
+    const amtInp = document.getElementById('trig-amount');
+    amtInp.style.borderColor = '#EF5350';
+    btn.textContent = '✕ Amount (USDT) required';
+    setTimeout(() => {
+      amtInp.style.borderColor = '';
+      btn.textContent = 'Save Trigger';
+    }, 2500);
+    return;
+  }
+
+  const errEl = document.getElementById('trig-form-error');
+  errEl.style.display = 'none';
+
   const payload = {
     name, symbol: sym, interval: iv, min_confidence: conf,
-    adx_threshold: adxRaw !== '' ? parseFloat(adxRaw) : null,
-    cooldown_bars: cdRaw  !== '' ? parseInt(cdRaw, 10) : null,
+    adx_threshold:    adxRaw    !== '' ? parseFloat(adxRaw)    : null,
+    cooldown_bars:    cdRaw     !== '' ? parseInt(cdRaw, 10)    : null,
+    trade_amount_usdt: amount,
   };
 
-  fetch(url, {
+  apiFetch(url, {
     method,
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
   })
-  .then(r => {
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  .then(async r => {
+    if (!r.ok) {
+      const data = await r.json().catch(() => ({}));
+      throw new Error(data.error || data.detail || `HTTP ${r.status}`);
+    }
     return r.json();
   })
   .then(() => {
     document.getElementById('trig-add-form').classList.remove('open');
-    document.getElementById('trig-name').value = '';
-    document.getElementById('trig-sym').value  = '';
+    document.getElementById('trig-name').value   = '';
+    document.getElementById('trig-sym').value    = '';
+    document.getElementById('trig-amount').value = '';
     btn.disabled    = false;
     btn.textContent = 'Save Trigger';
     currentEditId   = null;
     loadTriggers();
   })
-  .catch(() => {
+  .catch(err => {
+    errEl.textContent   = err.message;
+    errEl.style.display = 'block';
     btn.disabled    = false;
     btn.textContent = '✕ Failed – retry';
     setTimeout(() => {
       btn.textContent = editId ? 'Update Trigger' : 'Save Trigger';
-    }, 2500);
+    }, 3000);
   });
 });
 
-// Initial load
-loadTriggers();
+// loadTriggers() and connect() are now called via checkAuth() → initDashboard()
 
 // ── Mobile sidebar toggle ─────────────────────────────────────────────────────
 
@@ -1091,7 +1142,7 @@ document.getElementById('analytics-btn').addEventListener('click', () => {
   document.getElementById('analytics-modal').classList.add('open');
   analyticsOpen = true;
   loadAnalytics();
-  fetch('/api/adaptive').then(r => r.json()).then(renderAdaptiveState).catch(() => {});
+  apiFetch('/api/adaptive').then(r => r.json()).then(renderAdaptiveState).catch(() => {});
 });
 
 document.getElementById('an-close').addEventListener('click', closeAnalytics);
@@ -1139,7 +1190,7 @@ function loadAnalytics() {
     symbol: sym, interval, confidence: conf, period,
     initial_usdt: sim.initial_usdt, buy_pct: sim.buy_pct, sell_pct: sim.sell_pct,
   });
-  fetch(`/api/analytics?${params}`)
+  apiFetch(`/api/analytics?${params}`)
     .then(r => r.json())
     .then(renderAnalytics)
     .catch(() => {});
@@ -1386,4 +1437,208 @@ function renderAdaptiveState(eng) {
   applyTierToSensitivityBar(currentInterval);
 })();
 
-connect(currentSymbol, currentInterval);
+// ── Auth modal ────────────────────────────────────────────────────────────────
+
+function showAuthModal() {
+  const m = document.getElementById('auth-modal');
+  m.style.display = 'flex';
+}
+function hideAuthModal() {
+  document.getElementById('auth-modal').style.display = 'none';
+}
+
+// Tab switching
+document.getElementById('tab-login').addEventListener('click', () => {
+  document.getElementById('login-form').style.display  = '';
+  document.getElementById('signup-form').style.display = 'none';
+  document.getElementById('totp-setup').style.display  = 'none';
+  document.getElementById('tab-login').classList.add('active');
+  document.getElementById('tab-signup').classList.remove('active');
+});
+document.getElementById('tab-signup').addEventListener('click', () => {
+  document.getElementById('login-form').style.display  = 'none';
+  document.getElementById('signup-form').style.display = '';
+  document.getElementById('totp-setup').style.display  = 'none';
+  document.getElementById('tab-login').classList.remove('active');
+  document.getElementById('tab-signup').classList.add('active');
+});
+
+// Login
+document.getElementById('login-form').addEventListener('submit', async e => {
+  e.preventDefault();
+  const errEl = document.getElementById('login-error');
+  errEl.textContent = '';
+  const body = {
+    username:  document.getElementById('login-username').value.trim(),
+    password:  document.getElementById('login-password').value,
+    totp_code: document.getElementById('login-totp').value.trim(),
+  };
+  const r = await fetch('/api/auth/login', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const data = await r.json();
+  if (!r.ok) { errEl.textContent = data.error || data.detail || 'Login failed'; return; }
+  authToken    = data.token;
+  authUsername = data.username;
+  localStorage.setItem('auth_token',    authToken);
+  localStorage.setItem('auth_username', authUsername);
+  hideAuthModal();
+  document.getElementById('logout-btn').style.display = '';
+  initDashboard();
+});
+
+// Register
+let _pendingRegUsername = '';
+document.getElementById('signup-form').addEventListener('submit', async e => {
+  e.preventDefault();
+  const errEl = document.getElementById('signup-error');
+  errEl.textContent = '';
+  const body = {
+    username: document.getElementById('reg-username').value.trim(),
+    email:    document.getElementById('reg-email').value.trim(),
+    password: document.getElementById('reg-password').value,
+  };
+  const r = await fetch('/api/auth/register', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const data = await r.json();
+  if (!r.ok) { errEl.textContent = data.error || data.detail || 'Registration failed'; return; }
+  _pendingRegUsername = body.username;
+
+  // Show QR setup step
+  document.getElementById('signup-form').style.display = 'none';
+  document.getElementById('totp-setup').style.display  = '';
+  // Generate QR code using qrcode.js
+  const qrImg = document.getElementById('totp-qr-img');
+  if (typeof QRCode !== 'undefined') {
+    qrImg.style.display = 'none';
+    const qrDiv = document.createElement('div');
+    qrDiv.id = 'totp-qr-canvas';
+    qrImg.parentNode.insertBefore(qrDiv, qrImg);
+    QRCode.toDataURL(data.totp_uri, { width: 180 }, (err, url) => {
+      if (!err) { qrImg.src = url; qrImg.style.display = ''; }
+    });
+  } else {
+    // Fallback: use Google Charts API for QR
+    qrImg.src = `https://chart.googleapis.com/chart?chs=180x180&cht=qr&chl=${encodeURIComponent(data.totp_uri)}`;
+  }
+  document.getElementById('totp-secret-text').textContent = data.totp_secret;
+});
+
+// TOTP confirm
+document.getElementById('totp-confirm-btn').addEventListener('click', async () => {
+  const code  = document.getElementById('totp-confirm-code').value.trim();
+  const errEl = document.getElementById('totp-error');
+  errEl.textContent = '';
+  if (!code) { errEl.textContent = 'Enter the 6-digit code'; return; }
+  const r = await fetch('/api/auth/totp-confirm', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username: _pendingRegUsername, totp_code: code }),
+  });
+  const data = await r.json();
+  if (!r.ok) { errEl.textContent = data.error || data.detail || 'Invalid code'; return; }
+  // Auto-login after successful TOTP activation — prompt user to log in
+  errEl.style.color = '#26A69A';
+  errEl.textContent = '2FA activated! Please log in.';
+  setTimeout(() => {
+    document.getElementById('totp-setup').style.display  = 'none';
+    document.getElementById('login-form').style.display  = '';
+    document.getElementById('tab-login').classList.add('active');
+    document.getElementById('tab-signup').classList.remove('active');
+    errEl.style.color = '#EF5350';
+    errEl.textContent = '';
+  }, 1500);
+});
+
+// Logout
+document.getElementById('logout-btn').addEventListener('click', () => {
+  authToken = null; authUsername = null;
+  localStorage.removeItem('auth_token');
+  localStorage.removeItem('auth_username');
+  if (ws) { ws.close(); ws = null; }
+  document.getElementById('logout-btn').style.display = 'none';
+  showAuthModal();
+});
+
+// ── Settings modal ─────────────────────────────────────────────────────────────
+
+document.getElementById('settings-btn').addEventListener('click', async () => {
+  if (!authToken) { showAuthModal(); return; }
+  document.getElementById('settings-modal').style.display = 'flex';
+  // Pre-fill stored values
+  const r = await apiFetch('/api/profile/settings');
+  if (!r.ok) return;
+  const d = await r.json();
+  if (d.telegram_token)   document.getElementById('set-tg-token').placeholder = 'Saved (hidden)';
+  if (d.telegram_chat_id) document.getElementById('set-tg-chat').value        = d.telegram_chat_id || '';
+  if (d.has_coindcx_key)  document.getElementById('set-dcx-key').placeholder  = 'Saved (hidden)';
+  if (d.has_coindcx_secret) document.getElementById('set-dcx-secret').placeholder = 'Saved (hidden)';
+});
+
+document.getElementById('settings-close').addEventListener('click', () => {
+  document.getElementById('settings-modal').style.display = 'none';
+});
+
+document.getElementById('settings-form').addEventListener('submit', async e => {
+  e.preventDefault();
+  const btn = document.getElementById('settings-save-btn');
+  const msg = document.getElementById('settings-msg');
+  btn.disabled    = true;
+  btn.textContent = 'Testing connection…';
+  msg.textContent = '';
+
+  const payload = {
+    telegram_token:      document.getElementById('set-tg-token').value.trim()  || null,
+    telegram_chat_id:    document.getElementById('set-tg-chat').value.trim()   || null,
+    coindcx_api_key:     document.getElementById('set-dcx-key').value.trim()   || null,
+    coindcx_api_secret:  document.getElementById('set-dcx-secret').value.trim() || null,
+  };
+
+  const r = await apiFetch('/api/profile/settings', {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  const data = await r.json().catch(() => ({}));
+  if (r.ok) {
+    msg.style.color = '#26A69A';
+    msg.textContent = data.telegram_notified
+      ? '✓ Saved! Telegram notification sent.'
+      : '✓ Saved! (Telegram notification skipped — check token/chat ID)';
+    // Clear sensitive inputs
+    document.getElementById('set-dcx-key').value    = '';
+    document.getElementById('set-dcx-secret').value = '';
+    document.getElementById('set-tg-token').value   = '';
+  } else {
+    msg.style.color = '#EF5350';
+    msg.textContent = data.error || data.detail || 'Save failed';
+  }
+  btn.disabled    = false;
+  btn.textContent = 'Save & Test Connection';
+});
+
+// ── Auth gate — check token on load, gate dashboard ───────────────────────────
+
+function initDashboard() {
+  // Load all data + start WS stream
+  loadHistoricalSignals();
+  loadTriggers();
+  connect(currentSymbol, currentInterval);
+}
+
+async function checkAuth() {
+  if (!authToken) { showAuthModal(); return; }
+  const r = await fetch('/api/auth/me', { headers: authHeaders() });
+  if (!r.ok) {
+    authToken = null; authUsername = null;
+    localStorage.removeItem('auth_token');
+    localStorage.removeItem('auth_username');
+    showAuthModal();
+    return;
+  }
+  document.getElementById('logout-btn').style.display = '';
+  initDashboard();
+}
+
+checkAuth();

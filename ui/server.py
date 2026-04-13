@@ -18,14 +18,17 @@ Run via orchestrator (full stack):
 
 import asyncio
 import json as _json
+import logging as _logging
 import time as _time
 from collections import defaultdict
 from dataclasses import asdict
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, Query, Request, WebSocket, WebSocketDisconnect
+import jwt as _jwt
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -35,28 +38,91 @@ from database import queries
 
 SEED_BARS  = 201
 static_dir = Path(__file__).parent / "static"
+_log       = _logging.getLogger("server")
 
-# ── Trigger request models ──────────────────────────────────────────────────────
+# ── Auth helpers ───────────────────────────────────────────────────────────────
+
+_bearer = HTTPBearer(auto_error=False)
+
+
+async def _current_user(
+    request: Request,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(_bearer),
+) -> dict:
+    """FastAPI dependency — returns decoded JWT payload or raises 401."""
+    token = None
+    if credentials:
+        token = credentials.credentials
+    if not token:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    from auth.security import decode_jwt
+    try:
+        return decode_jwt(token)
+    except _jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token expired")
+    except _jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+
+async def _get_user_exchange(db, user_id: int):
+    """Build a CoinDCXClient from the user's encrypted DB settings."""
+    from auth.encryption import safe_decrypt
+    from exchange.coindcx import CoinDCXClient
+    import aiohttp
+    row = await queries.get_user_settings(db, user_id)
+    if not row or not row.get("coindcx_api_key_enc"):
+        raise HTTPException(status_code=400, detail="CoinDCX API keys not configured in account settings")
+    key    = safe_decrypt(row["coindcx_api_key_enc"])
+    secret = safe_decrypt(row["coindcx_api_secret_enc"])
+    if not key or not secret:
+        raise HTTPException(status_code=400, detail="Could not decrypt CoinDCX credentials")
+    session = aiohttp.ClientSession()
+    return CoinDCXClient(api_key=key, api_secret=secret, session=session), session
+
+
+# ── Pydantic models ────────────────────────────────────────────────────────────
+
+class RegisterRequest(BaseModel):
+    username: str
+    email:    str
+    password: str
+
+class LoginRequest(BaseModel):
+    username:  str
+    password:  str
+    totp_code: str = ""
+
+class TOTPConfirmRequest(BaseModel):
+    username:  str
+    totp_code: str
+
+class SettingsUpdate(BaseModel):
+    telegram_token:      Optional[str] = None
+    telegram_chat_id:    Optional[str] = None
+    coindcx_api_key:     Optional[str] = None
+    coindcx_api_secret:  Optional[str] = None
 
 class TriggerCreate(BaseModel):
-    name:           str                      # required display name for filtering
-    symbol:         str
-    interval:       str
-    min_confidence: str            = "MEDIUM"
-    adx_threshold:  Optional[float] = None   # None = use interval-tier default
-    cooldown_bars:  Optional[int]   = None   # None = use interval-tier default
+    name:               str
+    symbol:             str
+    interval:           str
+    min_confidence:     str            = "MEDIUM"
+    adx_threshold:      Optional[float] = None
+    cooldown_bars:      Optional[int]   = None
+    trade_amount_usdt:  float           = 10.0   # USDT to allocate per trade
 
 class TriggerBulkDelete(BaseModel):
     ids: list[int]
 
 class TriggerUpdate(BaseModel):
-    name:           Optional[str]   = None
-    symbol:         Optional[str]   = None
-    interval:       Optional[str]   = None
-    min_confidence: Optional[str]   = None
-    active:         Optional[bool]  = None
-    adx_threshold:  Optional[float] = None
-    cooldown_bars:  Optional[int]   = None
+    name:              Optional[str]   = None
+    symbol:            Optional[str]   = None
+    interval:          Optional[str]   = None
+    min_confidence:    Optional[str]   = None
+    active:            Optional[bool]  = None
+    adx_threshold:     Optional[float] = None
+    cooldown_bars:     Optional[int]   = None
+    trade_amount_usdt: Optional[float] = None
 
 app = FastAPI()
 app.mount("/static", StaticFiles(directory=static_dir), name="static")
@@ -65,6 +131,167 @@ app.mount("/static", StaticFiles(directory=static_dir), name="static")
 @app.get("/")
 async def index():
     return FileResponse(static_dir / "index.html")
+
+
+# ── Auth endpoints ─────────────────────────────────────────────────────────────
+
+@app.post("/api/auth/register", status_code=201)
+async def api_register(request: Request, body: RegisterRequest):
+    """Create a new user account. Returns TOTP provisioning URI for QR code setup."""
+    db = getattr(request.app.state, "db", None)
+    if db is None:
+        return JSONResponse({"error": "DB not ready"}, status_code=503)
+    if len(body.password) < 8:
+        return JSONResponse({"error": "Password must be at least 8 characters"}, status_code=400)
+
+    from auth.security import hash_password, generate_totp_secret, get_totp_uri
+    existing = await queries.get_user_by_username(db, body.username)
+    if existing:
+        return JSONResponse({"error": "Username already taken"}, status_code=409)
+
+    totp_secret   = generate_totp_secret()
+    password_hash = hash_password(body.password)
+    user_id = await queries.create_user(db, body.username, body.email, password_hash, totp_secret)
+    totp_uri = get_totp_uri(totp_secret, body.username)
+
+    return {
+        "user_id":  user_id,
+        "username": body.username,
+        "totp_uri": totp_uri,
+        "totp_secret": totp_secret,   # for manual entry in authenticator apps
+    }
+
+
+@app.post("/api/auth/totp-confirm")
+async def api_totp_confirm(request: Request, body: TOTPConfirmRequest):
+    """Confirm the first valid TOTP code to activate 2FA."""
+    db = getattr(request.app.state, "db", None)
+    if db is None:
+        return JSONResponse({"error": "DB not ready"}, status_code=503)
+
+    from auth.security import verify_totp
+    user = await queries.get_user_by_username(db, body.username)
+    if not user:
+        return JSONResponse({"error": "User not found"}, status_code=404)
+    if not verify_totp(user["totp_secret"], body.totp_code):
+        return JSONResponse({"error": "Invalid 2FA code"}, status_code=400)
+
+    await queries.enable_totp(db, user["id"])
+    return {"ok": True, "message": "2FA activated successfully"}
+
+
+@app.post("/api/auth/login")
+async def api_login(request: Request, body: LoginRequest):
+    """Verify credentials + TOTP, return JWT."""
+    db = getattr(request.app.state, "db", None)
+    if db is None:
+        return JSONResponse({"error": "DB not ready"}, status_code=503)
+
+    from auth.security import verify_password, verify_totp, create_jwt
+    user = await queries.get_user_by_username(db, body.username)
+    if not user or not verify_password(body.password, user["password_hash"]):
+        return JSONResponse({"error": "Invalid username or password"}, status_code=401)
+
+    if user["totp_enabled"]:
+        if not body.totp_code:
+            return JSONResponse({"error": "2FA code required"}, status_code=401)
+        if not verify_totp(user["totp_secret"], body.totp_code):
+            return JSONResponse({"error": "Invalid 2FA code"}, status_code=401)
+
+    token = create_jwt(user["id"], user["username"])
+    return {"token": token, "username": user["username"], "user_id": user["id"]}
+
+
+@app.get("/api/auth/me")
+async def api_me(user: dict = Depends(_current_user)):
+    """Validate token and return current user info."""
+    return {"user_id": int(user["sub"]), "username": user["username"]}
+
+
+# ── Profile/Settings endpoints ──────────────────────────────────────────────────
+
+@app.get("/api/profile/settings")
+async def api_get_settings(request: Request, user: dict = Depends(_current_user)):
+    """Return user settings with API keys masked."""
+    db = getattr(request.app.state, "db", None)
+    if db is None:
+        return JSONResponse({"error": "DB not ready"}, status_code=503)
+    user_id = int(user["sub"])
+    row = await queries.get_user_settings(db, user_id)
+    if not row:
+        return {"telegram_token": None, "telegram_chat_id": None,
+                "has_coindcx_key": False, "has_coindcx_secret": False}
+    return {
+        "telegram_token":   row.get("telegram_token"),
+        "telegram_chat_id": row.get("telegram_chat_id"),
+        "has_coindcx_key":  bool(row.get("coindcx_api_key_enc")),
+        "has_coindcx_secret": bool(row.get("coindcx_api_secret_enc")),
+    }
+
+
+@app.put("/api/profile/settings")
+async def api_update_settings(
+    request: Request,
+    body: SettingsUpdate,
+    user: dict = Depends(_current_user),
+):
+    """Save settings, test connections, send Telegram confirmation."""
+    db = getattr(request.app.state, "db", None)
+    if db is None:
+        return JSONResponse({"error": "DB not ready"}, status_code=503)
+
+    import aiohttp
+    from auth.encryption import encrypt, safe_decrypt
+
+    user_id = int(user["sub"])
+    existing = await queries.get_user_settings(db, user_id)
+
+    # Encrypt new API keys (or keep existing encrypted values)
+    key_enc    = encrypt(body.coindcx_api_key)    if body.coindcx_api_key    else (existing or {}).get("coindcx_api_key_enc")
+    secret_enc = encrypt(body.coindcx_api_secret) if body.coindcx_api_secret else (existing or {}).get("coindcx_api_secret_enc")
+
+    tg_token   = body.telegram_token    or (existing or {}).get("telegram_token")
+    tg_chat_id = body.telegram_chat_id  or (existing or {}).get("telegram_chat_id")
+
+    # Test CoinDCX connection if new keys provided
+    if body.coindcx_api_key and body.coindcx_api_secret:
+        from exchange.coindcx import CoinDCXClient
+        try:
+            async with aiohttp.ClientSession() as session:
+                client = CoinDCXClient(
+                    api_key=body.coindcx_api_key,
+                    api_secret=body.coindcx_api_secret,
+                    session=session,
+                )
+                await client.get_balances()
+        except Exception as exc:
+            return JSONResponse({"error": f"CoinDCX connection failed: {exc}"}, status_code=400)
+
+    # Save to DB
+    await queries.upsert_user_settings(
+        db, user_id,
+        telegram_token=tg_token,
+        telegram_chat_id=tg_chat_id,
+        coindcx_api_key_enc=key_enc,
+        coindcx_api_secret_enc=secret_enc,
+    )
+
+    # Send Telegram success notification
+    tg_ok = False
+    if tg_token and tg_chat_id:
+        try:
+            async with aiohttp.ClientSession() as session:
+                resp = await session.post(
+                    f"https://api.telegram.org/bot{tg_token}/sendMessage",
+                    json={"chat_id": tg_chat_id,
+                          "text": "✅ CryptoDash connected successfully! You'll receive signal alerts here."},
+                    timeout=aiohttp.ClientTimeout(total=10),
+                )
+                tg_ok = resp.status == 200
+        except Exception as exc:
+            _log.warning("Telegram test message failed: %s", exc)
+
+    return {"ok": True, "telegram_notified": tg_ok}
 
 
 # ── REST endpoints ─────────────────────────────────────────────────────────────
@@ -138,21 +365,46 @@ async def api_get_triggers(request: Request):
 
 
 @app.post("/api/triggers", status_code=201)
-async def api_create_trigger(request: Request, body: TriggerCreate):
-    """Create a new trigger and send a Telegram alert."""
+async def api_create_trigger(
+    request: Request,
+    body: TriggerCreate,
+    user: dict = Depends(_current_user),
+):
+    """Create a new trigger. Checks USDT balance before saving."""
     db       = getattr(request.app.state, "db",           None)
     tg_bot   = getattr(request.app.state, "telegram_bot", None)
     settings = getattr(request.app.state, "settings",     None)
     if db is None:
         return JSONResponse({"error": "DB not configured"}, status_code=503)
+
+    user_id = int(user["sub"])
     sym  = body.symbol.upper()
     iv   = body.interval
     conf = body.min_confidence.upper()
-    tid  = await queries.create_trigger(
+
+    # Balance check against user's CoinDCX account
+    try:
+        exchange, session = await _get_user_exchange(db, user_id)
+        async with session:
+            balances = await exchange.get_balances()
+        usdt_row = next((b for b in balances if b.get("currency") == "USDT"), None)
+        usdt_bal = float(usdt_row.get("balance", 0)) if usdt_row else 0.0
+        if usdt_bal < body.trade_amount_usdt:
+            return JSONResponse(
+                {"error": f"Insufficient USDT balance: {usdt_bal:.2f} available, {body.trade_amount_usdt:.2f} required"},
+                status_code=400,
+            )
+    except HTTPException:
+        # No CoinDCX configured yet — allow trigger creation without balance check
+        pass
+
+    tid = await queries.create_trigger(
         db, sym, iv, conf,
         adx_threshold=body.adx_threshold,
         cooldown_bars=body.cooldown_bars,
         name=body.name,
+        trade_amount_usdt=body.trade_amount_usdt,
+        user_id=user_id,
     )
     if tg_bot and settings:
         from telegram_bot.alerts import send_trigger_alert
@@ -162,12 +414,18 @@ async def api_create_trigger(request: Request, body: TriggerCreate):
         "min_confidence": conf, "active": True,
         "adx_threshold": body.adx_threshold,
         "cooldown_bars": body.cooldown_bars,
+        "trade_amount_usdt": body.trade_amount_usdt,
     }
 
 
 @app.put("/api/triggers/{trigger_id}")
-async def api_update_trigger(request: Request, trigger_id: int, body: TriggerUpdate):
-    """Update an existing trigger and send a Telegram alert."""
+async def api_update_trigger(
+    request: Request,
+    trigger_id: int,
+    body: TriggerUpdate,
+    user: dict = Depends(_current_user),
+):
+    """Update an existing trigger."""
     db       = getattr(request.app.state, "db",           None)
     tg_bot   = getattr(request.app.state, "telegram_bot", None)
     settings = getattr(request.app.state, "settings",     None)
@@ -181,6 +439,7 @@ async def api_update_trigger(request: Request, trigger_id: int, body: TriggerUpd
         adx_threshold=body.adx_threshold,
         cooldown_bars=body.cooldown_bars,
         name=body.name,
+        trade_amount_usdt=body.trade_amount_usdt,
     )
     if tg_bot and settings and trig:
         from telegram_bot.alerts import send_trigger_alert
@@ -595,6 +854,129 @@ async def _load_adaptive_state_when_ready() -> None:
         return
 
 
+# ── Auto-trade execution ───────────────────────────────────────────────────────
+
+_engine_lock = asyncio.Lock()
+
+
+async def _execute_trigger_trade(db, trigger: dict, signal, symbol: str, interval: str, signal_id) -> None:
+    """
+    Execute a market order on CoinDCX for a matched trigger.
+    BUY  → spend trigger.trade_amount_usdt to buy base asset.
+    SELL → sell all coins held by this trigger's position.
+    Updates trigger_positions and feeds the adaptive engine with real P&L.
+    """
+    import aiohttp
+    from auth.encryption import safe_decrypt
+    from exchange.coindcx import CoinDCXClient
+    from signals.adaptive_strategy import engine as _adaptive_engine
+
+    user_id    = trigger.get("user_id")
+    trigger_id = trigger["id"]
+    amount     = trigger.get("trade_amount_usdt") or 0.0
+
+    if not user_id or not amount:
+        return  # legacy trigger without user or amount — skip auto-trade
+
+    user_settings = await queries.get_user_settings(db, user_id)
+    if not user_settings:
+        return
+
+    key    = safe_decrypt(user_settings.get("coindcx_api_key_enc"))
+    secret = safe_decrypt(user_settings.get("coindcx_api_secret_enc"))
+    if not key or not secret:
+        return
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            exchange = CoinDCXClient(api_key=key, api_secret=secret, session=session)
+
+            if signal.direction == "BUY":
+                # Check current USDT balance
+                balances = await exchange.get_balances()
+                usdt_row = next((b for b in balances if b.get("currency") == "USDT"), None)
+                usdt_bal = float(usdt_row.get("balance", 0)) if usdt_row else 0.0
+                if usdt_bal < amount:
+                    _log.warning("Trigger %d: insufficient USDT %.2f < %.2f", trigger_id, usdt_bal, amount)
+                    return
+
+                qty = round(amount / signal.entry_price, 8)
+                result = await exchange.create_order(
+                    side="buy", market=symbol,
+                    order_type="market_order", total_quantity=qty,
+                )
+                cdx_order_id = result.get("id") or result.get("order_id")
+
+                # Record order
+                order_id = await queries.insert_order(
+                    db, symbol, "buy", "market_order", qty,
+                    price=signal.entry_price, signal_id=signal_id,
+                )
+                await queries.update_order_status(db, order_id, "filled", cdx_order_id)
+
+                # Update trigger position (DCA-style: blend avg entry)
+                pos = await queries.get_trigger_position(db, trigger_id)
+                if pos and pos["coins_held"] > 0:
+                    total_coins = pos["coins_held"] + qty
+                    new_avg = (pos["avg_entry"] * pos["coins_held"] + signal.entry_price * qty) / total_coins
+                    await queries.upsert_trigger_position(
+                        db, trigger_id, symbol, total_coins, new_avg, pos["usdt_spent"] + amount
+                    )
+                else:
+                    await queries.upsert_trigger_position(
+                        db, trigger_id, symbol, qty, signal.entry_price, amount
+                    )
+                _log.info("Trigger %d BUY executed: %.8f %s @ %.4f", trigger_id, qty, symbol, signal.entry_price)
+
+            elif signal.direction == "SELL":
+                pos = await queries.get_trigger_position(db, trigger_id)
+                if not pos or pos["coins_held"] < 1e-8:
+                    return  # nothing to sell
+
+                coins_to_sell = pos["coins_held"]
+                result = await exchange.create_order(
+                    side="sell", market=symbol,
+                    order_type="market_order", total_quantity=round(coins_to_sell, 8),
+                )
+                cdx_order_id = result.get("id") or result.get("order_id")
+                avg_entry    = pos["avg_entry"]
+                pnl_pct      = (signal.entry_price - avg_entry) / avg_entry * 100 if avg_entry else 0.0
+
+                # Record order + trade fill
+                order_id = await queries.insert_order(
+                    db, symbol, "sell", "market_order", coins_to_sell,
+                    price=signal.entry_price, signal_id=signal_id,
+                )
+                await queries.update_order_status(db, order_id, "filled", cdx_order_id)
+                await queries.insert_trade(
+                    db, order_id, symbol, "sell",
+                    coins_to_sell, signal.entry_price, pnl=pnl_pct,
+                )
+
+                # Zero out position
+                await queries.upsert_trigger_position(db, trigger_id, symbol, 0.0, 0.0, 0.0)
+
+                # Fetch real portfolio value for accurate adaptive engine update
+                try:
+                    balances_after = await exchange.get_balances()
+                    portfolio_val = sum(float(b.get("balance", 0)) for b in balances_after if b.get("currency") == "USDT")
+                except Exception:
+                    portfolio_val = _adaptive_engine.peak_portfolio
+
+                # Feed real trade into adaptive engine immediately
+                async with _engine_lock:
+                    _adaptive_engine.update([{"pnl_pct": pnl_pct, "portfolio_val": portfolio_val}])
+                await queries.save_adaptive_state(db, _adaptive_engine.to_dict())
+
+                _log.info(
+                    "Trigger %d SELL executed: %.8f %s @ %.4f  PnL=%.4f%%",
+                    trigger_id, coins_to_sell, symbol, signal.entry_price, pnl_pct,
+                )
+
+    except Exception as exc:
+        _log.error("Auto-trade failed for trigger %d: %s", trigger_id, exc)
+
+
 async def _adaptive_monitor_loop() -> None:
     """
     Background task: every 5 min, read recent signals, pair into trades,
@@ -636,7 +1018,8 @@ async def _adaptive_monitor_loop() -> None:
                 running = running * (1 + t["pnl_pct"] / 100)
                 t["portfolio_val"] = running
 
-            _adaptive_engine.update(all_trades)
+            async with _engine_lock:
+                _adaptive_engine.update(all_trades)
             await queries.save_adaptive_state(db, _adaptive_engine.to_dict())
             log.info(
                 "Adaptive engine: %d trades  WR=%.0f%%  Kelly=%.1f%%  DD=%.1f%%  perf=%.2f  CB=%s",
@@ -770,24 +1153,33 @@ async def _connection_loop(
                     }
                     await ws.send_json(signal_payload)
 
-                    # Send Telegram alert — ONLY when a trigger matches this signal
-                    if tg_bot is not None and settings is not None and trigger_matched:
-                        try:
-                            from telegram_bot.alerts import send_signal_alert
-                            await send_signal_alert(
-                                bot=tg_bot,
-                                chat_id=settings.telegram_chat_id,
-                                signal=signal,
-                                symbol=symbol.upper(),
-                                interval=interval,
-                                phase=settings.trading_phase,
-                                db=db,
-                                exchange=getattr(app_state.state, "exchange", None),
-                                settings=settings,
-                                signal_id=signal_id,
-                            )
-                        except Exception:
-                            pass
+                    # Send Telegram alert and execute auto-trades for each matched trigger
+                    if trigger_matched:
+                        if tg_bot is not None and settings is not None:
+                            try:
+                                from telegram_bot.alerts import send_signal_alert
+                                await send_signal_alert(
+                                    bot=tg_bot,
+                                    chat_id=settings.telegram_chat_id,
+                                    signal=signal,
+                                    symbol=symbol.upper(),
+                                    interval=interval,
+                                    phase=settings.trading_phase,
+                                    db=db,
+                                    exchange=getattr(app_state.state, "exchange", None),
+                                    settings=settings,
+                                    signal_id=signal_id,
+                                )
+                            except Exception:
+                                pass
+                        # Fire-and-forget auto-trade tasks per matched trigger
+                        if db is not None:
+                            for trig in matched_triggers:
+                                asyncio.create_task(
+                                    _execute_trigger_trade(
+                                        db, trig, signal, symbol.upper(), interval, signal_id
+                                    )
+                                )
             else:
                 await ws.send_json({
                     "type":   "live",

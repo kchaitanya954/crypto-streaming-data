@@ -264,14 +264,18 @@ async def create_trigger(
     adx_threshold: Optional[float] = None,
     cooldown_bars: Optional[int] = None,
     name: Optional[str] = None,
+    trade_amount_usdt: Optional[float] = None,
+    user_id: Optional[int] = None,
 ) -> int:
     """Insert a new trigger. Returns the new row id."""
     cursor = await db.execute(
         """INSERT INTO triggers
-               (symbol, interval, min_confidence, adx_threshold, cooldown_bars, name, active, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, 1, ?)""",
+               (symbol, interval, min_confidence, adx_threshold, cooldown_bars,
+                name, trade_amount_usdt, user_id, active, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)""",
         (symbol.upper(), interval, min_confidence.upper(),
-         adx_threshold, cooldown_bars, name, int(time.time())),
+         adx_threshold, cooldown_bars, name,
+         trade_amount_usdt, user_id, int(time.time())),
     )
     await db.commit()
     return cursor.lastrowid
@@ -290,16 +294,18 @@ async def update_trigger(
     adx_threshold = _SENTINEL,
     cooldown_bars  = _SENTINEL,
     name: Optional[str] = None,
+    trade_amount_usdt: Optional[float] = None,
 ) -> None:
     """Update any subset of trigger fields."""
     fields, params = [], []
-    if symbol         is not None:      fields.append("symbol = ?");         params.append(symbol.upper())
-    if interval       is not None:      fields.append("interval = ?");       params.append(interval)
-    if min_confidence is not None:      fields.append("min_confidence = ?"); params.append(min_confidence.upper())
-    if active         is not None:      fields.append("active = ?");         params.append(1 if active else 0)
-    if adx_threshold  is not _SENTINEL: fields.append("adx_threshold = ?");  params.append(adx_threshold)
-    if cooldown_bars  is not _SENTINEL: fields.append("cooldown_bars = ?");  params.append(cooldown_bars)
-    if name           is not None:      fields.append("name = ?");           params.append(name)
+    if symbol             is not None:      fields.append("symbol = ?");             params.append(symbol.upper())
+    if interval           is not None:      fields.append("interval = ?");           params.append(interval)
+    if min_confidence     is not None:      fields.append("min_confidence = ?");     params.append(min_confidence.upper())
+    if active             is not None:      fields.append("active = ?");             params.append(1 if active else 0)
+    if adx_threshold      is not _SENTINEL: fields.append("adx_threshold = ?");      params.append(adx_threshold)
+    if cooldown_bars      is not _SENTINEL: fields.append("cooldown_bars = ?");      params.append(cooldown_bars)
+    if name               is not None:      fields.append("name = ?");               params.append(name)
+    if trade_amount_usdt  is not None:      fields.append("trade_amount_usdt = ?");  params.append(trade_amount_usdt)
     if not fields:
         return
     params.append(trigger_id)
@@ -350,3 +356,115 @@ def trigger_matches(
     if trig_adx and adx_val is not None and adx_val < trig_adx:
         return False
     return True
+
+
+# ── User queries ────────────────────────────────────────────────────────────────
+
+async def create_user(
+    db: aiosqlite.Connection,
+    username: str,
+    email: str,
+    password_hash: str,
+    totp_secret: str,
+) -> int:
+    """Insert a new user. Returns the new row id."""
+    cursor = await db.execute(
+        """INSERT INTO users (username, email, password_hash, totp_secret, totp_enabled, created_at)
+           VALUES (?, ?, ?, ?, 0, ?)""",
+        (username.strip(), email.strip().lower(), password_hash, totp_secret, int(time.time())),
+    )
+    await db.commit()
+    return cursor.lastrowid
+
+
+async def get_user_by_username(db: aiosqlite.Connection, username: str) -> Optional[dict]:
+    cursor = await db.execute("SELECT * FROM users WHERE username = ?", (username.strip(),))
+    row = await cursor.fetchone()
+    return dict(row) if row else None
+
+
+async def get_user_by_id(db: aiosqlite.Connection, user_id: int) -> Optional[dict]:
+    cursor = await db.execute("SELECT * FROM users WHERE id = ?", (user_id,))
+    row = await cursor.fetchone()
+    return dict(row) if row else None
+
+
+async def enable_totp(db: aiosqlite.Connection, user_id: int) -> None:
+    await db.execute("UPDATE users SET totp_enabled = 1 WHERE id = ?", (user_id,))
+    await db.commit()
+
+
+# ── User settings queries ────────────────────────────────────────────────────────
+
+async def get_user_settings(db: aiosqlite.Connection, user_id: int) -> Optional[dict]:
+    cursor = await db.execute("SELECT * FROM user_settings WHERE user_id = ?", (user_id,))
+    row = await cursor.fetchone()
+    return dict(row) if row else None
+
+
+async def upsert_user_settings(
+    db: aiosqlite.Connection,
+    user_id: int,
+    telegram_token: Optional[str] = None,
+    telegram_chat_id: Optional[str] = None,
+    coindcx_api_key_enc: Optional[str] = None,
+    coindcx_api_secret_enc: Optional[str] = None,
+) -> None:
+    """Insert or update user settings, preserving existing values for omitted fields."""
+    existing = await get_user_settings(db, user_id)
+    if existing:
+        await db.execute(
+            """UPDATE user_settings SET
+               telegram_token         = COALESCE(?, telegram_token),
+               telegram_chat_id       = COALESCE(?, telegram_chat_id),
+               coindcx_api_key_enc    = COALESCE(?, coindcx_api_key_enc),
+               coindcx_api_secret_enc = COALESCE(?, coindcx_api_secret_enc),
+               updated_at             = ?
+               WHERE user_id = ?""",
+            (telegram_token or None, telegram_chat_id or None,
+             coindcx_api_key_enc or None, coindcx_api_secret_enc or None,
+             int(time.time()), user_id),
+        )
+    else:
+        await db.execute(
+            """INSERT INTO user_settings
+               (user_id, telegram_token, telegram_chat_id,
+                coindcx_api_key_enc, coindcx_api_secret_enc, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (user_id, telegram_token or None, telegram_chat_id or None,
+             coindcx_api_key_enc or None, coindcx_api_secret_enc or None,
+             int(time.time())),
+        )
+    await db.commit()
+
+
+# ── Trigger position queries ──────────────────────────────────────────────────────
+
+async def get_trigger_position(db: aiosqlite.Connection, trigger_id: int) -> Optional[dict]:
+    cursor = await db.execute(
+        "SELECT * FROM trigger_positions WHERE trigger_id = ?", (trigger_id,)
+    )
+    row = await cursor.fetchone()
+    return dict(row) if row else None
+
+
+async def upsert_trigger_position(
+    db: aiosqlite.Connection,
+    trigger_id: int,
+    symbol: str,
+    coins_held: float,
+    avg_entry: float,
+    usdt_spent: float,
+) -> None:
+    await db.execute(
+        """INSERT OR REPLACE INTO trigger_positions
+           (trigger_id, symbol, coins_held, avg_entry, usdt_spent, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        (trigger_id, symbol.upper(), coins_held, avg_entry, usdt_spent, int(time.time())),
+    )
+    await db.commit()
+
+
+async def delete_trigger_position(db: aiosqlite.Connection, trigger_id: int) -> None:
+    await db.execute("DELETE FROM trigger_positions WHERE trigger_id = ?", (trigger_id,))
+    await db.commit()
