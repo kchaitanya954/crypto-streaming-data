@@ -26,6 +26,87 @@ function apiFetch(url, opts = {}) {
   });
 }
 
+// ── Currency (INR ↔ USDT) ──────────────────────────────────────────────────────
+
+let displayCurrency = localStorage.getItem('displayCurrency') || 'INR';  // 'INR' or 'USDT'
+let usdToInr        = 83.5;   // default fallback; refreshed on load from /api/currency/inr-rate
+
+async function fetchInrRate() {
+  try {
+    const r = await fetch('/api/currency/inr-rate');
+    if (!r.ok) return;
+    const d = await r.json();
+    if (d.usd_to_inr) usdToInr = d.usd_to_inr;
+  } catch (_) {}
+}
+
+/** Convert a USDT/USD price to the display currency. */
+function toDisplay(usdtValue) {
+  return displayCurrency === 'INR' ? usdtValue * usdToInr : usdtValue;
+}
+
+/** Convert a display-currency amount back to USDT. */
+function fromDisplay(displayValue) {
+  return displayCurrency === 'INR' ? displayValue / usdToInr : displayValue;
+}
+
+/** Format a display-currency amount with symbol. */
+function fmtDisplay(usdtValue, decimals = 2) {
+  const v = toDisplay(usdtValue);
+  return displayCurrency === 'INR'
+    ? '₹' + v.toLocaleString('en-IN', { maximumFractionDigits: decimals })
+    : '$' + v.toFixed(decimals);
+}
+
+/** Update all currency-sensitive elements after a toggle. */
+function applyCurrencyDisplay() {
+  const btn = document.getElementById('currency-toggle-btn');
+  if (!btn) return;
+  if (displayCurrency === 'INR') {
+    btn.textContent  = '₹ INR';
+    btn.style.color  = '#FF9800';
+  } else {
+    btn.textContent  = '$ USDT';
+    btn.style.color  = '#26A69A';
+  }
+  // Update trigger amount label
+  const amtLbl = document.getElementById('trig-amount-lbl');
+  if (amtLbl) amtLbl.textContent = displayCurrency === 'INR' ? 'Amount (₹ INR)' : 'Amount ($ USDT)';
+  updateTrigAmountConversion();
+}
+
+/** Show conversion hint next to the amount field. */
+function updateTrigAmountConversion() {
+  const convEl = document.getElementById('trig-amount-conv');
+  if (!convEl) return;
+  const raw = parseFloat(document.getElementById('trig-amount')?.value) || 0;
+  if (!raw) { convEl.textContent = ''; return; }
+  if (displayCurrency === 'INR') {
+    const usdt = raw / usdToInr;
+    convEl.textContent = `≈ $${usdt.toFixed(2)} USDT`;
+  } else {
+    const inr = raw * usdToInr;
+    convEl.textContent = `≈ ₹${inr.toLocaleString('en-IN', { maximumFractionDigits: 0 })}`;
+  }
+}
+
+// Currency toggle button
+document.addEventListener('DOMContentLoaded', () => {
+  const btn = document.getElementById('currency-toggle-btn');
+  if (btn) {
+    btn.addEventListener('click', () => {
+      displayCurrency = displayCurrency === 'INR' ? 'USDT' : 'INR';
+      localStorage.setItem('displayCurrency', displayCurrency);
+      applyCurrencyDisplay();
+    });
+  }
+  const amtInp = document.getElementById('trig-amount');
+  if (amtInp) amtInp.addEventListener('input', updateTrigAmountConversion);
+});
+
+// Fetch rate immediately (non-blocking)
+fetchInrRate().then(applyCurrencyDisplay);
+
 // ── State ─────────────────────────────────────────────────────────────────────
 
 let ws               = null;
@@ -515,7 +596,10 @@ function addSignalCard(msg, triggerMatch = false) {
   list.querySelector('.no-sig')?.remove();
 
   const time    = new Date(msg.time * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-  const price   = msg.entry_price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const priceUsdt = msg.entry_price;
+  const price   = displayCurrency === 'INR'
+    ? '₹' + Math.round(priceUsdt * usdToInr).toLocaleString('en-IN')
+    : '$' + priceUsdt.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   const reasons = msg.reasons || [];
   const triggers = getCardTriggers(reasons);
 
@@ -589,7 +673,7 @@ function pushNotification(msg) {
   if (Notification.permission !== 'granted') return;
   const icon = msg.direction === 'BUY' ? '🟢' : '🔴';
   new Notification(`${icon} ${msg.direction} (${msg.confidence}) · ${currentSymbol} ${currentInterval}`, {
-    body: `$${msg.entry_price.toFixed(2)}  ·  ${msg.reasons.join(', ')}`,
+    body: `${fmtDisplay(msg.entry_price)}  ·  ${msg.reasons.join(', ')}`,
   });
 }
 
@@ -932,12 +1016,20 @@ function renderTriggers(list) {
     const adxHint  = t.adx_threshold != null ? ` adx≥${t.adx_threshold}` : '';
     const cdHint   = t.cooldown_bars  != null ? ` cd${t.cooldown_bars}`   : '';
     const nameLabel = t.name ? `<span style="font-size:10px;color:#D1D4DC;font-weight:600;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${t.name}">${t.name}</span>` : '';
+    let amtLabel = '';
+    if (t.trade_amount_usdt) {
+      const amtDisp = displayCurrency === 'INR'
+        ? `₹${Math.round(t.trade_amount_usdt * usdToInr).toLocaleString('en-IN')}`
+        : `$${t.trade_amount_usdt.toFixed(2)}`;
+      amtLabel = `<span style="font-size:8px;color:#FF9800;font-weight:600">${amtDisp}</span>`;
+    }
     row.innerHTML =
       `<input type="checkbox" class="trig-cb trig-row-cb" data-id="${t.id}" />` +
       nameLabel +
       `<span class="trig-sym">${t.symbol}</span>` +
       `<span class="trig-iv">${t.interval}</span>` +
       `<span class="trig-conf trig-conf-${t.min_confidence}">${t.min_confidence}</span>` +
+      amtLabel +
       (adxHint || cdHint ? `<span style="font-size:8px;color:#4C525E">${adxHint}${cdHint}</span>` : '') +
       `<span class="trig-edit" title="Edit">✏</span>` +
       `<span class="trig-toggle" title="${t.active ? 'Disable' : 'Enable'}">${t.active ? '✓' : '○'}</span>` +
@@ -987,7 +1079,16 @@ function openEditForm(t) {
   // Populate ADX / cooldown (show stored value or blank for "tier default")
   document.getElementById('trig-adx').value    = t.adx_threshold    != null ? t.adx_threshold    : '';
   document.getElementById('trig-cd').value      = t.cooldown_bars    != null ? t.cooldown_bars    : '';
-  document.getElementById('trig-amount').value  = t.trade_amount_usdt != null ? t.trade_amount_usdt : '';
+  // Show stored USDT amount in the current display currency
+  if (t.trade_amount_usdt != null) {
+    const dispAmt = displayCurrency === 'INR'
+      ? Math.round(t.trade_amount_usdt * usdToInr)
+      : t.trade_amount_usdt;
+    document.getElementById('trig-amount').value = dispAmt;
+  } else {
+    document.getElementById('trig-amount').value = '';
+  }
+  updateTrigAmountConversion();
   applyTierToTriggerForm(t.interval);
   document.getElementById('trig-save-btn').textContent = 'Update Trigger';
   const form = document.getElementById('trig-add-form');
@@ -1060,13 +1161,15 @@ document.getElementById('trig-save-btn').addEventListener('click', () => {
   const adxRaw    = document.getElementById('trig-adx').value.trim();
   const cdRaw     = document.getElementById('trig-cd').value.trim();
   const amountRaw = document.getElementById('trig-amount').value.trim();
-  const amount    = amountRaw !== '' ? parseFloat(amountRaw) : 10;
+  const amountDisplay = amountRaw !== '' ? parseFloat(amountRaw) : 0;
+  // Always store as USDT internally; convert from display currency
+  const amountUsdt = amountDisplay ? fromDisplay(amountDisplay) : 0;
 
   // Amount required on create
-  if (!editId && (!amountRaw || amount < 1)) {
+  if (!editId && amountUsdt < 1) {
     const amtInp = document.getElementById('trig-amount');
     amtInp.style.borderColor = '#EF5350';
-    btn.textContent = '✕ Amount (USDT) required';
+    btn.textContent = `✕ Amount required (min ${displayCurrency === 'INR' ? '₹83' : '$1'})`;
     setTimeout(() => {
       amtInp.style.borderColor = '';
       btn.textContent = 'Save Trigger';
@@ -1079,9 +1182,9 @@ document.getElementById('trig-save-btn').addEventListener('click', () => {
 
   const payload = {
     name, symbol: sym, interval: iv, min_confidence: conf,
-    adx_threshold:    adxRaw    !== '' ? parseFloat(adxRaw)    : null,
-    cooldown_bars:    cdRaw     !== '' ? parseInt(cdRaw, 10)    : null,
-    trade_amount_usdt: amount,
+    adx_threshold:    adxRaw !== '' ? parseFloat(adxRaw)  : null,
+    cooldown_bars:    cdRaw  !== '' ? parseInt(cdRaw, 10)  : null,
+    trade_amount_usdt: parseFloat(amountUsdt.toFixed(4)),
   };
 
   apiFetch(url, {
@@ -1240,7 +1343,7 @@ function renderAnalytics(d) {
       <div class="an-pos-chip ${p.direction}">
         <span class="an-pos-dir ${p.direction}">${p.direction}</span>
         <span>${p.symbol} ${p.interval}</span>
-        <span style="color:#787B86">@ $${p.entry_price.toFixed(2)}</span>
+        <span style="color:#787B86">@ ${fmtDisplay(p.entry_price)}</span>
         <span style="color:#4C525E;font-size:9px">${p.confidence}</span>
       </div>`).join('');
   } else {
@@ -1293,8 +1396,8 @@ function renderAnalytics(d) {
         <td style="color:#787B86">${t.interval}</td>
         <td style="color:${dirColor};font-weight:700">${t.direction}</td>
         <td style="color:${confC};font-size:9px;font-weight:700">${t.confidence}</td>
-        <td>$${t.entry_price.toFixed(2)}</td>
-        <td>$${t.exit_price.toFixed(2)}</td>
+        <td>${fmtDisplay(t.entry_price)}</td>
+        <td>${fmtDisplay(t.exit_price)}</td>
         <td class="${pctClass(t.pnl_pct)}" style="font-weight:700">${pct(t.pnl_pct)}</td>
         <td style="color:#4C525E;font-size:10px">${ts}</td>
       </tr>`;

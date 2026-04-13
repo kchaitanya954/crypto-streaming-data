@@ -814,6 +814,34 @@ async def api_adaptive_state(request: Request):
     return _adaptive_engine.summary()
 
 
+@app.get("/api/currency/inr-rate")
+async def api_inr_rate(request: Request):
+    """Return cached USD→INR exchange rate. Refreshes from frankfurter.app every hour."""
+    cached = getattr(request.app.state, "inr_rate", None)
+    cached_at = getattr(request.app.state, "inr_rate_ts", 0)
+    now = int(_time.time())
+    # Serve cache if younger than 1 hour
+    if cached and (now - cached_at) < 3600:
+        return {"usd_to_inr": cached, "cached_at": cached_at, "source": "cache"}
+    # Fetch fresh rate
+    try:
+        import aiohttp
+        async with aiohttp.ClientSession() as session:
+            resp = await session.get(
+                "https://api.frankfurter.app/latest?from=USD&to=INR",
+                timeout=aiohttp.ClientTimeout(total=8),
+            )
+            data = await resp.json()
+            rate = data["rates"]["INR"]
+            request.app.state.inr_rate    = rate
+            request.app.state.inr_rate_ts = now
+            return {"usd_to_inr": rate, "cached_at": now, "source": "live"}
+    except Exception as exc:
+        _log.warning("INR rate fetch failed: %s", exc)
+        fallback = cached or 83.5   # reasonable fallback
+        return {"usd_to_inr": fallback, "cached_at": cached_at, "source": "fallback"}
+
+
 @app.on_event("startup")
 async def _on_startup():
     """
@@ -827,6 +855,7 @@ async def _on_startup():
         db_path = os.environ.get("DB_PATH", "data/trading.db")
         app.state.db = await init_db(db_path)
     asyncio.create_task(_load_adaptive_state_when_ready())
+    asyncio.create_task(_inr_rate_refresh_loop())
 
 
 async def _load_adaptive_state_when_ready() -> None:
@@ -852,6 +881,27 @@ async def _load_adaptive_state_when_ready() -> None:
             pass
         asyncio.create_task(_adaptive_monitor_loop())
         return
+
+
+async def _inr_rate_refresh_loop() -> None:
+    """Fetch USD→INR rate on startup and refresh every hour."""
+    import aiohttp
+    while True:
+        try:
+            async with aiohttp.ClientSession() as session:
+                resp = await session.get(
+                    "https://api.frankfurter.app/latest?from=USD&to=INR",
+                    timeout=aiohttp.ClientTimeout(total=8),
+                )
+                data = await resp.json()
+                app.state.inr_rate    = data["rates"]["INR"]
+                app.state.inr_rate_ts = int(_time.time())
+        except Exception as exc:
+            _log.warning("INR rate refresh failed: %s", exc)
+            if not getattr(app.state, "inr_rate", None):
+                app.state.inr_rate    = 83.5   # fallback
+                app.state.inr_rate_ts = int(_time.time())
+        await asyncio.sleep(3600)   # refresh every hour
 
 
 # ── Auto-trade execution ───────────────────────────────────────────────────────

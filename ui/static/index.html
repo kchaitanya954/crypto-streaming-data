@@ -643,6 +643,7 @@
   </select>
   <div id="status-wrap">
     <button id="analytics-btn" title="Signal performance analytics">Analytics</button>
+    <button id="currency-toggle-btn" title="Toggle INR / USDT display" style="margin-left:4px;background:transparent;border:1px solid #2A2E39;color:#FF9800;border-radius:4px;padding:4px 9px;cursor:pointer;font-size:11px;font-weight:600">₹ INR</button>
     <button id="settings-btn" title="Account settings" style="margin-left:4px;background:transparent;border:1px solid #2A2E39;color:#787B86;border-radius:4px;padding:4px 9px;cursor:pointer;font-size:12px">⚙</button>
     <button id="logout-btn" title="Log out" style="display:none;margin-left:4px;background:transparent;border:1px solid #EF5350;color:#EF5350;border-radius:4px;padding:4px 9px;cursor:pointer;font-size:12px">⏻</button>
     <div id="status-dot"></div>
@@ -781,9 +782,10 @@
           <span id="trig-tier-hint" style="font-size:9px;color:#4C525E;margin-left:auto"></span>
         </div>
         <div class="trig-form-row" style="gap:6px;align-items:center">
-          <span style="font-size:9px;color:#787B86">Amount (USDT)</span>
-          <input id="trig-amount" class="trig-inp" type="number" min="1" step="0.01"
-            style="width:80px" placeholder="e.g. 20" title="USDT to allocate per trade for this trigger" />
+          <span id="trig-amount-lbl" style="font-size:9px;color:#787B86">Amount (₹ INR)</span>
+          <input id="trig-amount" class="trig-inp" type="number" min="1" step="1"
+            style="width:88px" placeholder="e.g. 1000" title="Amount to allocate per trade for this trigger" />
+          <span id="trig-amount-conv" style="font-size:9px;color:#FF9800"></span>
           <span id="trig-balance-hint" style="font-size:9px;color:#4C525E;margin-left:auto"></span>
         </div>
         <div id="trig-form-error" style="font-size:11px;color:#EF5350;padding:2px 0;display:none"></div>
