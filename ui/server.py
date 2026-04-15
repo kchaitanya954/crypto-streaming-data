@@ -67,7 +67,7 @@ async def _current_user(
 async def _get_user_exchange(db, user_id: int):
     """Build a CoinDCXClient from the user's encrypted DB settings."""
     from auth.encryption import safe_decrypt
-    from exchange.coindcx import CoinDCXClient
+    from exchange.coindcx_client import CoinDCXClient
     import aiohttp
     row = await queries.get_user_settings(db, user_id)
     if not row or not row.get("coindcx_api_key_enc"):
@@ -152,13 +152,31 @@ async def api_register(request: Request, body: RegisterRequest):
     totp_secret   = generate_totp_secret()
     password_hash = hash_password(body.password)
     user_id = await queries.create_user(db, body.username, body.email, password_hash, totp_secret)
+
+    # First user ever becomes admin automatically
+    all_users = await queries.list_users(db)
+    if len(all_users) == 1:
+        await queries.set_admin(db, user_id, True)
+
     totp_uri = get_totp_uri(totp_secret, body.username)
 
+    # Generate QR code server-side as SVG data URL (no Pillow required)
+    import qrcode
+    import qrcode.image.svg
+    import io
+    import base64
+    factory = qrcode.image.svg.SvgPathImage
+    qr_img  = qrcode.make(totp_uri, image_factory=factory)
+    buf = io.BytesIO()
+    qr_img.save(buf)
+    qr_data_url = "data:image/svg+xml;base64," + base64.b64encode(buf.getvalue()).decode()
+
     return {
-        "user_id":  user_id,
-        "username": body.username,
-        "totp_uri": totp_uri,
+        "user_id":     user_id,
+        "username":    body.username,
+        "totp_uri":    totp_uri,
         "totp_secret": totp_secret,   # for manual entry in authenticator apps
+        "qr_data_url": qr_data_url,
     }
 
 
@@ -198,8 +216,9 @@ async def api_login(request: Request, body: LoginRequest):
         if not verify_totp(user["totp_secret"], body.totp_code):
             return JSONResponse({"error": "Invalid 2FA code"}, status_code=401)
 
-    token = create_jwt(user["id"], user["username"])
-    return {"token": token, "username": user["username"], "user_id": user["id"]}
+    token = create_jwt(user["id"], user["username"], is_admin=bool(user.get("is_admin")))
+    return {"token": token, "username": user["username"], "user_id": user["id"],
+            "is_admin": bool(user.get("is_admin"))}
 
 
 @app.get("/api/auth/me")
@@ -212,19 +231,20 @@ async def api_me(user: dict = Depends(_current_user)):
 
 @app.get("/api/profile/settings")
 async def api_get_settings(request: Request, user: dict = Depends(_current_user)):
-    """Return user settings with API keys masked."""
+    """Return user settings — Telegram fields decrypted, CoinDCX keys masked."""
     db = getattr(request.app.state, "db", None)
     if db is None:
         return JSONResponse({"error": "DB not ready"}, status_code=503)
+    from auth.encryption import safe_decrypt
     user_id = int(user["sub"])
     row = await queries.get_user_settings(db, user_id)
     if not row:
         return {"telegram_token": None, "telegram_chat_id": None,
                 "has_coindcx_key": False, "has_coindcx_secret": False}
     return {
-        "telegram_token":   row.get("telegram_token"),
-        "telegram_chat_id": row.get("telegram_chat_id"),
-        "has_coindcx_key":  bool(row.get("coindcx_api_key_enc")),
+        "telegram_token":     safe_decrypt(row.get("telegram_token")),
+        "telegram_chat_id":   safe_decrypt(row.get("telegram_chat_id")),
+        "has_coindcx_key":    bool(row.get("coindcx_api_key_enc")),
         "has_coindcx_secret": bool(row.get("coindcx_api_secret_enc")),
     }
 
@@ -250,12 +270,17 @@ async def api_update_settings(
     key_enc    = encrypt(body.coindcx_api_key)    if body.coindcx_api_key    else (existing or {}).get("coindcx_api_key_enc")
     secret_enc = encrypt(body.coindcx_api_secret) if body.coindcx_api_secret else (existing or {}).get("coindcx_api_secret_enc")
 
-    tg_token   = body.telegram_token    or (existing or {}).get("telegram_token")
-    tg_chat_id = body.telegram_chat_id  or (existing or {}).get("telegram_chat_id")
+    # Encrypt Telegram credentials too (or keep existing encrypted values)
+    tg_token_enc   = encrypt(body.telegram_token)   if body.telegram_token   else (existing or {}).get("telegram_token")
+    tg_chat_id_enc = encrypt(body.telegram_chat_id) if body.telegram_chat_id else (existing or {}).get("telegram_chat_id")
+
+    # Resolve plaintext for use in test message below
+    tg_token   = body.telegram_token   or safe_decrypt((existing or {}).get("telegram_token"))
+    tg_chat_id = body.telegram_chat_id or safe_decrypt((existing or {}).get("telegram_chat_id"))
 
     # Test CoinDCX connection if new keys provided
     if body.coindcx_api_key and body.coindcx_api_secret:
-        from exchange.coindcx import CoinDCXClient
+        from exchange.coindcx_client import CoinDCXClient
         try:
             async with aiohttp.ClientSession() as session:
                 client = CoinDCXClient(
@@ -267,11 +292,11 @@ async def api_update_settings(
         except Exception as exc:
             return JSONResponse({"error": f"CoinDCX connection failed: {exc}"}, status_code=400)
 
-    # Save to DB
+    # Save to DB (Telegram fields stored encrypted just like CoinDCX keys)
     await queries.upsert_user_settings(
         db, user_id,
-        telegram_token=tg_token,
-        telegram_chat_id=tg_chat_id,
+        telegram_token=tg_token_enc,
+        telegram_chat_id=tg_chat_id_enc,
         coindcx_api_key_enc=key_enc,
         coindcx_api_secret_enc=secret_enc,
     )
@@ -294,37 +319,350 @@ async def api_update_settings(
     return {"ok": True, "telegram_notified": tg_ok}
 
 
+# ── Admin endpoints ─────────────────────────────────────────────────────────────
+
+async def _require_admin(request: Request, user: dict = Depends(_current_user)) -> dict:
+    """Require admin. Fast-path checks JWT claim; falls back to DB for old tokens."""
+    if user.get("is_admin"):
+        return user
+    # JWT issued before is_admin was added — verify directly from DB
+    db = getattr(request.app.state, "db", None)
+    if db:
+        db_user = await queries.get_user_by_id(db, int(user["sub"]))
+        if db_user and db_user.get("is_admin"):
+            return user
+    raise HTTPException(status_code=403, detail="Admin access required")
+
+
+@app.get("/api/admin/users")
+async def admin_list_users(request: Request, user: dict = Depends(_require_admin)):
+    db = getattr(request.app.state, "db", None)
+    if db is None:
+        return JSONResponse({"error": "DB not configured"}, status_code=503)
+    return await queries.list_users(db)
+
+
+@app.delete("/api/admin/users/{user_id}")
+async def admin_delete_user(
+    request: Request, user_id: int, user: dict = Depends(_require_admin)
+):
+    if user_id == int(user["sub"]):
+        return JSONResponse({"error": "Cannot delete your own account"}, status_code=400)
+    db = getattr(request.app.state, "db", None)
+    if db is None:
+        return JSONResponse({"error": "DB not configured"}, status_code=503)
+    await queries.delete_user(db, user_id)
+    return {"ok": True}
+
+
+@app.put("/api/admin/users/{user_id}/toggle-admin")
+async def admin_toggle_admin(
+    request: Request, user_id: int, user: dict = Depends(_require_admin)
+):
+    if user_id == int(user["sub"]):
+        return JSONResponse({"error": "Cannot change your own admin status"}, status_code=400)
+    db = getattr(request.app.state, "db", None)
+    if db is None:
+        return JSONResponse({"error": "DB not configured"}, status_code=503)
+    users = await queries.list_users(db)
+    target = next((u for u in users if u["id"] == user_id), None)
+    if not target:
+        return JSONResponse({"error": "User not found"}, status_code=404)
+    await queries.set_admin(db, user_id, not target["is_admin"])
+    return {"ok": True, "is_admin": not target["is_admin"]}
+
+
+@app.get("/api/admin/db-stats")
+async def admin_db_stats(request: Request, user: dict = Depends(_require_admin)):
+    db = getattr(request.app.state, "db", None)
+    if db is None:
+        return JSONResponse({"error": "DB not configured"}, status_code=503)
+    return await queries.db_stats(db)
+
+
+@app.get("/api/admin/tables")
+async def admin_list_tables(request: Request, user: dict = Depends(_require_admin)):
+    """List all tables with their schemas."""
+    db = getattr(request.app.state, "db", None)
+    if db is None:
+        return JSONResponse({"error": "DB not configured"}, status_code=503)
+    cursor = await db.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+    )
+    rows = await cursor.fetchall()
+    tables = []
+    for (name,) in rows:
+        info_cur = await db.execute(f"PRAGMA table_info({name})")
+        cols = await info_cur.fetchall()
+        count_cur = await db.execute(f"SELECT COUNT(*) FROM {name}")
+        count_row = await count_cur.fetchone()
+        tables.append({
+            "name": name,
+            "row_count": count_row[0] if count_row else 0,
+            "columns": [
+                {"cid": c[0], "name": c[1], "type": c[2], "notnull": c[3],
+                 "dflt_value": c[4], "pk": c[5]}
+                for c in cols
+            ],
+        })
+    return tables
+
+
+@app.get("/api/admin/table/{table_name}")
+async def admin_browse_table(
+    request: Request,
+    table_name: str,
+    page:    int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=1, le=500),
+    order_by: Optional[str] = Query(default=None),
+    order_dir: str = Query(default="DESC"),
+    filter_col: Optional[str] = Query(default=None),
+    filter_val: Optional[str] = Query(default=None),
+    user: dict = Depends(_require_admin),
+):
+    """Browse a table with pagination, sorting, and simple column filtering."""
+    db = getattr(request.app.state, "db", None)
+    if db is None:
+        return JSONResponse({"error": "DB not configured"}, status_code=503)
+    # Validate table name (prevent injection via identifier)
+    valid_cur = await db.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table_name,)
+    )
+    if not await valid_cur.fetchone():
+        return JSONResponse({"error": "Table not found"}, status_code=404)
+    # Validate column names for sorting/filtering
+    info_cur = await db.execute(f"PRAGMA table_info({table_name})")
+    col_rows = await info_cur.fetchall()
+    valid_cols = {c[1] for c in col_rows}
+    col_names  = [c[1] for c in col_rows]
+    safe_order = order_by if order_by in valid_cols else (col_names[0] if col_names else "rowid")
+    safe_dir   = "ASC" if order_dir.upper() == "ASC" else "DESC"
+    where, params = "", []
+    if filter_col and filter_col in valid_cols and filter_val is not None:
+        where  = f"WHERE {filter_col} LIKE ?"
+        params = [f"%{filter_val}%"]
+    offset = (page - 1) * page_size
+    count_cur = await db.execute(f"SELECT COUNT(*) FROM {table_name} {where}", params)
+    total_row = await count_cur.fetchone()
+    total = total_row[0] if total_row else 0
+    data_cur = await db.execute(
+        f"SELECT rowid, * FROM {table_name} {where}"
+        f" ORDER BY {safe_order} {safe_dir} LIMIT ? OFFSET ?",
+        params + [page_size, offset],
+    )
+    rows = await data_cur.fetchall()
+    return {
+        "table":     table_name,
+        "columns":   col_names,
+        "rows":      [list(r) for r in rows],   # rows[i][0] = rowid
+        "total":     total,
+        "page":      page,
+        "page_size": page_size,
+        "pages":     max(1, -(-total // page_size)),
+    }
+
+
+async def _validate_table(db, table_name: str):
+    """Return (valid_cols set, col_names list) or raise 404."""
+    cur = await db.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table_name,)
+    )
+    if not await cur.fetchone():
+        raise HTTPException(status_code=404, detail="Table not found")
+    info = await db.execute(f"PRAGMA table_info({table_name})")
+    rows = await info.fetchall()
+    return {c[1] for c in rows}, [c[1] for c in rows]
+
+
+class RowData(BaseModel):
+    data: dict   # {col_name: value}
+
+
+class DeleteRowsRequest(BaseModel):
+    rowids: Optional[list] = None   # None or empty = delete ALL
+
+
+@app.post("/api/admin/table/{table_name}/row")
+async def admin_insert_row(
+    request: Request,
+    table_name: str,
+    body: RowData,
+    user: dict = Depends(_require_admin),
+):
+    """Insert a new row. Columns not provided are omitted (DB defaults apply)."""
+    db = getattr(request.app.state, "db", None)
+    if db is None:
+        return JSONResponse({"error": "DB not configured"}, status_code=503)
+    valid_cols, _ = await _validate_table(db, table_name)
+    safe_data = {k: v for k, v in body.data.items() if k in valid_cols}
+    if not safe_data:
+        return JSONResponse({"error": "No valid columns provided"}, status_code=400)
+    cols   = ", ".join(safe_data.keys())
+    placeholders = ", ".join("?" * len(safe_data))
+    try:
+        cur = await db.execute(
+            f"INSERT INTO {table_name} ({cols}) VALUES ({placeholders})",
+            list(safe_data.values()),
+        )
+        await db.commit()
+        return {"ok": True, "rowid": cur.lastrowid}
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+
+@app.put("/api/admin/table/{table_name}/row/{rowid}")
+async def admin_update_row(
+    request: Request,
+    table_name: str,
+    rowid: int,
+    body: RowData,
+    user: dict = Depends(_require_admin),
+):
+    """Update a row by its SQLite rowid."""
+    db = getattr(request.app.state, "db", None)
+    if db is None:
+        return JSONResponse({"error": "DB not configured"}, status_code=503)
+    valid_cols, _ = await _validate_table(db, table_name)
+    safe_data = {k: v for k, v in body.data.items() if k in valid_cols}
+    if not safe_data:
+        return JSONResponse({"error": "No valid columns provided"}, status_code=400)
+    set_clause = ", ".join(f"{k} = ?" for k in safe_data)
+    try:
+        await db.execute(
+            f"UPDATE {table_name} SET {set_clause} WHERE rowid = ?",
+            list(safe_data.values()) + [rowid],
+        )
+        await db.commit()
+        return {"ok": True}
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+
+@app.delete("/api/admin/table/{table_name}/row/{rowid}")
+async def admin_delete_row(
+    request: Request,
+    table_name: str,
+    rowid: int,
+    user: dict = Depends(_require_admin),
+):
+    """Delete a single row by SQLite rowid."""
+    db = getattr(request.app.state, "db", None)
+    if db is None:
+        return JSONResponse({"error": "DB not configured"}, status_code=503)
+    await _validate_table(db, table_name)
+    await db.execute(f"DELETE FROM {table_name} WHERE rowid = ?", (rowid,))
+    await db.commit()
+    return {"ok": True}
+
+
+@app.delete("/api/admin/table/{table_name}/rows")
+async def admin_delete_rows(
+    request: Request,
+    table_name: str,
+    body: DeleteRowsRequest,
+    user: dict = Depends(_require_admin),
+):
+    """Delete selected rows (by rowid list) or ALL rows if rowids is null/empty."""
+    db = getattr(request.app.state, "db", None)
+    if db is None:
+        return JSONResponse({"error": "DB not configured"}, status_code=503)
+    await _validate_table(db, table_name)
+    if body.rowids:
+        placeholders = ",".join("?" * len(body.rowids))
+        cur = await db.execute(
+            f"DELETE FROM {table_name} WHERE rowid IN ({placeholders})", body.rowids
+        )
+    else:
+        cur = await db.execute(f"DELETE FROM {table_name}")
+    await db.commit()
+    return {"ok": True, "deleted": cur.rowcount}
+
+
+class QueryRequest(BaseModel):
+    sql: str
+
+
+@app.post("/api/admin/query")
+async def admin_run_query(
+    request: Request,
+    body: QueryRequest,
+    user: dict = Depends(_require_admin),
+):
+    """Execute a read-only SQL query. Only SELECT statements allowed."""
+    db = getattr(request.app.state, "db", None)
+    if db is None:
+        return JSONResponse({"error": "DB not configured"}, status_code=503)
+    sql = body.sql.strip()
+    # Only allow SELECT queries
+    if not sql.upper().startswith("SELECT"):
+        return JSONResponse({"error": "Only SELECT queries are allowed"}, status_code=400)
+    try:
+        cursor = await db.execute(sql)
+        rows = await cursor.fetchmany(1000)   # cap at 1000 rows
+        col_names = [d[0] for d in cursor.description] if cursor.description else []
+        return {"columns": col_names, "rows": [list(r) for r in rows], "count": len(rows)}
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+
+@app.post("/api/admin/clear-signals")
+async def admin_clear_signals(request: Request, user: dict = Depends(_require_admin)):
+    db = getattr(request.app.state, "db", None)
+    if db is None:
+        return JSONResponse({"error": "DB not configured"}, status_code=503)
+    deleted = await queries.clear_signals(db)
+    return {"ok": True, "deleted": deleted}
+
+
+@app.post("/api/admin/clear-all")
+async def admin_clear_all(request: Request, user: dict = Depends(_require_admin)):
+    db = getattr(request.app.state, "db", None)
+    if db is None:
+        return JSONResponse({"error": "DB not configured"}, status_code=503)
+    counts = await queries.clear_all_data(db)
+    return {"ok": True, "deleted": counts}
+
+
 # ── REST endpoints ─────────────────────────────────────────────────────────────
 
 @app.get("/api/portfolio")
-async def api_portfolio(request: Request):
-    """Proxy to CoinDCX balance endpoint. Returns list of {currency, balance, locked_balance}."""
-    exchange = getattr(request.app.state, "exchange", None)
-    if exchange is None:
-        return JSONResponse({"error": "Exchange client not configured"}, status_code=503)
+async def api_portfolio(request: Request, user: dict = Depends(_current_user)):
+    """Proxy to CoinDCX balance endpoint using the user's own API keys."""
+    db = getattr(request.app.state, "db", None)
+    if db is None:
+        return JSONResponse({"error": "DB not configured"}, status_code=503)
+    user_id = int(user["sub"])
     try:
-        balances = await exchange.get_balances()
+        exchange, session = await _get_user_exchange(db, user_id)
+        async with session:
+            balances = await exchange.get_balances()
         return balances
+    except HTTPException:
+        raise
     except Exception as exc:
         return JSONResponse({"error": str(exc)}, status_code=502)
 
 
 @app.get("/api/signals/history")
 async def api_signals_history(
-    request: Request,
+    request:  Request,
     symbol:   Optional[str] = Query(default=None),
     interval: Optional[str] = Query(default=None),
     limit:    int            = Query(default=100),
+    user:     dict           = Depends(_current_user),
 ):
-    """Return recent signals from SQLite. All filters optional — omit for all symbols/intervals."""
+    """Return recent signals for the user's watched (symbol, interval) pairs."""
     db = getattr(request.app.state, "db", None)
     if db is None:
         return []
-    return await queries.get_recent_signals(db, symbol=symbol, interval=interval, limit=limit)
+    user_id = int(user["sub"])
+    return await queries.get_recent_signals(
+        db, symbol=symbol, interval=interval, limit=limit, user_id=user_id
+    )
 
 
 @app.delete("/api/signals/{signal_id}")
-async def api_delete_signal(request: Request, signal_id: int):
+async def api_delete_signal(request: Request, signal_id: int, user: dict = Depends(_current_user)):
     """Hard-delete a single signal by DB id."""
     db = getattr(request.app.state, "db", None)
     if db is None:
@@ -340,6 +678,7 @@ async def api_delete_signals(
     interval:   Optional[str] = Query(default=None),
     direction:  Optional[str] = Query(default=None),
     confidence: Optional[str] = Query(default=None),
+    user:       dict          = Depends(_current_user),
 ):
     """Bulk-delete signals matching any combination of query filters."""
     db = getattr(request.app.state, "db", None)
@@ -356,12 +695,13 @@ async def api_delete_signals(
 
 
 @app.get("/api/triggers")
-async def api_get_triggers(request: Request):
-    """List ALL triggers (active and inactive)."""
+async def api_get_triggers(request: Request, user: dict = Depends(_current_user)):
+    """List triggers belonging to the authenticated user."""
     db = getattr(request.app.state, "db", None)
     if db is None:
         return []
-    return await queries.get_triggers(db, active_only=False)
+    user_id = int(user["sub"])
+    return await queries.get_triggers(db, active_only=False, user_id=user_id)
 
 
 @app.post("/api/triggers", status_code=201)
@@ -717,6 +1057,7 @@ async def api_analytics(
     initial_usdt: float = Query(default=100.0),
     buy_pct:      float = Query(default=10.0),
     sell_pct:     float = Query(default=100.0),
+    user:         dict  = Depends(_current_user),
 ):
     """
     Signal performance analytics: pairs BUY→SELL (and SELL→BUY) signals into
@@ -729,12 +1070,14 @@ async def api_analytics(
     now   = int(_time.time())
     since = now - _PERIOD_SECS[period] if period in _PERIOD_SECS else None
 
+    user_id = int(user["sub"])
     signals = await queries.get_signals_for_analytics(
         db,
         symbol     = None if symbol     == "ALL" else symbol,
         interval   = None if interval   == "ALL" else interval,
         confidence = None if confidence == "ALL" else confidence,
         since      = since,
+        user_id    = user_id,
     )
 
     # Group per (symbol, interval) then pair within each group
@@ -807,8 +1150,124 @@ async def api_analytics(
     }
 
 
+@app.get("/api/trades/coindcx")
+async def api_coindcx_trades(
+    request: Request,
+    limit:   int  = Query(default=200, ge=1, le=500),
+    user:    dict = Depends(_current_user),
+):
+    """
+    Fetch real trade fills from CoinDCX (using the logged-in user's API keys).
+    Returns per-trade detail (USDT + INR), aggregate totals, and current balances.
+    """
+    db = getattr(request.app.state, "db", None)
+    if db is None:
+        return JSONResponse({"error": "DB not configured"}, status_code=503)
+
+    user_id = int(user["sub"])
+    exchange, session = await _get_user_exchange(db, user_id)
+
+    inr_rate: float = getattr(request.app.state, "inr_rate", None) or 83.5
+
+    async with session:
+        try:
+            fills = await exchange.get_trade_history(limit=limit)
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"CoinDCX trade history failed: {exc}")
+        try:
+            balances = await exchange.get_balances()
+        except Exception:
+            balances = []
+
+    trades_out = []
+    total_bought_usdt  = 0.0
+    total_bought_inr   = 0.0
+    total_sold_usdt    = 0.0
+    total_sold_inr     = 0.0
+    total_fee_usdt     = 0.0
+    total_fee_inr      = 0.0
+
+    for f in fills:
+        try:
+            side      = (f.get("side") or "").upper()
+            market    = f.get("market") or ""
+            price     = float(f.get("price") or 0)
+            quantity  = float(f.get("quantity") or 0)
+            fee_amt   = float(f.get("fee_amount") or 0)
+            fee_cur   = (f.get("fee_currency") or "USDT").upper()
+            ts_ms     = int(f.get("timestamp") or 0)
+
+            # Gross trade value in USDT
+            gross_usdt = price * quantity
+            gross_inr  = gross_usdt * inr_rate
+
+            # Normalise fee to USDT equivalent (if fee is in base asset, convert via price)
+            if fee_cur == "USDT" or fee_cur.endswith("USDT"):
+                fee_usdt = fee_amt
+            else:
+                fee_usdt = fee_amt * price   # base asset fee → USDT
+
+            fee_inr = fee_usdt * inr_rate
+
+            # Net cost (BUY) or net revenue (SELL) in USDT
+            if side == "BUY":
+                net_usdt = gross_usdt + fee_usdt
+                net_inr  = net_usdt * inr_rate
+                total_bought_usdt += net_usdt
+                total_bought_inr  += net_inr
+            else:
+                net_usdt = gross_usdt - fee_usdt
+                net_inr  = net_usdt * inr_rate
+                total_sold_usdt += net_usdt
+                total_sold_inr  += net_inr
+
+            total_fee_usdt += fee_usdt
+            total_fee_inr  += fee_inr
+
+            trades_out.append({
+                "market":      market,
+                "side":        side,
+                "price_usdt":  round(price, 6),
+                "price_inr":   round(price * inr_rate, 4),
+                "quantity":    round(quantity, 8),
+                "gross_usdt":  round(gross_usdt, 4),
+                "gross_inr":   round(gross_inr, 2),
+                "fee_usdt":    round(fee_usdt, 6),
+                "fee_inr":     round(fee_inr, 4),
+                "net_usdt":    round(net_usdt, 4),    # cost if BUY, revenue if SELL
+                "net_inr":     round(net_inr, 2),
+                "fee_currency": fee_cur,
+                "timestamp":   ts_ms // 1000 if ts_ms > 1e10 else ts_ms,
+            })
+        except Exception:
+            continue
+
+    # Most recent first
+    trades_out.sort(key=lambda t: t["timestamp"], reverse=True)
+
+    net_pnl_usdt = total_sold_usdt - total_bought_usdt
+    net_pnl_inr  = total_sold_inr  - total_bought_inr
+
+    return {
+        "inr_rate":          round(inr_rate, 4),
+        "trades":            trades_out,
+        "total_trades":      len(trades_out),
+        "summary": {
+            "total_bought_usdt": round(total_bought_usdt, 4),
+            "total_bought_inr":  round(total_bought_inr, 2),
+            "total_sold_usdt":   round(total_sold_usdt, 4),
+            "total_sold_inr":    round(total_sold_inr, 2),
+            "total_fee_usdt":    round(total_fee_usdt, 4),
+            "total_fee_inr":     round(total_fee_inr, 2),
+            "net_pnl_usdt":      round(net_pnl_usdt, 4),
+            "net_pnl_inr":       round(net_pnl_inr, 2),
+        },
+        "balances": balances,
+    }
+
+
 @app.get("/api/adaptive")
-async def api_adaptive_state(request: Request):
+async def api_adaptive_state(request: Request, user: dict = Depends(_current_user)):
     """Return current adaptive engine state and position-size recommendations."""
     from signals.adaptive_strategy import engine as _adaptive_engine
     return _adaptive_engine.summary()
@@ -918,7 +1377,7 @@ async def _execute_trigger_trade(db, trigger: dict, signal, symbol: str, interva
     """
     import aiohttp
     from auth.encryption import safe_decrypt
-    from exchange.coindcx import CoinDCXClient
+    from exchange.coindcx_client import CoinDCXClient
     from signals.adaptive_strategy import engine as _adaptive_engine
 
     user_id    = trigger.get("user_id")
@@ -942,18 +1401,30 @@ async def _execute_trigger_trade(db, trigger: dict, signal, symbol: str, interva
             exchange = CoinDCXClient(api_key=key, api_secret=secret, session=session)
 
             if signal.direction == "BUY":
+                # Adaptive position sizing: scale the trigger budget by the engine's buy %
+                adaptive_pct = _adaptive_engine.buy_pct_for(signal.confidence, signal.adx_val)
+                adaptive_usdt = round(amount * adaptive_pct / 100.0, 4)
+                adaptive_usdt = max(adaptive_usdt, 1.0)   # floor at $1 to avoid dust orders
+
+                if _adaptive_engine.circuit_breaker:
+                    _log.warning("Trigger %d: circuit breaker active — skipping BUY", trigger_id)
+                    return
+
                 # Check current USDT balance
                 balances = await exchange.get_balances()
                 usdt_row = next((b for b in balances if b.get("currency") == "USDT"), None)
                 usdt_bal = float(usdt_row.get("balance", 0)) if usdt_row else 0.0
-                if usdt_bal < amount:
-                    _log.warning("Trigger %d: insufficient USDT %.2f < %.2f", trigger_id, usdt_bal, amount)
+                if usdt_bal < adaptive_usdt:
+                    _log.warning(
+                        "Trigger %d: insufficient USDT %.2f < %.2f (adaptive %.0f%% of %.2f)",
+                        trigger_id, usdt_bal, adaptive_usdt, adaptive_pct, amount,
+                    )
                     return
 
-                qty = round(amount / signal.entry_price, 8)
+                qty = round(adaptive_usdt / signal.entry_price, 8)
                 result = await exchange.create_order(
                     side="buy", market=symbol,
-                    order_type="market_order", total_quantity=qty,
+                    order_type="market_order", quantity=qty,
                 )
                 cdx_order_id = result.get("id") or result.get("order_id")
 
@@ -970,23 +1441,31 @@ async def _execute_trigger_trade(db, trigger: dict, signal, symbol: str, interva
                     total_coins = pos["coins_held"] + qty
                     new_avg = (pos["avg_entry"] * pos["coins_held"] + signal.entry_price * qty) / total_coins
                     await queries.upsert_trigger_position(
-                        db, trigger_id, symbol, total_coins, new_avg, pos["usdt_spent"] + amount
+                        db, trigger_id, symbol, total_coins, new_avg, pos["usdt_spent"] + adaptive_usdt
                     )
                 else:
                     await queries.upsert_trigger_position(
-                        db, trigger_id, symbol, qty, signal.entry_price, amount
+                        db, trigger_id, symbol, qty, signal.entry_price, adaptive_usdt
                     )
-                _log.info("Trigger %d BUY executed: %.8f %s @ %.4f", trigger_id, qty, symbol, signal.entry_price)
+                _log.info(
+                    "Trigger %d BUY executed: %.8f %s @ %.4f  adaptive=%.0f%% → $%.2f",
+                    trigger_id, qty, symbol, signal.entry_price, adaptive_pct, adaptive_usdt,
+                )
 
             elif signal.direction == "SELL":
                 pos = await queries.get_trigger_position(db, trigger_id)
                 if not pos or pos["coins_held"] < 1e-8:
                     return  # nothing to sell
 
-                coins_to_sell = pos["coins_held"]
+                # Adaptive sell ratio: sell a fraction based on confidence/drawdown
+                sell_ratio    = _adaptive_engine.sell_ratio_for(signal.confidence)
+                coins_to_sell = round(pos["coins_held"] * sell_ratio, 8)
+                if coins_to_sell < 1e-8:
+                    return
+
                 result = await exchange.create_order(
                     side="sell", market=symbol,
-                    order_type="market_order", total_quantity=round(coins_to_sell, 8),
+                    order_type="market_order", quantity=coins_to_sell,
                 )
                 cdx_order_id = result.get("id") or result.get("order_id")
                 avg_entry    = pos["avg_entry"]
@@ -1003,8 +1482,15 @@ async def _execute_trigger_trade(db, trigger: dict, signal, symbol: str, interva
                     coins_to_sell, signal.entry_price, pnl=pnl_pct,
                 )
 
-                # Zero out position
-                await queries.upsert_trigger_position(db, trigger_id, symbol, 0.0, 0.0, 0.0)
+                # Reduce position by sold amount (partial sell support)
+                coins_remaining = round(pos["coins_held"] - coins_to_sell, 8)
+                usdt_remaining  = round(pos["usdt_spent"] * (1.0 - sell_ratio), 4)
+                await queries.upsert_trigger_position(
+                    db, trigger_id, symbol,
+                    max(coins_remaining, 0.0),
+                    pos["avg_entry"],   # avg entry unchanged
+                    max(usdt_remaining, 0.0),
+                )
 
                 # Fetch real portfolio value for accurate adaptive engine update
                 try:
@@ -1019,8 +1505,9 @@ async def _execute_trigger_trade(db, trigger: dict, signal, symbol: str, interva
                 await queries.save_adaptive_state(db, _adaptive_engine.to_dict())
 
                 _log.info(
-                    "Trigger %d SELL executed: %.8f %s @ %.4f  PnL=%.4f%%",
-                    trigger_id, coins_to_sell, symbol, signal.entry_price, pnl_pct,
+                    "Trigger %d SELL executed: %.8f %s @ %.4f  ratio=%.0f%%  PnL=%.4f%%  remaining=%.8f",
+                    trigger_id, coins_to_sell, symbol, signal.entry_price,
+                    sell_ratio * 100, pnl_pct, coins_remaining,
                 )
 
     except Exception as exc:
@@ -1160,14 +1647,15 @@ async def _connection_loop(
                         except Exception:
                             pass
 
-                    # Check which active triggers match this signal
+                    # Check which active triggers match this signal (user-owned only)
                     matched_triggers: list[dict] = []
                     if db is not None:
                         try:
                             active_triggers = await queries.get_triggers(db)
                             matched_triggers = [
                                 t for t in active_triggers
-                                if queries.trigger_matches(
+                                if t.get("user_id") is not None
+                                and queries.trigger_matches(
                                     t, symbol, interval, signal.confidence, signal.adx_val
                                 )
                             ]

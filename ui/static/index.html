@@ -645,6 +645,7 @@
     <button id="analytics-btn" title="Signal performance analytics">Analytics</button>
     <button id="currency-toggle-btn" title="Toggle INR / USDT display" style="margin-left:4px;background:transparent;border:1px solid #2A2E39;color:#FF9800;border-radius:4px;padding:4px 9px;cursor:pointer;font-size:11px;font-weight:600">₹ INR</button>
     <button id="settings-btn" title="Account settings" style="margin-left:4px;background:transparent;border:1px solid #2A2E39;color:#787B86;border-radius:4px;padding:4px 9px;cursor:pointer;font-size:12px">⚙</button>
+    <button id="admin-btn" title="Admin panel" style="display:none;margin-left:4px;background:transparent;border:1px solid #9C27B0;color:#9C27B0;border-radius:4px;padding:4px 9px;cursor:pointer;font-size:12px">⚡ Admin</button>
     <button id="logout-btn" title="Log out" style="display:none;margin-left:4px;background:transparent;border:1px solid #EF5350;color:#EF5350;border-radius:4px;padding:4px 9px;cursor:pointer;font-size:12px">⏻</button>
     <div id="status-dot"></div>
     <span id="status-text">Connecting…</span>
@@ -782,7 +783,7 @@
           <span id="trig-tier-hint" style="font-size:9px;color:#4C525E;margin-left:auto"></span>
         </div>
         <div class="trig-form-row" style="gap:6px;align-items:center">
-          <span id="trig-amount-lbl" style="font-size:9px;color:#787B86">Amount (₹ INR)</span>
+          <span id="trig-amount-lbl" style="font-size:9px;color:#787B86">Amount (USDT)</span>
           <input id="trig-amount" class="trig-inp" type="number" min="1" step="1"
             style="width:88px" placeholder="e.g. 1000" title="Amount to allocate per trade for this trigger" />
           <span id="trig-amount-conv" style="font-size:9px;color:#FF9800"></span>
@@ -982,6 +983,45 @@
         <div class="an-no-data" id="sim-no-data" style="display:none">No simulation trades yet — need BUY/SELL signals in the selected period.</div>
       </div>
     </div>
+
+    <!-- ── Real CoinDCX Trades ─────────────────────────────────────────────── -->
+    <div class="an-section" style="border-top:2px solid #9C27B0">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+        <div class="an-section-title" style="color:#CE93D8">Real Trades (CoinDCX)</div>
+        <button id="dcx-trades-refresh" class="an-refresh-btn" style="font-size:10px">⟳ Load</button>
+      </div>
+
+      <!-- Summary cards -->
+      <div class="an-cards" id="dcx-summary-cards" style="display:none;border:1px solid #2A2E39;border-radius:6px;overflow:hidden;margin-bottom:10px">
+        <div class="an-card"><div class="an-card-val" id="dcx-v-bought-usdt">—</div><div class="an-card-lbl">Total Bought (USDT)</div></div>
+        <div class="an-card"><div class="an-card-val" id="dcx-v-sold-usdt">—</div><div class="an-card-lbl">Total Sold (USDT)</div></div>
+        <div class="an-card"><div class="an-card-val" id="dcx-v-fee-usdt">—</div><div class="an-card-lbl">Total Fees (USDT)</div></div>
+        <div class="an-card"><div class="an-card-val" id="dcx-v-pnl-usdt">—</div><div class="an-card-lbl">Net P&amp;L (USDT)</div></div>
+      </div>
+
+      <!-- Balances -->
+      <div id="dcx-balances-wrap" style="display:none;margin-bottom:10px">
+        <div style="font-size:10px;color:#4C525E;margin-bottom:4px">Current Balances</div>
+        <div id="dcx-balances" style="display:flex;gap:6px;flex-wrap:wrap"></div>
+      </div>
+
+      <!-- Trade table -->
+      <div class="an-trades-wrap" style="max-height:300px">
+        <table class="an-table" style="width:100%">
+          <thead>
+            <tr>
+              <th>Market</th><th>Side</th><th>Qty</th>
+              <th>Price (USDT)</th><th>Gross (USDT)</th>
+              <th>Fee (USDT)</th><th>Net Cost/Revenue (USDT)</th>
+              <th>Time</th>
+            </tr>
+          </thead>
+          <tbody id="dcx-trades-body"></tbody>
+        </table>
+        <div class="an-no-data" id="dcx-no-trades" style="display:none">No trades found — make sure your CoinDCX API keys are configured in Account Settings.</div>
+        <div id="dcx-trades-loading" style="text-align:center;padding:20px;color:#787B86;font-size:12px;display:none">Loading…</div>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -1064,6 +1104,176 @@
   </div>
 </div>
 
+<!-- ── Admin Modal ────────────────────────────────────────────────────────── -->
+<div id="admin-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.85);z-index:9100;align-items:flex-start;justify-content:center;padding:16px;overflow-y:auto">
+  <div style="background:#1E222D;border:1px solid #9C27B0;border-radius:10px;width:1100px;max-width:100%;min-height:80vh">
+
+    <!-- Header -->
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:16px 20px;border-bottom:1px solid #2A2E39">
+      <div style="display:flex;gap:4px">
+        <button class="adm-tab active" data-tab="browser">🗄 DB Browser</button>
+        <button class="adm-tab" data-tab="query">⚡ Query</button>
+        <button class="adm-tab" data-tab="users">👥 Users</button>
+        <button class="adm-tab" data-tab="danger">🔥 Danger Zone</button>
+      </div>
+      <button id="admin-close" style="background:none;border:none;color:#787B86;font-size:20px;cursor:pointer;line-height:1">✕</button>
+    </div>
+
+    <!-- DB Browser tab -->
+    <div id="adm-tab-browser" class="adm-panel" style="display:flex;height:calc(80vh - 54px)">
+      <!-- Table list sidebar -->
+      <div style="width:180px;flex-shrink:0;border-right:1px solid #2A2E39;overflow-y:auto;padding:8px 0">
+        <div style="font-size:10px;color:#787B86;padding:4px 12px;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">Tables</div>
+        <div id="adm-table-list"></div>
+      </div>
+      <!-- Table data area -->
+      <div style="flex:1;display:flex;flex-direction:column;overflow:hidden">
+        <!-- Toolbar -->
+        <div style="padding:8px 12px;border-bottom:1px solid #2A2E39;display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+          <span id="adm-table-name" style="font-size:13px;font-weight:600;color:#CE93D8">—</span>
+          <div style="flex:1"></div>
+          <button onclick="admAddRow()" style="background:#1B5E20;color:#A5D6A7;border:none;border-radius:4px;padding:4px 10px;font-size:11px;cursor:pointer">+ Add Row</button>
+          <button onclick="admDeleteSelected()" style="background:#4A0E0E;color:#EF9A9A;border:none;border-radius:4px;padding:4px 10px;font-size:11px;cursor:pointer">🗑 Selected</button>
+          <button onclick="admDeleteAllRows()" style="background:#4A0E0E;color:#EF5350;border:none;border-radius:4px;padding:4px 10px;font-size:11px;cursor:pointer">💣 All Rows</button>
+          <div style="width:1px;height:20px;background:#2A2E39;margin:0 2px"></div>
+          <input id="adm-filter-col" placeholder="Column" style="width:100px;background:#131722;border:1px solid #2A2E39;color:#D1D4DC;border-radius:4px;padding:4px 7px;font-size:11px">
+          <input id="adm-filter-val" placeholder="Filter value" style="width:120px;background:#131722;border:1px solid #2A2E39;color:#D1D4DC;border-radius:4px;padding:4px 7px;font-size:11px">
+          <button id="adm-filter-btn" style="background:#2962FF;color:#fff;border:none;border-radius:4px;padding:4px 10px;font-size:11px;cursor:pointer">Filter</button>
+          <button id="adm-filter-clear" style="background:#2A2E39;color:#787B86;border:none;border-radius:4px;padding:4px 10px;font-size:11px;cursor:pointer">✕</button>
+          <select id="adm-page-size" style="background:#131722;border:1px solid #2A2E39;color:#D1D4DC;border-radius:4px;padding:4px;font-size:11px">
+            <option value="25">25 rows</option>
+            <option value="50" selected>50 rows</option>
+            <option value="100">100 rows</option>
+            <option value="250">250 rows</option>
+          </select>
+        </div>
+        <!-- Data table -->
+        <div style="flex:1;overflow:auto">
+          <table id="adm-data-table" style="width:100%;border-collapse:collapse;font-size:11px;white-space:nowrap">
+            <thead id="adm-data-thead" style="position:sticky;top:0;background:#1E222D;z-index:1"></thead>
+            <tbody id="adm-data-tbody"></tbody>
+          </table>
+          <div id="adm-no-table" style="padding:40px;text-align:center;color:#787B86;font-size:13px">← Select a table</div>
+        </div>
+        <!-- Pagination -->
+        <div style="padding:8px 12px;border-top:1px solid #2A2E39;display:flex;align-items:center;gap:8px;font-size:11px;color:#787B86">
+          <button id="adm-prev-btn" style="background:#2A2E39;color:#D1D4DC;border:none;border-radius:3px;padding:3px 10px;cursor:pointer;font-size:11px">‹ Prev</button>
+          <span id="adm-page-info">—</span>
+          <button id="adm-next-btn" style="background:#2A2E39;color:#D1D4DC;border:none;border-radius:3px;padding:3px 10px;cursor:pointer;font-size:11px">Next ›</button>
+          <div style="flex:1"></div>
+          <span id="adm-total-rows"></span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Query tab -->
+    <div id="adm-tab-query" class="adm-panel" style="display:none;padding:16px;flex-direction:column;gap:10px">
+      <div style="font-size:12px;color:#787B86">Only SELECT queries are allowed (max 1000 rows returned).</div>
+      <textarea id="adm-query-input" rows="5"
+        style="width:100%;background:#131722;border:1px solid #2A2E39;color:#D1D4DC;border-radius:6px;padding:10px;font-size:12px;font-family:monospace;resize:vertical;outline:none"
+        placeholder="SELECT * FROM signals WHERE confidence = 'HIGH' LIMIT 50"></textarea>
+      <div style="display:flex;gap:8px;align-items:center">
+        <button id="adm-query-run" style="background:#2962FF;color:#fff;border:none;border-radius:4px;padding:7px 18px;font-size:12px;cursor:pointer">▶ Run Query</button>
+        <span id="adm-query-status" style="font-size:12px;color:#787B86"></span>
+      </div>
+      <div style="overflow:auto;max-height:55vh">
+        <table id="adm-query-result-table" style="width:100%;border-collapse:collapse;font-size:11px;white-space:nowrap">
+          <thead id="adm-query-thead"></thead>
+          <tbody id="adm-query-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Users tab -->
+    <div id="adm-tab-users" class="adm-panel" style="display:none;padding:16px">
+      <button id="admin-refresh-users-btn" style="background:#1E3A5F;color:#90CAF9;border:none;border-radius:4px;padding:6px 14px;font-size:12px;cursor:pointer;margin-bottom:12px">↻ Refresh</button>
+      <div style="overflow-x:auto">
+        <table style="width:100%;border-collapse:collapse;font-size:12px">
+          <thead>
+            <tr style="color:#787B86;border-bottom:1px solid #2A2E39">
+              <th style="text-align:left;padding:7px 10px">ID</th>
+              <th style="text-align:left;padding:7px 10px">Username</th>
+              <th style="text-align:left;padding:7px 10px">Email</th>
+              <th style="text-align:center;padding:7px 10px">2FA</th>
+              <th style="text-align:center;padding:7px 10px">Admin</th>
+              <th style="text-align:center;padding:7px 10px">Joined</th>
+              <th style="text-align:center;padding:7px 10px">Actions</th>
+            </tr>
+          </thead>
+          <tbody id="admin-users-body"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Danger Zone tab -->
+    <div id="adm-tab-danger" class="adm-panel" style="display:none;padding:24px">
+      <div style="font-size:12px;color:#787B86;margin-bottom:16px">DB Stats (click Refresh to update)</div>
+      <div id="admin-db-stats" style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:20px"></div>
+      <button id="admin-refresh-btn" style="background:#1E3A5F;color:#90CAF9;border:none;border-radius:4px;padding:6px 14px;font-size:12px;cursor:pointer;margin-bottom:24px">↻ Refresh Stats</button>
+      <div style="display:flex;flex-direction:column;gap:14px;max-width:480px">
+        <div style="background:#1A0A0A;border:1px solid #B71C1C;border-radius:6px;padding:16px">
+          <div style="font-size:13px;font-weight:600;color:#EF5350;margin-bottom:6px">Clear All Signals</div>
+          <div style="font-size:11px;color:#787B86;margin-bottom:10px">Deletes all signal rows. Candles, users, and triggers are kept.</div>
+          <button id="admin-clear-signals-btn" style="background:#B71C1C;color:#fff;border:none;border-radius:4px;padding:7px 16px;font-size:12px;cursor:pointer">🗑 Clear Signals</button>
+        </div>
+        <div style="background:#120A1A;border:1px solid #6A1B9A;border-radius:6px;padding:16px">
+          <div style="font-size:13px;font-weight:600;color:#CE93D8;margin-bottom:6px">Clear All Market Data</div>
+          <div style="font-size:11px;color:#787B86;margin-bottom:10px">Wipes signals, candles, orders, trade history, and trigger positions. Users and triggers are kept.</div>
+          <button id="admin-clear-all-btn" style="background:#4A148C;color:#fff;border:none;border-radius:4px;padding:7px 16px;font-size:12px;cursor:pointer">💣 Clear All Data</button>
+        </div>
+      </div>
+      <div id="admin-clear-msg" style="font-size:12px;margin-top:14px;color:#66BB6A"></div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ── Row Edit / Add Modal ──────────────────────────────────────────────── -->
+<div id="adm-row-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.85);z-index:9200;align-items:center;justify-content:center;padding:16px">
+  <div style="background:#1E222D;border:1px solid #2962FF;border-radius:10px;width:520px;max-width:96vw;max-height:90vh;display:flex;flex-direction:column">
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:14px 18px;border-bottom:1px solid #2A2E39;flex-shrink:0">
+      <span id="adm-row-modal-title" style="font-size:13px;font-weight:600;color:#90CAF9">Edit Row</span>
+      <button id="adm-row-modal-close" style="background:none;border:none;color:#787B86;font-size:18px;cursor:pointer">✕</button>
+    </div>
+    <div style="overflow-y:auto;padding:16px 18px;flex:1">
+      <div id="adm-row-form"></div>
+    </div>
+    <div style="padding:12px 18px;border-top:1px solid #2A2E39;display:flex;gap:8px;justify-content:flex-end;flex-shrink:0">
+      <button id="adm-row-modal-close2" onclick="document.getElementById('adm-row-modal').style.display='none'"
+        style="background:#2A2E39;color:#787B86;border:none;border-radius:4px;padding:7px 16px;font-size:12px;cursor:pointer">Cancel</button>
+      <button id="adm-row-save-btn"
+        style="background:#2962FF;color:#fff;border:none;border-radius:4px;padding:7px 16px;font-size:12px;cursor:pointer">Save</button>
+    </div>
+  </div>
+</div>
+
+<style>
+.adm-tab {
+  background: none; border: none; color: #787B86; font-size: 12px;
+  padding: 6px 14px; cursor: pointer; border-radius: 4px;
+}
+.adm-tab.active { background: #2A2E39; color: #CE93D8; }
+.adm-table-item {
+  padding: 7px 12px; font-size: 12px; cursor: pointer; color: #D1D4DC;
+  border-left: 2px solid transparent; white-space: nowrap; overflow: hidden;
+  text-overflow: ellipsis;
+}
+.adm-table-item:hover { background: #2A2E39; }
+.adm-table-item.active { border-left-color: #9C27B0; color: #CE93D8; background: #1E1730; }
+.adm-th {
+  padding: 7px 10px; text-align: left; color: #787B86; font-weight: 600;
+  border-bottom: 1px solid #2A2E39; background: #1E222D; cursor: pointer;
+  user-select: none; position: sticky; top: 0;
+}
+.adm-th:hover { color: #D1D4DC; }
+.adm-td {
+  padding: 5px 10px; border-bottom: 1px solid #1A1E2B; color: #D1D4DC;
+  max-width: 260px; overflow: hidden; text-overflow: ellipsis;
+}
+.adm-tr:nth-child(even) { background: #161922; }
+.adm-tr:hover { background: #1E2D40; }
+</style>
+
 <style>
 .auth-tab {
   flex:1; padding:8px; background:none; border:none; color:#787B86;
@@ -1085,7 +1295,6 @@
 .auth-error { font-size:12px; color:#EF5350; margin-top:8px; min-height:16px; }
 </style>
 
-<script src="https://unpkg.com/qrcode/build/qrcode.min.js"></script>
 <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
 <script src="/static/app.js"></script>
 </body>

@@ -4,6 +4,7 @@
 
 let authToken    = localStorage.getItem('auth_token') || null;
 let authUsername = localStorage.getItem('auth_username') || null;
+let authIsAdmin  = localStorage.getItem('auth_is_admin') === 'true';
 
 function authHeaders() {
   return authToken ? { 'Authorization': `Bearer ${authToken}` } : {};
@@ -69,9 +70,6 @@ function applyCurrencyDisplay() {
     btn.textContent  = '$ USDT';
     btn.style.color  = '#26A69A';
   }
-  // Update trigger amount label
-  const amtLbl = document.getElementById('trig-amount-lbl');
-  if (amtLbl) amtLbl.textContent = displayCurrency === 'INR' ? 'Amount (₹ INR)' : 'Amount ($ USDT)';
   updateTrigAmountConversion();
 }
 
@@ -79,15 +77,7 @@ function applyCurrencyDisplay() {
 function updateTrigAmountConversion() {
   const convEl = document.getElementById('trig-amount-conv');
   if (!convEl) return;
-  const raw = parseFloat(document.getElementById('trig-amount')?.value) || 0;
-  if (!raw) { convEl.textContent = ''; return; }
-  if (displayCurrency === 'INR') {
-    const usdt = raw / usdToInr;
-    convEl.textContent = `≈ $${usdt.toFixed(2)} USDT`;
-  } else {
-    const inr = raw * usdToInr;
-    convEl.textContent = `≈ ₹${inr.toLocaleString('en-IN', { maximumFractionDigits: 0 })}`;
-  }
+  convEl.textContent = '';   // trigger amount is always USDT — no conversion needed
 }
 
 // Currency toggle button
@@ -1079,15 +1069,8 @@ function openEditForm(t) {
   // Populate ADX / cooldown (show stored value or blank for "tier default")
   document.getElementById('trig-adx').value    = t.adx_threshold    != null ? t.adx_threshold    : '';
   document.getElementById('trig-cd').value      = t.cooldown_bars    != null ? t.cooldown_bars    : '';
-  // Show stored USDT amount in the current display currency
-  if (t.trade_amount_usdt != null) {
-    const dispAmt = displayCurrency === 'INR'
-      ? Math.round(t.trade_amount_usdt * usdToInr)
-      : t.trade_amount_usdt;
-    document.getElementById('trig-amount').value = dispAmt;
-  } else {
-    document.getElementById('trig-amount').value = '';
-  }
+  // Show stored USDT amount (always USDT)
+  document.getElementById('trig-amount').value = t.trade_amount_usdt != null ? t.trade_amount_usdt : '';
   updateTrigAmountConversion();
   applyTierToTriggerForm(t.interval);
   document.getElementById('trig-save-btn').textContent = 'Update Trigger';
@@ -1162,14 +1145,14 @@ document.getElementById('trig-save-btn').addEventListener('click', () => {
   const cdRaw     = document.getElementById('trig-cd').value.trim();
   const amountRaw = document.getElementById('trig-amount').value.trim();
   const amountDisplay = amountRaw !== '' ? parseFloat(amountRaw) : 0;
-  // Always store as USDT internally; convert from display currency
-  const amountUsdt = amountDisplay ? fromDisplay(amountDisplay) : 0;
+  // Amount field is always in USDT — no currency conversion needed
+  const amountUsdt = amountDisplay || 0;
 
   // Amount required on create
   if (!editId && amountUsdt < 1) {
     const amtInp = document.getElementById('trig-amount');
     amtInp.style.borderColor = '#EF5350';
-    btn.textContent = `✕ Amount required (min ${displayCurrency === 'INR' ? '₹83' : '$1'})`;
+    btn.textContent = '✕ Amount required (min $1 USDT)';
     setTimeout(() => {
       amtInp.style.borderColor = '';
       btn.textContent = 'Save Trigger';
@@ -1528,6 +1511,121 @@ function renderAdaptiveState(eng) {
   }
 }
 
+// ── Real CoinDCX Trades ───────────────────────────────────────────────────────
+
+function loadDcxTrades() {
+  const loadingEl = document.getElementById('dcx-trades-loading');
+  const bodyEl    = document.getElementById('dcx-trades-body');
+  const noEl      = document.getElementById('dcx-no-trades');
+  const sumCards  = document.getElementById('dcx-summary-cards');
+  const balWrap   = document.getElementById('dcx-balances-wrap');
+
+  loadingEl.style.display = '';
+  bodyEl.innerHTML = '';
+  noEl.style.display = 'none';
+  sumCards.style.display = 'none';
+  balWrap.style.display = 'none';
+
+  apiFetch('/api/trades/coindcx?limit=200')
+    .then(r => r.json())
+    .then(data => {
+      loadingEl.style.display = 'none';
+      if (data.error) {
+        noEl.textContent = data.error;
+        noEl.style.display = '';
+        return;
+      }
+      renderDcxTrades(data);
+    })
+    .catch(err => {
+      loadingEl.style.display = 'none';
+      noEl.textContent = 'Failed to load trades. Check CoinDCX API keys in Account Settings.';
+      noEl.style.display = '';
+    });
+}
+
+function renderDcxTrades(data) {
+  const setCard = (id, val, cls) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.textContent = val;
+    el.className = 'an-card-val' + (cls ? ' ' + cls : '');
+  };
+  const fmt2 = n => n != null ? n.toFixed(2) : '—';
+  const fmt4 = n => n != null ? n.toFixed(4) : '—';
+  const fmt6 = n => n != null ? n.toFixed(6) : '—';
+
+  const s = data.summary || {};
+
+  // Summary cards
+  const sumCards = document.getElementById('dcx-summary-cards');
+  if (s.total_bought_usdt != null) {
+    sumCards.style.display = '';
+    setCard('dcx-v-bought-usdt', '$' + fmt2(s.total_bought_usdt));
+    setCard('dcx-v-sold-usdt',   '$' + fmt2(s.total_sold_usdt));
+    setCard('dcx-v-fee-usdt',    '$' + fmt4(s.total_fee_usdt));
+    setCard('dcx-v-pnl-usdt',
+      (s.net_pnl_usdt >= 0 ? '+$' : '-$') + Math.abs(s.net_pnl_usdt).toFixed(2),
+      s.net_pnl_usdt >= 0 ? 'pos' : 'neg');
+  }
+
+  // Balances
+  const balWrap = document.getElementById('dcx-balances-wrap');
+  const balEl   = document.getElementById('dcx-balances');
+  if (data.balances && data.balances.length > 0) {
+    balWrap.style.display = '';
+    balEl.innerHTML = data.balances.map(b => {
+      const bal  = parseFloat(b.balance || 0);
+      const lock = parseFloat(b.locked_balance || 0);
+      const cur  = b.currency || '';
+      const totalBal = bal + lock;
+      return `<span style="background:#131722;border:1px solid #2A2E39;border-radius:4px;padding:3px 8px;font-size:11px;color:#D1D4DC">
+        <span style="color:#FF9800;font-weight:700">${cur}</span>
+        ${totalBal.toPrecision(5)}
+        ${lock > 0 ? `<span style="color:#787B86;font-size:9px">(${lock.toPrecision(4)} locked)</span>` : ''}
+      </span>`;
+    }).join('');
+  } else {
+    balWrap.style.display = 'none';
+  }
+
+  // Trade table
+  const bodyEl = document.getElementById('dcx-trades-body');
+  const noEl   = document.getElementById('dcx-no-trades');
+  const trades = data.trades || [];
+
+  if (trades.length === 0) {
+    bodyEl.innerHTML = '';
+    noEl.textContent = 'No trades found in your CoinDCX account.';
+    noEl.style.display = '';
+    return;
+  }
+  noEl.style.display = 'none';
+
+  bodyEl.innerHTML = trades.map(t => {
+    const isBuy    = t.side === 'BUY';
+    const dirColor = isBuy ? '#26A69A' : '#EF5350';
+    const label    = isBuy ? 'Total Cost incl. fees' : 'Total Revenue after fees';
+    const netColor = isBuy ? '#EF5350' : '#26A69A';
+    const sign     = isBuy ? '-' : '+';
+    const dt       = new Date(t.timestamp * 1000);
+    const ts       = dt.toLocaleDateString([], {month:'short',day:'numeric'}) + ' ' +
+                     dt.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
+    return `<tr>
+      <td style="font-weight:600;color:#D1D4DC">${t.market}</td>
+      <td style="font-weight:700;color:${dirColor}">${t.side}</td>
+      <td style="color:#D1D4DC">${t.quantity}</td>
+      <td>$${fmt4(t.price_usdt)}</td>
+      <td>$${fmt2(t.gross_usdt)}</td>
+      <td style="color:#787B86;font-size:10px" title="Fee paid">$${fmt6(t.fee_usdt)}</td>
+      <td style="color:${netColor};font-weight:600" title="${label}">${sign}$${fmt2(t.net_usdt)}</td>
+      <td style="color:#4C525E;font-size:10px">${ts}</td>
+    </tr>`;
+  }).join('');
+}
+
+document.getElementById('dcx-trades-refresh').addEventListener('click', loadDcxTrades);
+
 // ── Start ─────────────────────────────────────────────────────────────────────
 
 // Sync interval dropdown and apply correct tier defaults on page load
@@ -1584,10 +1682,13 @@ document.getElementById('login-form').addEventListener('submit', async e => {
   if (!r.ok) { errEl.textContent = data.error || data.detail || 'Login failed'; return; }
   authToken    = data.token;
   authUsername = data.username;
+  authIsAdmin  = !!data.is_admin;
   localStorage.setItem('auth_token',    authToken);
   localStorage.setItem('auth_username', authUsername);
+  localStorage.setItem('auth_is_admin', authIsAdmin);
   hideAuthModal();
   document.getElementById('logout-btn').style.display = '';
+  if (authIsAdmin) document.getElementById('admin-btn').style.display = '';
   initDashboard();
 });
 
@@ -1613,20 +1714,9 @@ document.getElementById('signup-form').addEventListener('submit', async e => {
   // Show QR setup step
   document.getElementById('signup-form').style.display = 'none';
   document.getElementById('totp-setup').style.display  = '';
-  // Generate QR code using qrcode.js
+  // Use server-generated QR code (SVG data URL)
   const qrImg = document.getElementById('totp-qr-img');
-  if (typeof QRCode !== 'undefined') {
-    qrImg.style.display = 'none';
-    const qrDiv = document.createElement('div');
-    qrDiv.id = 'totp-qr-canvas';
-    qrImg.parentNode.insertBefore(qrDiv, qrImg);
-    QRCode.toDataURL(data.totp_uri, { width: 180 }, (err, url) => {
-      if (!err) { qrImg.src = url; qrImg.style.display = ''; }
-    });
-  } else {
-    // Fallback: use Google Charts API for QR
-    qrImg.src = `https://chart.googleapis.com/chart?chs=180x180&cht=qr&chl=${encodeURIComponent(data.totp_uri)}`;
-  }
+  qrImg.src = data.qr_data_url;
   document.getElementById('totp-secret-text').textContent = data.totp_secret;
 });
 
@@ -1657,11 +1747,13 @@ document.getElementById('totp-confirm-btn').addEventListener('click', async () =
 
 // Logout
 document.getElementById('logout-btn').addEventListener('click', () => {
-  authToken = null; authUsername = null;
+  authToken = null; authUsername = null; authIsAdmin = false;
   localStorage.removeItem('auth_token');
   localStorage.removeItem('auth_username');
+  localStorage.removeItem('auth_is_admin');
   if (ws) { ws.close(); ws = null; }
   document.getElementById('logout-btn').style.display = 'none';
+  document.getElementById('admin-btn').style.display  = 'none';
   showAuthModal();
 });
 
@@ -1741,7 +1833,401 @@ async function checkAuth() {
     return;
   }
   document.getElementById('logout-btn').style.display = '';
+  if (authIsAdmin) document.getElementById('admin-btn').style.display = '';
   initDashboard();
 }
 
 checkAuth();
+
+// ── Admin Panel ───────────────────────────────────────────────────────────────
+
+// Tab switching
+document.querySelectorAll('.adm-tab').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.adm-tab').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.adm-panel').forEach(p => p.style.display = 'none');
+    btn.classList.add('active');
+    const panel = document.getElementById('adm-tab-' + btn.dataset.tab);
+    panel.style.display = btn.dataset.tab === 'browser' ? 'flex' : 'block';
+    if (btn.dataset.tab === 'users') adminLoadUsers();
+    if (btn.dataset.tab === 'danger') adminLoadStats();
+    if (btn.dataset.tab === 'browser') admLoadTableList();
+  });
+});
+
+// ── DB Browser ────────────────────────────────────────────────────────────────
+
+let _admCurrentTable = null;
+let _admCurrentPage  = 1;
+let _admOrderBy      = null;
+let _admOrderDir     = 'DESC';
+let _admAllTables    = [];
+
+async function admLoadTableList() {
+  const list = document.getElementById('adm-table-list');
+  list.innerHTML = '<div style="padding:8px 12px;color:#787B86;font-size:11px">Loading…</div>';
+  const r = await apiFetch('/api/admin/tables');
+  if (!r.ok) {
+    const err = await r.json().catch(() => ({}));
+    list.innerHTML = `<div style="padding:8px 12px;color:#EF5350;font-size:11px">
+      Error ${r.status}: ${err.detail || err.error || 'Failed'}<br>
+      <span style="color:#787B86">Try logging out and back in.</span>
+    </div>`;
+    return;
+  }
+  _admAllTables = await r.json();
+  if (!_admAllTables.length) {
+    list.innerHTML = '<div style="padding:8px 12px;color:#787B86;font-size:11px">No tables found</div>';
+    return;
+  }
+  list.innerHTML = _admAllTables.map(t =>
+    `<div class="adm-table-item" data-table="${t.name}" onclick="admSelectTable('${t.name}')">
+       <span>${t.name}</span>
+       <span style="float:right;color:#787B86;font-size:10px">${t.row_count.toLocaleString()}</span>
+     </div>`
+  ).join('');
+}
+
+async function admSelectTable(name) {
+  _admCurrentTable = name;
+  _admCurrentPage  = 1;
+  _admOrderBy      = null;
+  _admOrderDir     = 'DESC';
+  document.getElementById('adm-filter-col').value = '';
+  document.getElementById('adm-filter-val').value = '';
+  document.querySelectorAll('.adm-table-item').forEach(el => {
+    el.classList.toggle('active', el.dataset.table === name);
+  });
+  document.getElementById('adm-no-table').style.display = 'none';
+  document.getElementById('adm-data-table').style.display = '';
+  await admLoadPage();
+}
+
+let _admLastData = null;  // cache for edit modal column list
+
+async function admLoadPage() {
+  if (!_admCurrentTable) return;
+  const filterCol = document.getElementById('adm-filter-col').value.trim();
+  const filterVal = document.getElementById('adm-filter-val').value.trim();
+  const pageSize  = document.getElementById('adm-page-size').value;
+  const params = new URLSearchParams({
+    page: _admCurrentPage,
+    page_size: pageSize,
+    order_dir: _admOrderDir,
+  });
+  if (_admOrderBy) params.set('order_by', _admOrderBy);
+  if (filterCol)   params.set('filter_col', filterCol);
+  if (filterVal)   params.set('filter_val', filterVal);
+  const r = await apiFetch(`/api/admin/table/${_admCurrentTable}?${params}`);
+  if (!r.ok) return;
+  const data = await r.json();
+  _admLastData = data;
+
+  document.getElementById('adm-table-name').textContent = data.table;
+  document.getElementById('adm-page-info').textContent = `Page ${data.page} / ${data.pages}`;
+  document.getElementById('adm-total-rows').textContent = `${data.total.toLocaleString()} rows total`;
+
+  // Header: checkbox + rowid hidden + columns + actions
+  const thead = document.getElementById('adm-data-thead');
+  thead.innerHTML = `<tr>
+    <th class="adm-th" style="width:30px"><input type="checkbox" id="adm-select-all" onclick="admToggleAll(this)"></th>
+    ${data.columns.map(col =>
+      `<th class="adm-th" onclick="admSortBy('${col}')">${col}${_admOrderBy===col?(_admOrderDir==='ASC'?' ↑':' ↓'):''}</th>`
+    ).join('')}
+    <th class="adm-th" style="min-width:100px">Actions</th>
+  </tr>`;
+
+  // Rows: data.rows[i][0] = rowid, data.rows[i][1..] = column values
+  const tbody = document.getElementById('adm-data-tbody');
+  if (!data.rows.length) {
+    tbody.innerHTML = `<tr><td colspan="${data.columns.length + 2}" style="padding:20px;text-align:center;color:#787B86">No rows</td></tr>`;
+    document.getElementById('adm-prev-btn').disabled = data.page <= 1;
+    document.getElementById('adm-next-btn').disabled = data.page >= data.pages;
+    return;
+  }
+  tbody.innerHTML = data.rows.map(row => {
+    const rowid  = row[0];
+    const cells  = row.slice(1);  // actual column values
+    const cellsHtml = cells.map((cell, i) =>
+      `<td class="adm-td" title="${cell ?? ''}">${cell ?? '<span style="color:#555">null</span>'}</td>`
+    ).join('');
+    return `<tr class="adm-tr" data-rowid="${rowid}">
+      <td class="adm-td" style="text-align:center"><input type="checkbox" class="adm-row-cb" value="${rowid}"></td>
+      ${cellsHtml}
+      <td class="adm-td">
+        <button onclick="admEditRow(${rowid}, this)"
+          style="background:#1565C0;color:#fff;border:none;border-radius:3px;padding:2px 8px;font-size:11px;cursor:pointer;margin-right:3px">✏</button>
+        <button onclick="admDeleteRow(${rowid})"
+          style="background:#B71C1C;color:#fff;border:none;border-radius:3px;padding:2px 8px;font-size:11px;cursor:pointer">🗑</button>
+      </td>
+    </tr>`;
+  }).join('');
+
+  document.getElementById('adm-prev-btn').disabled = data.page <= 1;
+  document.getElementById('adm-next-btn').disabled = data.page >= data.pages;
+}
+
+function admToggleAll(cb) {
+  document.querySelectorAll('.adm-row-cb').forEach(c => c.checked = cb.checked);
+}
+
+function admSelectedRowids() {
+  return [...document.querySelectorAll('.adm-row-cb:checked')].map(c => parseInt(c.value));
+}
+
+// ── Row edit / add modal ──────────────────────────────────────────────────────
+
+function _admShowRowModal(title, rowData, onSave) {
+  if (!_admLastData) return;
+  const cols = _admLastData.columns;
+  const modal = document.getElementById('adm-row-modal');
+  document.getElementById('adm-row-modal-title').textContent = title;
+  const form = document.getElementById('adm-row-form');
+  form.innerHTML = cols.map(col => {
+    const val = rowData ? (rowData[col] ?? '') : '';
+    return `<div style="margin-bottom:10px">
+      <label style="font-size:11px;color:#787B86;display:block;margin-bottom:3px">${col}</label>
+      <input name="${col}" value="${String(val).replace(/"/g,'&quot;')}"
+        style="width:100%;background:#131722;border:1px solid #2A2E39;color:#D1D4DC;
+               border-radius:4px;padding:6px 8px;font-size:12px;box-sizing:border-box">
+    </div>`;
+  }).join('');
+  modal.style.display = 'flex';
+  document.getElementById('adm-row-save-btn').onclick = () => {
+    const inputs = form.querySelectorAll('input');
+    const data = {};
+    inputs.forEach(inp => { data[inp.name] = inp.value === '' ? null : inp.value; });
+    onSave(data);
+  };
+}
+
+function admEditRow(rowid, btn) {
+  if (!_admLastData) return;
+  const cols  = _admLastData.columns;
+  const tr    = btn.closest('tr');
+  const cells = [...tr.querySelectorAll('td.adm-td')].slice(1, -1);  // skip checkbox + actions
+  const rowData = {};
+  cols.forEach((col, i) => { rowData[col] = cells[i]?.textContent?.trim() || null; });
+
+  _admShowRowModal(`Edit row (rowid=${rowid})`, rowData, async (data) => {
+    const r = await apiFetch(`/api/admin/table/${_admCurrentTable}/row/${rowid}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ data }),
+    });
+    const res = await r.json();
+    document.getElementById('adm-row-modal').style.display = 'none';
+    if (r.ok) admLoadPage();
+    else alert('Error: ' + (res.error || 'Update failed'));
+  });
+}
+
+function admAddRow() {
+  _admShowRowModal('Add new row', null, async (data) => {
+    const r = await apiFetch(`/api/admin/table/${_admCurrentTable}/row`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ data }),
+    });
+    const res = await r.json();
+    document.getElementById('adm-row-modal').style.display = 'none';
+    if (r.ok) { _admCurrentPage = 1; admLoadPage(); }
+    else alert('Error: ' + (res.error || 'Insert failed'));
+  });
+}
+
+async function admDeleteRow(rowid) {
+  if (!confirm(`Delete row ${rowid} from "${_admCurrentTable}"?`)) return;
+  const r = await apiFetch(`/api/admin/table/${_admCurrentTable}/row/${rowid}`, { method: 'DELETE' });
+  if (r.ok) admLoadPage();
+  else { const d = await r.json(); alert('Error: ' + (d.error || 'Delete failed')); }
+}
+
+async function admDeleteSelected() {
+  const rowids = admSelectedRowids();
+  if (!rowids.length) { alert('No rows selected.'); return; }
+  if (!confirm(`Delete ${rowids.length} selected row(s) from "${_admCurrentTable}"?`)) return;
+  const r = await apiFetch(`/api/admin/table/${_admCurrentTable}/rows`, {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ rowids }),
+  });
+  const d = await r.json();
+  if (r.ok) { admLoadPage(); admLoadTableList(); }
+  else alert('Error: ' + (d.error || 'Delete failed'));
+}
+
+async function admDeleteAllRows() {
+  if (!confirm(`Delete ALL rows from "${_admCurrentTable}"? This cannot be undone.`)) return;
+  const r = await apiFetch(`/api/admin/table/${_admCurrentTable}/rows`, {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ rowids: null }),
+  });
+  const d = await r.json();
+  if (r.ok) { admLoadPage(); admLoadTableList(); }
+  else alert('Error: ' + (d.error || 'Delete failed'));
+}
+
+document.getElementById('adm-row-modal-close').addEventListener('click', () => {
+  document.getElementById('adm-row-modal').style.display = 'none';
+});
+
+function admSortBy(col) {
+  if (_admOrderBy === col) {
+    _admOrderDir = _admOrderDir === 'ASC' ? 'DESC' : 'ASC';
+  } else {
+    _admOrderBy  = col;
+    _admOrderDir = 'DESC';
+  }
+  _admCurrentPage = 1;
+  admLoadPage();
+}
+
+document.getElementById('adm-prev-btn').addEventListener('click', () => {
+  if (_admCurrentPage > 1) { _admCurrentPage--; admLoadPage(); }
+});
+document.getElementById('adm-next-btn').addEventListener('click', () => {
+  _admCurrentPage++;
+  admLoadPage();
+});
+document.getElementById('adm-filter-btn').addEventListener('click', () => {
+  _admCurrentPage = 1; admLoadPage();
+});
+document.getElementById('adm-filter-clear').addEventListener('click', () => {
+  document.getElementById('adm-filter-col').value = '';
+  document.getElementById('adm-filter-val').value = '';
+  _admCurrentPage = 1; admLoadPage();
+});
+document.getElementById('adm-page-size').addEventListener('change', () => {
+  _admCurrentPage = 1; admLoadPage();
+});
+
+// ── Query editor ─────────────────────────────────────────────────────────────
+
+document.getElementById('adm-query-run').addEventListener('click', async () => {
+  const sql = document.getElementById('adm-query-input').value.trim();
+  if (!sql) return;
+  document.getElementById('adm-query-status').textContent = 'Running…';
+  const r = await apiFetch('/api/admin/query', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sql }),
+  });
+  const data = await r.json();
+  if (!r.ok) {
+    document.getElementById('adm-query-status').textContent = '✗ ' + (data.error || 'Error');
+    document.getElementById('adm-query-thead').innerHTML = '';
+    document.getElementById('adm-query-tbody').innerHTML = '';
+    return;
+  }
+  document.getElementById('adm-query-status').textContent =
+    `✓ ${data.count} row${data.count !== 1 ? 's' : ''}`;
+  document.getElementById('adm-query-thead').innerHTML =
+    '<tr>' + data.columns.map(c => `<th class="adm-th">${c}</th>`).join('') + '</tr>';
+  document.getElementById('adm-query-tbody').innerHTML = data.rows.map(row =>
+    `<tr class="adm-tr">${row.map(cell =>
+      `<td class="adm-td">${cell ?? '<span style="color:#555">null</span>'}</td>`
+    ).join('')}</tr>`
+  ).join('');
+});
+
+// Allow Ctrl+Enter to run query
+document.getElementById('adm-query-input').addEventListener('keydown', e => {
+  if (e.ctrlKey && e.key === 'Enter') document.getElementById('adm-query-run').click();
+});
+
+// ── Users tab ─────────────────────────────────────────────────────────────────
+
+async function adminLoadUsers() {
+  const r = await apiFetch('/api/admin/users');
+  if (!r.ok) return;
+  const users = await r.json();
+  document.getElementById('admin-users-body').innerHTML = users.map(u => `
+    <tr style="border-bottom:1px solid #2A2E39">
+      <td style="padding:7px 10px;color:#787B86">${u.id}</td>
+      <td style="padding:7px 10px;font-weight:600;color:#D1D4DC">${u.username}</td>
+      <td style="padding:7px 10px;color:#787B86;font-size:11px">${u.email}</td>
+      <td style="padding:7px 10px;text-align:center">${u.totp_enabled ? '✅' : '—'}</td>
+      <td style="padding:7px 10px;text-align:center">${u.is_admin ? '⚡' : '—'}</td>
+      <td style="padding:7px 10px;text-align:center;color:#787B86;font-size:11px">${new Date(u.created_at*1000).toLocaleDateString()}</td>
+      <td style="padding:7px 10px;display:flex;gap:4px;justify-content:center">
+        <button onclick="adminToggleAdmin(${u.id},'${u.username}')"
+          style="background:#4A148C;color:#CE93D8;border:none;border-radius:3px;padding:3px 8px;font-size:11px;cursor:pointer">
+          ${u.is_admin ? 'Revoke Admin' : 'Make Admin'}
+        </button>
+        <button onclick="adminDeleteUser(${u.id},'${u.username}')"
+          style="background:#B71C1C;color:#fff;border:none;border-radius:3px;padding:3px 8px;font-size:11px;cursor:pointer">
+          Delete
+        </button>
+      </td>
+    </tr>
+  `).join('');
+}
+
+async function adminToggleAdmin(userId, username) {
+  if (!confirm(`Toggle admin status for "${username}"?`)) return;
+  const r = await apiFetch(`/api/admin/users/${userId}/toggle-admin`, { method: 'PUT' });
+  const data = await r.json();
+  if (r.ok) adminLoadUsers(); else alert(data.error || 'Failed');
+}
+
+async function adminDeleteUser(userId, username) {
+  if (!confirm(`Permanently delete "${username}" and all their data? Cannot be undone.`)) return;
+  const r = await apiFetch(`/api/admin/users/${userId}`, { method: 'DELETE' });
+  const data = await r.json();
+  if (r.ok) adminLoadUsers(); else alert(data.error || 'Failed');
+}
+
+document.getElementById('admin-refresh-users-btn').addEventListener('click', adminLoadUsers);
+
+// ── Danger zone ───────────────────────────────────────────────────────────────
+
+function _statCard(label, value) {
+  return `<div style="background:#131722;border:1px solid #2A2E39;border-radius:6px;padding:8px 14px;min-width:90px;text-align:center">
+    <div style="font-size:18px;font-weight:700;color:#CE93D8">${value}</div>
+    <div style="font-size:10px;color:#787B86;margin-top:2px;text-transform:uppercase">${label}</div>
+  </div>`;
+}
+
+async function adminLoadStats() {
+  const r = await apiFetch('/api/admin/db-stats');
+  if (!r.ok) return;
+  const stats = await r.json();
+  document.getElementById('admin-db-stats').innerHTML =
+    Object.entries(stats).map(([k, v]) => _statCard(k, v)).join('');
+}
+
+document.getElementById('admin-refresh-btn').addEventListener('click', adminLoadStats);
+
+document.getElementById('admin-clear-signals-btn').addEventListener('click', async () => {
+  if (!confirm('Delete ALL signals from the database? Cannot be undone.')) return;
+  const r = await apiFetch('/api/admin/clear-signals', { method: 'POST' });
+  const data = await r.json();
+  if (r.ok) {
+    document.getElementById('admin-clear-msg').textContent = `✓ Deleted ${data.deleted} signals.`;
+    adminLoadStats();
+  }
+});
+
+document.getElementById('admin-clear-all-btn').addEventListener('click', async () => {
+  if (!confirm('Wipe signals, candles, orders and trade history? Users/triggers kept. Cannot be undone.')) return;
+  const r = await apiFetch('/api/admin/clear-all', { method: 'POST' });
+  const data = await r.json();
+  if (r.ok) {
+    const counts = Object.entries(data.deleted).map(([k,v]) => `${k}: ${v}`).join(', ');
+    document.getElementById('admin-clear-msg').textContent = `✓ ${counts}`;
+    adminLoadStats();
+  }
+});
+
+// ── Open / close admin modal ──────────────────────────────────────────────────
+
+document.getElementById('admin-btn').addEventListener('click', () => {
+  document.getElementById('admin-modal').style.display = 'flex';
+  admLoadTableList();  // default: DB Browser tab
+});
+
+document.getElementById('admin-close').addEventListener('click', () => {
+  document.getElementById('admin-modal').style.display = 'none';
+});

@@ -28,10 +28,11 @@ def verify_password(plain: str, hashed: str) -> bool:
 
 # ── JWT ──────────────────────────────────────────────────────────────────────
 
-def create_jwt(user_id: int, username: str) -> str:
+def create_jwt(user_id: int, username: str, is_admin: bool = False) -> str:
     payload = {
         "sub":      str(user_id),
         "username": username,
+        "is_admin": is_admin,
         "iat":      int(time.time()),
         "exp":      int(time.time()) + JWT_EXPIRY_S,
     }

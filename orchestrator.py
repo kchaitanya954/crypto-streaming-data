@@ -130,7 +130,12 @@ async def background_signal_worker(db, tg_bot, exchange, settings) -> None:
     while True:
         try:
             triggers = await queries.get_triggers(db, active_only=True)
-            pairs = {(t["symbol"].lower(), t["interval"]) for t in triggers}
+            # Only stream pairs for triggers that belong to a real user
+            pairs = {
+                (t["symbol"].lower(), t["interval"])
+                for t in triggers
+                if t.get("user_id") is not None
+            }
 
             # Start tasks for new pairs
             for sym, iv in pairs:
