@@ -148,33 +148,13 @@ async def execute_trigger_trade(
 
                 # ── Adaptive position sizing ─────────────────────────────────
                 # Scale the trigger budget by the adaptive engine's recommended %.
-                # CoinDCX minimum order is ~$5 USDT.
-                # Rule: never invest MORE than the trigger budget; never silently
-                #       bump a small budget to $5.  If adaptive amount < $5 but
-                #       the full budget covers it, use $5 as the floor.  If even
-                #       the full budget is < $5, tell the user and skip.
-                COINDCX_MIN_USDT = 5.0
+                # No hardcoded USDT floor — CoinDCX will reject if truly too small
+                # and the error will surface in logs/Telegram.
                 adaptive_pct  = _adaptive_engine.buy_pct_for(signal.confidence, signal.adx_val)
                 adaptive_usdt = round(amount * adaptive_pct / 100.0, 4)
-
-                if adaptive_usdt < COINDCX_MIN_USDT:
-                    if amount >= COINDCX_MIN_USDT:
-                        # Budget is sufficient — use the exchange minimum as the floor
-                        adaptive_usdt = COINDCX_MIN_USDT
-                    else:
-                        # Budget itself is below CoinDCX minimum — can't trade
-                        _log.warning(
-                            "Trigger %d: trigger budget $%.2f is below CoinDCX minimum $%.2f"
-                            " — increase trigger amount to at least $%.0f",
-                            trigger_id, amount, COINDCX_MIN_USDT, COINDCX_MIN_USDT,
-                        )
-                        if tg_bot:
-                            await send_trade_error(
-                                tg_bot, tg_chat_id, trigger_id, symbol, "BUY",
-                                f"Trigger budget ${amount:.2f} is below CoinDCX minimum "
-                                f"${COINDCX_MIN_USDT:.0f} — edit trigger and set amount ≥ ${COINDCX_MIN_USDT:.0f}",
-                            )
-                        return
+                # Never invest less than $0.50 (sanity guard against near-zero adaptive_pct)
+                if adaptive_usdt < 0.5:
+                    adaptive_usdt = round(amount, 4)
 
                 _log.info("Trigger %d BUY sizing: budget=$%.2f  adaptive=%.1f%%  order=$%.2f",
                           trigger_id, amount, adaptive_pct, adaptive_usdt)
@@ -297,35 +277,28 @@ async def execute_trigger_trade(
                     _log.warning("Trigger %d: could not verify balance before SELL (%s) — proceeding",
                                  trigger_id, bal_exc)
 
-                # CoinDCX minimum order: ~$5 USDT equivalent
-                min_qty   = max(5.0 / signal.entry_price, 1e-6)
+                # Dust guard: if the full position is worth < $0.50, just clear DB
                 full_qty  = round(pos["coins_held"], 8)
                 dust_usdt = full_qty * signal.entry_price
+                if dust_usdt < 0.5:
+                    _log.warning(
+                        "Trigger %d: position %.8f %s (~$%.2f) is dust — clearing DB",
+                        trigger_id, full_qty, base_currency, dust_usdt,
+                    )
+                    await queries.upsert_trigger_position(
+                        db, trigger_id, symbol, 0.0, 0.0, 0.0
+                    )
+                    return
 
-                if coins_to_sell < min_qty:
-                    if dust_usdt < 2.0:
-                        # Position is dust — clear from DB without placing order
-                        _log.warning(
-                            "Trigger %d: position %.8f %s (~$%.2f) is dust — clearing DB",
-                            trigger_id, full_qty, base_currency, dust_usdt,
-                        )
-                        await queries.upsert_trigger_position(
-                            db, trigger_id, symbol, 0.0, 0.0, 0.0
-                        )
-                        return
-                    elif full_qty >= min_qty:
-                        # Escalate: sell full position instead of partial
-                        _log.info(
-                            "Trigger %d: partial SELL %.8f below min — escalating to full %.8f %s",
-                            trigger_id, coins_to_sell, full_qty, base_currency,
-                        )
-                        coins_to_sell = full_qty
-                    else:
-                        _log.warning(
-                            "Trigger %d: SELL qty %.8f below min %.8f %s (~$5) — skipping",
-                            trigger_id, coins_to_sell, min_qty, base_currency,
-                        )
-                        return
+                # If partial sell is smaller than the full position and the partial
+                # amount is a trivially small fraction, escalate to full position sell
+                partial_usdt = coins_to_sell * signal.entry_price
+                if partial_usdt < 0.5 and full_qty > coins_to_sell:
+                    _log.info(
+                        "Trigger %d: partial SELL $%.2f too small — escalating to full %.8f %s ($%.2f)",
+                        trigger_id, partial_usdt, full_qty, base_currency, dust_usdt,
+                    )
+                    coins_to_sell = full_qty
 
                 result = await exchange.create_order(
                     side="sell", market=symbol,
