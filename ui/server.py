@@ -850,12 +850,18 @@ async def api_delete_signals(
 
 @app.get("/api/triggers")
 async def api_get_triggers(request: Request, user: dict = Depends(_current_user)):
-    """List triggers belonging to the authenticated user."""
+    """List triggers belonging to the authenticated user, enriched with position data."""
     db = getattr(request.app.state, "db", None)
     if db is None:
         return []
-    user_id = int(user["sub"])
-    return await queries.get_triggers(db, active_only=False, user_id=user_id)
+    user_id  = int(user["sub"])
+    triggers = await queries.get_triggers(db, active_only=False, user_id=user_id)
+    # Attach current position data to each trigger
+    for trig in triggers:
+        pos = await queries.get_trigger_position(db, trig["id"])
+        trig["coins_held"] = float(pos["coins_held"]) if pos else 0.0
+        trig["avg_entry"]  = float(pos["avg_entry"])  if pos else 0.0
+    return triggers
 
 
 @app.post("/api/triggers", status_code=201)
@@ -986,6 +992,26 @@ async def api_delete_trigger(
             trig["symbol"], trig["interval"], trig["min_confidence"],
         )
     return {"ok": True, "signals_deleted": signals_deleted}
+
+
+@app.delete("/api/triggers/{trigger_id}/position")
+async def api_reset_trigger_position(
+    request: Request,
+    trigger_id: int,
+    user: dict = Depends(_current_user),
+):
+    """
+    Clear the DB position for a trigger (coins_held → 0).
+    Use when the DB is out of sync with the exchange (e.g. coins sold manually).
+    """
+    db = getattr(request.app.state, "db", None)
+    if db is None:
+        return JSONResponse({"error": "DB not ready"}, status_code=503)
+    trig = await queries.get_trigger(db, trigger_id)
+    if not trig or trig.get("user_id") != int(user["sub"]):
+        raise HTTPException(status_code=404, detail="Trigger not found")
+    await queries.upsert_trigger_position(db, trigger_id, trig["symbol"], 0.0, 0.0, 0.0)
+    return {"ok": True, "message": f"Position cleared for trigger #{trigger_id}"}
 
 
 # ── Analytics endpoint ─────────────────────────────────────────────────────────

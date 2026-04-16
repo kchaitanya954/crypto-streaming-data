@@ -1020,6 +1020,13 @@ function renderTriggers(list) {
         : `$${t.trade_amount_usdt.toFixed(2)}`;
       amtLabel = `<span style="font-size:8px;color:#FF9800;font-weight:600">${amtDisp}</span>`;
     }
+    const hasPosition = t.coins_held > 1e-8;
+    const posLabel = hasPosition
+      ? `<span class="trig-pos-badge" title="Open position: ${t.coins_held.toFixed(6)} @ $${(t.avg_entry||0).toFixed(4)} — click to reset if stale"
+             style="font-size:8px;color:#FF9800;background:rgba(255,152,0,0.12);border:1px solid rgba(255,152,0,0.3);border-radius:3px;padding:1px 4px;cursor:pointer">
+           ●pos</span>`
+      : '';
+
     row.innerHTML =
       `<input type="checkbox" class="trig-cb trig-row-cb" data-id="${t.id}" />` +
       nameLabel +
@@ -1027,10 +1034,20 @@ function renderTriggers(list) {
       `<span class="trig-iv">${t.interval}</span>` +
       `<span class="trig-conf trig-conf-${t.min_confidence}">${t.min_confidence}</span>` +
       amtLabel +
+      posLabel +
       (adxHint || cdHint ? `<span style="font-size:8px;color:#4C525E">${adxHint}${cdHint}</span>` : '') +
       `<span class="trig-edit" title="Edit">✏</span>` +
       `<span class="trig-toggle" title="${t.active ? 'Disable' : 'Enable'}">${t.active ? '✓' : '○'}</span>` +
       `<span class="trig-del" title="Delete">✕</span>`;
+
+    if (hasPosition) {
+      row.querySelector('.trig-pos-badge').addEventListener('click', () => {
+        if (!confirm(`Reset open position for ${t.symbol} trigger #${t.id}?\n\nOnly do this if the position is stale (coins already sold elsewhere). This clears ${t.coins_held.toFixed(6)} coins from the DB.`)) return;
+        apiFetch(`/api/triggers/${t.id}/position`, { method: 'DELETE' })
+          .then(r => r.json())
+          .then(d => { if (d.ok) loadTriggers(); else alert(d.error || 'Reset failed'); });
+      });
+    }
 
     row.querySelector('.trig-row-cb').addEventListener('change', e => {
       const id = parseInt(e.target.dataset.id, 10);

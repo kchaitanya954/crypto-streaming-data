@@ -226,7 +226,8 @@ async def execute_trigger_trade(
             elif signal.direction == "SELL":
                 pos = await queries.get_trigger_position(db, trigger_id)
                 if not pos or pos["coins_held"] < 1e-8:
-                    return  # nothing to sell
+                    _log.info("Trigger %d SELL skipped: no coins held in DB", trigger_id)
+                    return
 
                 # For stop-loss / take-profit, always sell the full position
                 if reason in ("stop_loss", "take_profit"):
@@ -236,6 +237,46 @@ async def execute_trigger_trade(
 
                 coins_to_sell = round(pos["coins_held"] * sell_ratio, 8)
                 if coins_to_sell < 1e-8:
+                    return
+
+                # Verify actual coin balance on exchange — DB position may be
+                # stale (e.g. coins sold manually or from a previous session).
+                base_currency = symbol.upper().replace("USDT", "")
+                try:
+                    balances = await exchange.get_balances()
+                    coin_row  = next(
+                        (b for b in balances if b.get("currency") == base_currency), None
+                    )
+                    actual_bal = float(coin_row.get("balance", 0)) if coin_row else 0.0
+                    if actual_bal < 1e-8:
+                        _log.warning(
+                            "Trigger %d SELL skipped: DB shows %.8f %s but exchange balance is %.8f"
+                            " — clearing stale DB position",
+                            trigger_id, coins_to_sell, base_currency, actual_bal,
+                        )
+                        # Clear the stale position so future BUYs work correctly
+                        await queries.upsert_trigger_position(
+                            db, trigger_id, symbol, 0.0, 0.0, 0.0
+                        )
+                        return
+                    # Cap sell quantity to what we actually hold (prevents over-sell)
+                    if coins_to_sell > actual_bal:
+                        _log.warning(
+                            "Trigger %d: capping sell %.8f → %.8f %s (exchange balance)",
+                            trigger_id, coins_to_sell, actual_bal, base_currency,
+                        )
+                        coins_to_sell = round(actual_bal, 8)
+                except Exception as bal_exc:
+                    _log.warning("Trigger %d: could not verify balance before SELL (%s) — proceeding",
+                                 trigger_id, bal_exc)
+
+                # CoinDCX minimum order: ~$5 USDT equivalent
+                min_qty = max(5.0 / signal.entry_price, 1e-6)
+                if coins_to_sell < min_qty:
+                    _log.warning(
+                        "Trigger %d: SELL qty %.8f below min %.8f %s (~$5) — skipping",
+                        trigger_id, coins_to_sell, min_qty, base_currency,
+                    )
                     return
 
                 result = await exchange.create_order(

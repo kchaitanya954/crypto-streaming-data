@@ -61,7 +61,20 @@ class CoinDCXClient:
             data=body_str,
             headers=headers,
         ) as resp:
-            resp.raise_for_status()
+            if not resp.ok:
+                # Capture the response body so the actual CoinDCX error message
+                # appears in logs instead of just "400 Bad Request".
+                try:
+                    err_body = await resp.text()
+                except Exception:
+                    err_body = "<unreadable>"
+                from aiohttp import ClientResponseError
+                raise ClientResponseError(
+                    resp.request_info, resp.history,
+                    status=resp.status,
+                    message=f"{resp.reason} — {err_body}",
+                    headers=resp.headers,
+                )
             return await resp.json()
 
     async def _get(self, path: str, params: Optional[dict] = None) -> dict:
