@@ -90,21 +90,47 @@ async def execute_trigger_trade(
 
             # ── BUY ──────────────────────────────────────────────────────────
             if signal.direction == "BUY":
-                cb_active = (
-                    _adaptive_engine.consecutive_losses >= 3
-                    or _adaptive_engine.current_drawdown_pct >= 10
-                )
-                if cb_active:
-                    _log.warning("Trigger %d: circuit breaker active (losses=%d DD=%.1f%%) — skipping BUY",
-                                 trigger_id, _adaptive_engine.consecutive_losses,
-                                 _adaptive_engine.current_drawdown_pct)
+                losses = _adaptive_engine.consecutive_losses
+                dd     = _adaptive_engine.current_drawdown_pct
+
+                # ── Extreme drawdown: only hard stop (genuine emergency) ──────
+                if dd >= 20.0:
+                    _log.warning("Trigger %d: HARD STOP — portfolio down %.1f%% — skipping BUY",
+                                 trigger_id, dd)
                     if tg_bot:
                         await send_trade_error(
                             tg_bot, tg_chat_id, trigger_id, symbol, "BUY",
-                            f"Circuit breaker active — {_adaptive_engine.consecutive_losses} consecutive losses,"
-                            f" {_adaptive_engine.current_drawdown_pct:.1f}% drawdown",
+                            f"Hard stop: portfolio drawdown {dd:.1f}% (>20%) — resume manually after review",
                         )
                     return
+
+                # ── Adaptive signal filter (tighten criteria, keep trading) ───
+                # After real consecutive losses, we don't STOP — we get SELECTIVE.
+                # Adaptive position sizing already reduces size; this layer
+                # additionally demands stronger signal quality.
+                if losses >= 5:
+                    # 5+ real losses: only act on HIGH confidence with strong ADX
+                    if signal.confidence != "HIGH":
+                        _log.info("Trigger %d: adaptive filter (5+ losses) — skipping %s confidence BUY, need HIGH",
+                                  trigger_id, signal.confidence)
+                        return
+                    if (signal.adx_val or 0) < 30:
+                        _log.info("Trigger %d: adaptive filter (5+ losses) — skipping ADX=%.1f BUY, need ≥30",
+                                  trigger_id, signal.adx_val or 0)
+                        return
+                    _log.info("Trigger %d: adaptive filter PASSED (5+ losses, HIGH+ADX≥30)", trigger_id)
+
+                elif losses >= 3:
+                    # 3-4 real losses: raise bar to HIGH confidence only
+                    if signal.confidence not in ("HIGH", "MEDIUM"):
+                        _log.info("Trigger %d: adaptive filter (3+ losses) — skipping LOW confidence BUY",
+                                  trigger_id)
+                        return
+                    if signal.confidence == "MEDIUM" and (signal.adx_val or 0) < 25:
+                        _log.info("Trigger %d: adaptive filter (3+ losses) — MEDIUM needs ADX≥25, got %.1f",
+                                  trigger_id, signal.adx_val or 0)
+                        return
+                    _log.info("Trigger %d: adaptive filter PASSED (3+ losses, %s confidence)", trigger_id, signal.confidence)
 
                 # ── Max concurrent open positions check ──────────────────────
                 open_count = await queries.get_open_positions_count(db, user_id)
@@ -240,22 +266,19 @@ async def execute_trigger_trade(
                     coins_remaining, pos["avg_entry"], usdt_remaining,
                 )
 
-                # Portfolio value for adaptive engine update
-                try:
-                    balances_after = await exchange.get_balances()
-                    portfolio_val = sum(
-                        float(b.get("balance", 0))
-                        for b in balances_after
-                        if b.get("currency") == "USDT"
-                    )
-                except Exception:
-                    portfolio_val = _adaptive_engine.peak_portfolio
-
-                async with _engine_lock:
-                    _adaptive_engine.update([{"pnl_pct": pnl_pct, "portfolio_val": portfolio_val}])
-
-                from database import queries as _q
-                await _q.save_adaptive_state(db, _adaptive_engine.to_dict())
+                # ── Update adaptive engine with full real trade history ────────
+                # Read ALL completed real trades (not just this one) so the
+                # rolling window, win-rate, and drawdown are always accurate.
+                all_pnls = await queries.get_real_completed_pnls(db)
+                if all_pnls:
+                    running = 100.0
+                    enriched = []
+                    for t in all_pnls:
+                        running = running * (1 + t["pnl_pct"] / 100)
+                        enriched.append({"pnl_pct": t["pnl_pct"], "portfolio_val": running})
+                    async with _engine_lock:
+                        _adaptive_engine.update(enriched)
+                await queries.save_adaptive_state(db, _adaptive_engine.to_dict())
 
                 _log.info(
                     "Trigger %d SELL(%s): %.8f %s @ %.4f  ratio=%.0f%%  PnL=%.4f%%  remaining=%.8f",

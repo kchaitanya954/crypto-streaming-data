@@ -93,9 +93,23 @@ async def _get_user_exchange(db, user_id: int, request: Request = None):
 # ── Pydantic models ────────────────────────────────────────────────────────────
 
 class RegisterRequest(BaseModel):
-    username: str
-    email:    str
-    password: str
+    username:         str
+    email:            str
+    password:         str
+    confirm_password: str = ""   # optional — validated if provided
+
+class ChangePasswordRequest(BaseModel):
+    current_password:  str
+    new_password:      str
+    confirm_password:  str
+
+class ForgotPasswordRequest(BaseModel):
+    email: str
+
+class ResetPasswordRequest(BaseModel):
+    token:            str
+    new_password:     str
+    confirm_password: str
 
 class LoginRequest(BaseModel):
     username:  str
@@ -153,6 +167,8 @@ async def api_register(request: Request, body: RegisterRequest):
         return JSONResponse({"error": "DB not ready"}, status_code=503)
     if len(body.password) < 8:
         return JSONResponse({"error": "Password must be at least 8 characters"}, status_code=400)
+    if body.confirm_password and body.password != body.confirm_password:
+        return JSONResponse({"error": "Passwords do not match"}, status_code=400)
 
     from auth.security import hash_password, generate_totp_secret, get_totp_uri
     existing = await queries.get_user_by_username(db, body.username)
@@ -250,6 +266,119 @@ async def api_me(request: Request, user: dict = Depends(_current_user)):
         "username": user["username"],
         "is_admin": bool(user.get("is_admin")),
     }
+
+
+@app.post("/api/auth/change-password")
+async def api_change_password(
+    request: Request,
+    body: ChangePasswordRequest,
+    user: dict = Depends(_current_user),
+):
+    """Change password for the currently logged-in user."""
+    db = getattr(request.app.state, "db", None)
+    if db is None:
+        return JSONResponse({"error": "DB not ready"}, status_code=503)
+    if len(body.new_password) < 8:
+        return JSONResponse({"error": "New password must be at least 8 characters"}, status_code=400)
+    if body.new_password != body.confirm_password:
+        return JSONResponse({"error": "New passwords do not match"}, status_code=400)
+
+    from auth.security import verify_password, hash_password
+    user_row = await queries.get_user_by_id(db, int(user["sub"]))
+    if not user_row or not verify_password(body.current_password, user_row["password_hash"]):
+        return JSONResponse({"error": "Current password is incorrect"}, status_code=401)
+
+    new_hash = hash_password(body.new_password)
+    await queries.update_password(db, int(user["sub"]), new_hash)
+    return {"ok": True, "message": "Password updated successfully"}
+
+
+@app.post("/api/auth/forgot-password")
+async def api_forgot_password(request: Request, body: ForgotPasswordRequest):
+    """
+    Generate a password-reset token and email it to the user.
+    Silently succeeds even if email not found (prevents user enumeration).
+    Requires SMTP_HOST env var — silently skips if not configured.
+    """
+    db = getattr(request.app.state, "db", None)
+    if db is None:
+        return JSONResponse({"error": "DB not ready"}, status_code=503)
+
+    import os, secrets
+    user_row = await queries.get_user_by_email(db, body.email.strip())
+    if user_row:
+        token   = secrets.token_urlsafe(32)
+        expiry  = int(_time.time()) + 3600  # 1 hour
+        await queries.set_password_reset_token(db, user_row["id"], token, expiry)
+
+        smtp_host = os.getenv("SMTP_HOST", "")
+        if smtp_host:
+            try:
+                await _send_reset_email(body.email, user_row["username"], token, request)
+            except Exception as exc:
+                _log.error("Failed to send reset email to %s: %s", body.email, exc)
+
+    # Always return success (never reveal whether email exists)
+    return {"ok": True, "message": "If that email is registered, a reset link has been sent"}
+
+
+@app.post("/api/auth/reset-password")
+async def api_reset_password(request: Request, body: ResetPasswordRequest):
+    """Validate reset token and update password."""
+    db = getattr(request.app.state, "db", None)
+    if db is None:
+        return JSONResponse({"error": "DB not ready"}, status_code=503)
+    if len(body.new_password) < 8:
+        return JSONResponse({"error": "Password must be at least 8 characters"}, status_code=400)
+    if body.new_password != body.confirm_password:
+        return JSONResponse({"error": "Passwords do not match"}, status_code=400)
+
+    from auth.security import hash_password
+    user_row = await queries.get_user_by_reset_token(db, body.token.strip())
+    if not user_row:
+        return JSONResponse({"error": "Invalid or expired reset link"}, status_code=400)
+    if int(_time.time()) > user_row.get("password_reset_expiry", 0):
+        return JSONResponse({"error": "Reset link has expired — request a new one"}, status_code=400)
+
+    new_hash = hash_password(body.new_password)
+    await queries.update_password(db, user_row["id"], new_hash)
+    await queries.clear_password_reset_token(db, user_row["id"])
+    return {"ok": True, "message": "Password reset successfully — you can now log in"}
+
+
+async def _send_reset_email(email: str, username: str, token: str, request: Request) -> None:
+    """Send a password-reset email via SMTP (configured via env vars)."""
+    import os, smtplib
+    from email.mime.text import MIMEText
+
+    smtp_host = os.getenv("SMTP_HOST", "")
+    smtp_port = int(os.getenv("SMTP_PORT", "587"))
+    smtp_user = os.getenv("SMTP_USER", "")
+    smtp_pass = os.getenv("SMTP_PASS", "")
+    from_addr = os.getenv("SMTP_FROM", smtp_user)
+
+    base_url  = str(request.base_url).rstrip("/")
+    reset_url = f"{base_url}/?reset_token={token}"
+
+    body = (
+        f"Hi {username},\n\n"
+        f"A password reset was requested for your CryptoDash account.\n\n"
+        f"Click the link below (valid for 1 hour):\n{reset_url}\n\n"
+        f"If you didn't request this, ignore this email."
+    )
+    msg = MIMEText(body)
+    msg["Subject"] = "CryptoDash — Password Reset"
+    msg["From"]    = from_addr
+    msg["To"]      = email
+
+    def _send():
+        with smtplib.SMTP(smtp_host, smtp_port) as srv:
+            srv.starttls()
+            if smtp_user and smtp_pass:
+                srv.login(smtp_user, smtp_pass)
+            srv.sendmail(from_addr, [email], msg.as_string())
+
+    await asyncio.to_thread(_send)
 
 
 # ── Profile/Settings endpoints ──────────────────────────────────────────────────
@@ -1480,13 +1609,23 @@ async def _load_adaptive_state_when_ready() -> None:
         if db is None:
             continue
         try:
-            saved = await queries.load_adaptive_state(db)
-            if saved:
-                _adaptive_engine.from_dict(saved)
+            # Only restore state if there are real trades to back it up.
+            # If no real trades exist, don't restore stale state — it causes
+            # phantom losses that block legitimate BUYs.
+            real_trades = await queries.get_real_completed_pnls(db)
+            if real_trades:
+                saved = await queries.load_adaptive_state(db)
+                if saved:
+                    _adaptive_engine.from_dict(saved)
+                    logging.getLogger("adaptive_monitor").info(
+                        "Adaptive engine restored: %d real trades  WR=%.0f%%  Kelly=%.1f%%",
+                        len(real_trades),
+                        _adaptive_engine.win_rate * 100,
+                        _adaptive_engine.kelly_fraction() * 100,
+                    )
+            else:
                 logging.getLogger("adaptive_monitor").info(
-                    "Adaptive engine restored: WR=%.0f%%  Kelly=%.1f%%",
-                    _adaptive_engine.win_rate * 100,
-                    _adaptive_engine.kelly_fraction() * 100,
+                    "Adaptive engine: no real trades yet — starting fresh (conservative defaults)"
                 )
         except Exception:
             pass
@@ -1518,12 +1657,15 @@ async def _inr_rate_refresh_loop() -> None:
 
 async def _adaptive_monitor_loop() -> None:
     """
-    Background task: every 5 min, read recent signals, pair into trades,
+    Background task: every 5 min, read REAL executed trades from trade_history,
     update the adaptive engine, persist to DB.
+
+    Uses only actual CoinDCX SELL fills (with recorded P&L) — never simulated
+    signal pairings.  If no real trades exist yet, the engine keeps conservative
+    defaults without tripping any circuit breaker.
     """
     import asyncio
     import logging
-    from collections import defaultdict
     from signals.adaptive_strategy import engine as _adaptive_engine
     log = logging.getLogger("adaptive_monitor")
 
@@ -1533,42 +1675,46 @@ async def _adaptive_monitor_loop() -> None:
         if db is None:
             continue
         try:
-            signals = await queries.get_signals_for_analytics(db)
-            if not signals:
+            real_trades = await queries.get_real_completed_pnls(db)
+
+            if not real_trades:
+                # No real trades yet — log state but don't update engine
+                # (keeps conservative defaults, no artificial losses)
+                log.info(
+                    "Adaptive engine: 0 real trades yet — holding defaults  "
+                    "Kelly=%.1f%%  DD=0.0%%",
+                    _adaptive_engine.kelly_fraction() * 100,
+                )
                 continue
-
-            groups: dict = defaultdict(list)
-            for sig in signals:
-                groups[(sig["symbol"], sig["interval"])].append(sig)
-
-            all_trades = []
-            for grp in groups.values():
-                trades, _ = _pair_signals(grp)
-                all_trades.extend(trades)
-
-            if not all_trades:
-                continue
-
-            all_trades.sort(key=lambda t: t["close_time"])
 
             # Enrich with running portfolio value (starts at 100 for relative calc)
             running = 100.0
-            for t in all_trades:
+            enriched = []
+            for t in real_trades:
                 running = running * (1 + t["pnl_pct"] / 100)
-                t["portfolio_val"] = running
+                enriched.append({"pnl_pct": t["pnl_pct"], "portfolio_val": running})
 
             from exchange.auto_trade import _engine_lock
             async with _engine_lock:
-                _adaptive_engine.update(all_trades)
+                _adaptive_engine.update(enriched)
             await queries.save_adaptive_state(db, _adaptive_engine.to_dict())
+
+            losses = _adaptive_engine.consecutive_losses
+            dd     = _adaptive_engine.current_drawdown_pct
+            # Describe what the adaptive filter will enforce next trade
+            if losses >= 5:
+                adapt_note = f"STRICT (≥5 losses) — HIGH + ADX≥30 required"
+            elif losses >= 3:
+                adapt_note = f"SELECTIVE (≥3 losses) — HIGH confidence required"
+            else:
+                adapt_note = "NORMAL"
             log.info(
-                "Adaptive engine: %d trades  WR=%.0f%%  Kelly=%.1f%%  DD=%.1f%%  perf=%.2f  CB=%s",
-                len(all_trades),
+                "Adaptive engine: %d real trades  WR=%.0f%%  Kelly=%.1f%%  DD=%.1f%%  "
+                "losses=%d  filter=%s",
+                len(real_trades),
                 _adaptive_engine.win_rate * 100,
                 _adaptive_engine.kelly_fraction() * 100,
-                _adaptive_engine.current_drawdown_pct,
-                _adaptive_engine.perf_multiplier,
-                _adaptive_engine.consecutive_losses >= 3 or _adaptive_engine.current_drawdown_pct >= 10,
+                dd, losses, adapt_note,
             )
         except Exception as exc:
             log.error("Adaptive monitor error: %s", exc)

@@ -1741,16 +1741,12 @@ function hideAuthModal() {
 
 // Tab switching
 document.getElementById('tab-login').addEventListener('click', () => {
-  document.getElementById('login-form').style.display  = '';
-  document.getElementById('signup-form').style.display = 'none';
-  document.getElementById('totp-setup').style.display  = 'none';
+  _showAuthStep('login-form');
   document.getElementById('tab-login').classList.add('active');
   document.getElementById('tab-signup').classList.remove('active');
 });
 document.getElementById('tab-signup').addEventListener('click', () => {
-  document.getElementById('login-form').style.display  = 'none';
-  document.getElementById('signup-form').style.display = '';
-  document.getElementById('totp-setup').style.display  = 'none';
+  _showAuthStep('signup-form');
   document.getElementById('tab-login').classList.remove('active');
   document.getElementById('tab-signup').classList.add('active');
 });
@@ -1787,12 +1783,16 @@ document.getElementById('login-form').addEventListener('submit', async e => {
 let _pendingRegUsername = '';
 document.getElementById('signup-form').addEventListener('submit', async e => {
   e.preventDefault();
-  const errEl = document.getElementById('signup-error');
+  const errEl    = document.getElementById('signup-error');
   errEl.textContent = '';
+  const password = document.getElementById('reg-password').value;
+  const confirm  = document.getElementById('reg-confirm').value;
+  if (password !== confirm) { errEl.textContent = 'Passwords do not match'; return; }
   const body = {
-    username: document.getElementById('reg-username').value.trim(),
-    email:    document.getElementById('reg-email').value.trim(),
-    password: document.getElementById('reg-password').value,
+    username:         document.getElementById('reg-username').value.trim(),
+    email:            document.getElementById('reg-email').value.trim(),
+    password,
+    confirm_password: confirm,
   };
   const r = await fetch('/api/auth/register', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -1805,11 +1805,76 @@ document.getElementById('signup-form').addEventListener('submit', async e => {
   // Show QR setup step
   document.getElementById('signup-form').style.display = 'none';
   document.getElementById('totp-setup').style.display  = '';
-  // Use server-generated QR code (SVG data URL)
   const qrImg = document.getElementById('totp-qr-img');
   qrImg.src = data.qr_data_url;
   document.getElementById('totp-secret-text').textContent = data.totp_secret;
 });
+
+// ── Forgot password ─────────────────────────────────────────────────────────
+function _showAuthStep(stepId) {
+  ['login-form','signup-form','forgot-form','reset-form','totp-setup'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.style.display = (id === stepId) ? '' : 'none';
+  });
+}
+
+document.getElementById('forgot-pw-link').addEventListener('click', () => {
+  _showAuthStep('forgot-form');
+  document.getElementById('tab-login').classList.remove('active');
+  document.getElementById('tab-signup').classList.remove('active');
+});
+
+document.getElementById('forgot-back-btn').addEventListener('click', () => {
+  _showAuthStep('login-form');
+  document.getElementById('tab-login').classList.add('active');
+});
+
+document.getElementById('forgot-form').addEventListener('submit', async e => {
+  e.preventDefault();
+  const msg   = document.getElementById('forgot-msg');
+  const email = document.getElementById('forgot-email').value.trim();
+  msg.style.color   = '#787B86';
+  msg.textContent   = 'Sending…';
+  const r    = await fetch('/api/auth/forgot-password', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email }),
+  });
+  const data = await r.json().catch(() => ({}));
+  msg.style.color = r.ok ? '#26A69A' : '#EF5350';
+  msg.textContent = data.message || (r.ok ? 'Check your inbox.' : 'Request failed');
+});
+
+// Reset password (shown when ?reset_token= is in the URL)
+document.getElementById('reset-form').addEventListener('submit', async e => {
+  e.preventDefault();
+  const msg     = document.getElementById('reset-msg');
+  const token   = new URLSearchParams(window.location.search).get('reset_token') || '';
+  const pw      = document.getElementById('reset-password').value;
+  const confirm = document.getElementById('reset-confirm').value;
+  if (pw !== confirm) { msg.style.color = '#EF5350'; msg.textContent = 'Passwords do not match'; return; }
+  msg.style.color = '#787B86'; msg.textContent = 'Resetting…';
+  const r = await fetch('/api/auth/reset-password', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ token, new_password: pw, confirm_password: confirm }),
+  });
+  const data = await r.json().catch(() => ({}));
+  msg.style.color = r.ok ? '#26A69A' : '#EF5350';
+  msg.textContent = data.message || data.error || (r.ok ? 'Password reset!' : 'Reset failed');
+  if (r.ok) {
+    // Strip token from URL, show login after 2s
+    history.replaceState(null, '', '/');
+    setTimeout(() => { _showAuthStep('login-form'); document.getElementById('tab-login').classList.add('active'); }, 2000);
+  }
+});
+
+// On page load, check for reset_token in URL
+(function _checkResetToken() {
+  const token = new URLSearchParams(window.location.search).get('reset_token');
+  if (token) {
+    showAuthModal();
+    _showAuthStep('reset-form');
+  }
+})();
 
 // TOTP confirm
 document.getElementById('totp-confirm-btn').addEventListener('click', async () => {
@@ -1902,6 +1967,30 @@ document.getElementById('settings-form').addEventListener('submit', async e => {
   }
   btn.disabled    = false;
   btn.textContent = 'Save & Test Connection';
+});
+
+// Change password (inside settings modal)
+document.getElementById('change-pw-form').addEventListener('submit', async e => {
+  e.preventDefault();
+  const msg     = document.getElementById('cpw-msg');
+  const current = document.getElementById('cpw-current').value;
+  const pw      = document.getElementById('cpw-new').value;
+  const confirm = document.getElementById('cpw-confirm').value;
+  msg.textContent = '';
+  if (pw !== confirm) { msg.style.color = '#EF5350'; msg.textContent = 'New passwords do not match'; return; }
+  msg.style.color = '#787B86'; msg.textContent = 'Updating…';
+  const r = await apiFetch('/api/auth/change-password', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ current_password: current, new_password: pw, confirm_password: confirm }),
+  });
+  const data = await r.json().catch(() => ({}));
+  msg.style.color = r.ok ? '#26A69A' : '#EF5350';
+  msg.textContent = data.message || data.error || (r.ok ? 'Password updated!' : 'Failed');
+  if (r.ok) {
+    document.getElementById('cpw-current').value = '';
+    document.getElementById('cpw-new').value     = '';
+    document.getElementById('cpw-confirm').value = '';
+  }
 });
 
 // ── Auth gate — check token on load, gate dashboard ───────────────────────────
