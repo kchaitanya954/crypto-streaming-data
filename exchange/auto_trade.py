@@ -90,21 +90,47 @@ async def execute_trigger_trade(
 
             # ── BUY ──────────────────────────────────────────────────────────
             if signal.direction == "BUY":
-                cb_active = (
-                    _adaptive_engine.consecutive_losses >= 3
-                    or _adaptive_engine.current_drawdown_pct >= 10
-                )
-                if cb_active:
-                    _log.warning("Trigger %d: circuit breaker active (losses=%d DD=%.1f%%) — skipping BUY",
-                                 trigger_id, _adaptive_engine.consecutive_losses,
-                                 _adaptive_engine.current_drawdown_pct)
+                losses = _adaptive_engine.consecutive_losses
+                dd     = _adaptive_engine.current_drawdown_pct
+
+                # ── Extreme drawdown: only hard stop (genuine emergency) ──────
+                if dd >= 20.0:
+                    _log.warning("Trigger %d: HARD STOP — portfolio down %.1f%% — skipping BUY",
+                                 trigger_id, dd)
                     if tg_bot:
                         await send_trade_error(
                             tg_bot, tg_chat_id, trigger_id, symbol, "BUY",
-                            f"Circuit breaker active — {_adaptive_engine.consecutive_losses} consecutive losses,"
-                            f" {_adaptive_engine.current_drawdown_pct:.1f}% drawdown",
+                            f"Hard stop: portfolio drawdown {dd:.1f}% (>20%) — resume manually after review",
                         )
                     return
+
+                # ── Adaptive signal filter (tighten criteria, keep trading) ───
+                # After real consecutive losses, we don't STOP — we get SELECTIVE.
+                # Adaptive position sizing already reduces size; this layer
+                # additionally demands stronger signal quality.
+                if losses >= 5:
+                    # 5+ real losses: only act on HIGH confidence with strong ADX
+                    if signal.confidence != "HIGH":
+                        _log.info("Trigger %d: adaptive filter (5+ losses) — skipping %s confidence BUY, need HIGH",
+                                  trigger_id, signal.confidence)
+                        return
+                    if (signal.adx_val or 0) < 30:
+                        _log.info("Trigger %d: adaptive filter (5+ losses) — skipping ADX=%.1f BUY, need ≥30",
+                                  trigger_id, signal.adx_val or 0)
+                        return
+                    _log.info("Trigger %d: adaptive filter PASSED (5+ losses, HIGH+ADX≥30)", trigger_id)
+
+                elif losses >= 3:
+                    # 3-4 real losses: raise bar to HIGH confidence only
+                    if signal.confidence not in ("HIGH", "MEDIUM"):
+                        _log.info("Trigger %d: adaptive filter (3+ losses) — skipping LOW confidence BUY",
+                                  trigger_id)
+                        return
+                    if signal.confidence == "MEDIUM" and (signal.adx_val or 0) < 25:
+                        _log.info("Trigger %d: adaptive filter (3+ losses) — MEDIUM needs ADX≥25, got %.1f",
+                                  trigger_id, signal.adx_val or 0)
+                        return
+                    _log.info("Trigger %d: adaptive filter PASSED (3+ losses, %s confidence)", trigger_id, signal.confidence)
 
                 # ── Max concurrent open positions check ──────────────────────
                 open_count = await queries.get_open_positions_count(db, user_id)
@@ -120,9 +146,36 @@ async def execute_trigger_trade(
                         )
                     return
 
-                # Scale the trigger budget by the adaptive engine's recommended %
+                # ── Adaptive position sizing ─────────────────────────────────
+                # Scale the trigger budget by the adaptive engine's recommended %.
+                # CoinDCX minimum order is ~$5 USDT.
+                # Rule: never invest MORE than the trigger budget; never silently
+                #       bump a small budget to $5.  If adaptive amount < $5 but
+                #       the full budget covers it, use $5 as the floor.  If even
+                #       the full budget is < $5, tell the user and skip.
+                COINDCX_MIN_USDT = 5.0
                 adaptive_pct  = _adaptive_engine.buy_pct_for(signal.confidence, signal.adx_val)
-                adaptive_usdt = max(round(amount * adaptive_pct / 100.0, 4), 5.0)  # $5 min (CoinDCX floor)
+                adaptive_usdt = round(amount * adaptive_pct / 100.0, 4)
+
+                if adaptive_usdt < COINDCX_MIN_USDT:
+                    if amount >= COINDCX_MIN_USDT:
+                        # Budget is sufficient — use the exchange minimum as the floor
+                        adaptive_usdt = COINDCX_MIN_USDT
+                    else:
+                        # Budget itself is below CoinDCX minimum — can't trade
+                        _log.warning(
+                            "Trigger %d: trigger budget $%.2f is below CoinDCX minimum $%.2f"
+                            " — increase trigger amount to at least $%.0f",
+                            trigger_id, amount, COINDCX_MIN_USDT, COINDCX_MIN_USDT,
+                        )
+                        if tg_bot:
+                            await send_trade_error(
+                                tg_bot, tg_chat_id, trigger_id, symbol, "BUY",
+                                f"Trigger budget ${amount:.2f} is below CoinDCX minimum "
+                                f"${COINDCX_MIN_USDT:.0f} — edit trigger and set amount ≥ ${COINDCX_MIN_USDT:.0f}",
+                            )
+                        return
+
                 _log.info("Trigger %d BUY sizing: budget=$%.2f  adaptive=%.1f%%  order=$%.2f",
                           trigger_id, amount, adaptive_pct, adaptive_usdt)
 
@@ -200,7 +253,8 @@ async def execute_trigger_trade(
             elif signal.direction == "SELL":
                 pos = await queries.get_trigger_position(db, trigger_id)
                 if not pos or pos["coins_held"] < 1e-8:
-                    return  # nothing to sell
+                    _log.info("Trigger %d SELL skipped: no coins held in DB", trigger_id)
+                    return
 
                 # For stop-loss / take-profit, always sell the full position
                 if reason in ("stop_loss", "take_profit"):
@@ -211,6 +265,67 @@ async def execute_trigger_trade(
                 coins_to_sell = round(pos["coins_held"] * sell_ratio, 8)
                 if coins_to_sell < 1e-8:
                     return
+
+                # Verify actual coin balance on exchange — DB position may be
+                # stale (e.g. coins sold manually or from a previous session).
+                base_currency = symbol.upper().replace("USDT", "")
+                try:
+                    balances = await exchange.get_balances()
+                    coin_row  = next(
+                        (b for b in balances if b.get("currency") == base_currency), None
+                    )
+                    actual_bal = float(coin_row.get("balance", 0)) if coin_row else 0.0
+                    if actual_bal < 1e-8:
+                        _log.warning(
+                            "Trigger %d SELL skipped: DB shows %.8f %s but exchange balance is %.8f"
+                            " — clearing stale DB position",
+                            trigger_id, coins_to_sell, base_currency, actual_bal,
+                        )
+                        # Clear the stale position so future BUYs work correctly
+                        await queries.upsert_trigger_position(
+                            db, trigger_id, symbol, 0.0, 0.0, 0.0
+                        )
+                        return
+                    # Cap sell quantity to what we actually hold (prevents over-sell)
+                    if coins_to_sell > actual_bal:
+                        _log.warning(
+                            "Trigger %d: capping sell %.8f → %.8f %s (exchange balance)",
+                            trigger_id, coins_to_sell, actual_bal, base_currency,
+                        )
+                        coins_to_sell = round(actual_bal, 8)
+                except Exception as bal_exc:
+                    _log.warning("Trigger %d: could not verify balance before SELL (%s) — proceeding",
+                                 trigger_id, bal_exc)
+
+                # CoinDCX minimum order: ~$5 USDT equivalent
+                min_qty   = max(5.0 / signal.entry_price, 1e-6)
+                full_qty  = round(pos["coins_held"], 8)
+                dust_usdt = full_qty * signal.entry_price
+
+                if coins_to_sell < min_qty:
+                    if dust_usdt < 2.0:
+                        # Position is dust — clear from DB without placing order
+                        _log.warning(
+                            "Trigger %d: position %.8f %s (~$%.2f) is dust — clearing DB",
+                            trigger_id, full_qty, base_currency, dust_usdt,
+                        )
+                        await queries.upsert_trigger_position(
+                            db, trigger_id, symbol, 0.0, 0.0, 0.0
+                        )
+                        return
+                    elif full_qty >= min_qty:
+                        # Escalate: sell full position instead of partial
+                        _log.info(
+                            "Trigger %d: partial SELL %.8f below min — escalating to full %.8f %s",
+                            trigger_id, coins_to_sell, full_qty, base_currency,
+                        )
+                        coins_to_sell = full_qty
+                    else:
+                        _log.warning(
+                            "Trigger %d: SELL qty %.8f below min %.8f %s (~$5) — skipping",
+                            trigger_id, coins_to_sell, min_qty, base_currency,
+                        )
+                        return
 
                 result = await exchange.create_order(
                     side="sell", market=symbol,
@@ -240,22 +355,19 @@ async def execute_trigger_trade(
                     coins_remaining, pos["avg_entry"], usdt_remaining,
                 )
 
-                # Portfolio value for adaptive engine update
-                try:
-                    balances_after = await exchange.get_balances()
-                    portfolio_val = sum(
-                        float(b.get("balance", 0))
-                        for b in balances_after
-                        if b.get("currency") == "USDT"
-                    )
-                except Exception:
-                    portfolio_val = _adaptive_engine.peak_portfolio
-
-                async with _engine_lock:
-                    _adaptive_engine.update([{"pnl_pct": pnl_pct, "portfolio_val": portfolio_val}])
-
-                from database import queries as _q
-                await _q.save_adaptive_state(db, _adaptive_engine.to_dict())
+                # ── Update adaptive engine with full real trade history ────────
+                # Read ALL completed real trades (not just this one) so the
+                # rolling window, win-rate, and drawdown are always accurate.
+                all_pnls = await queries.get_real_completed_pnls(db)
+                if all_pnls:
+                    running = 100.0
+                    enriched = []
+                    for t in all_pnls:
+                        running = running * (1 + t["pnl_pct"] / 100)
+                        enriched.append({"pnl_pct": t["pnl_pct"], "portfolio_val": running})
+                    async with _engine_lock:
+                        _adaptive_engine.update(enriched)
+                await queries.save_adaptive_state(db, _adaptive_engine.to_dict())
 
                 _log.info(
                     "Trigger %d SELL(%s): %.8f %s @ %.4f  ratio=%.0f%%  PnL=%.4f%%  remaining=%.8f",

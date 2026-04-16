@@ -1096,7 +1096,31 @@
       <input id="login-totp"     type="text"     placeholder="2FA code (6 digits)"
              style="width:100%;margin-bottom:14px" class="auth-inp" maxlength="6" inputmode="numeric" />
       <button type="submit" class="auth-submit-btn">Login</button>
+      <div style="text-align:right;margin-top:8px">
+        <button type="button" id="forgot-pw-link" style="background:none;border:none;color:#2196F3;font-size:11px;cursor:pointer;padding:0">Forgot password?</button>
+      </div>
       <div id="login-error" class="auth-error"></div>
+    </form>
+
+    <!-- Forgot password form (hidden) -->
+    <form id="forgot-form" style="display:none">
+      <p style="font-size:12px;color:#787B86;margin-bottom:12px">Enter your email — we'll send a reset link if it's registered.</p>
+      <input id="forgot-email" type="email" placeholder="Email address" required
+             style="width:100%;margin-bottom:14px" class="auth-inp" />
+      <button type="submit" class="auth-submit-btn">Send Reset Link</button>
+      <button type="button" id="forgot-back-btn" style="width:100%;margin-top:8px;background:none;border:1px solid #2A2E39;color:#787B86;border-radius:4px;padding:8px;cursor:pointer;font-size:12px">← Back to Login</button>
+      <div id="forgot-msg" style="font-size:12px;margin-top:8px;text-align:center"></div>
+    </form>
+
+    <!-- Reset password form (shown when ?reset_token= in URL) -->
+    <form id="reset-form" style="display:none">
+      <p style="font-size:12px;color:#787B86;margin-bottom:12px">Enter your new password.</p>
+      <input id="reset-password" type="password" placeholder="New password (min 8 chars)" autocomplete="new-password" required
+             style="width:100%;margin-bottom:10px" class="auth-inp" />
+      <input id="reset-confirm" type="password" placeholder="Confirm new password" autocomplete="new-password" required
+             style="width:100%;margin-bottom:14px" class="auth-inp" />
+      <button type="submit" class="auth-submit-btn">Reset Password</button>
+      <div id="reset-msg" style="font-size:12px;margin-top:8px;text-align:center"></div>
     </form>
 
     <!-- Sign-up form (hidden) -->
@@ -1106,6 +1130,8 @@
       <input id="reg-email"    type="email"    placeholder="Email address" required
              style="width:100%;margin-bottom:10px" class="auth-inp" />
       <input id="reg-password" type="password" placeholder="Password (min 8 chars)" autocomplete="new-password" required
+             style="width:100%;margin-bottom:10px" class="auth-inp" />
+      <input id="reg-confirm"  type="password" placeholder="Confirm password" autocomplete="new-password" required
              style="width:100%;margin-bottom:14px" class="auth-inp" />
       <button type="submit" class="auth-submit-btn">Create Account</button>
       <div id="signup-error" class="auth-error"></div>
@@ -1154,6 +1180,21 @@
       <button type="submit" class="auth-submit-btn" id="settings-save-btn">Save &amp; Test Connection</button>
       <div id="settings-msg" style="font-size:12px;margin-top:8px;text-align:center"></div>
     </form>
+
+    <!-- Change Password section -->
+    <div style="border-top:1px solid #2A2E39;margin-top:20px;padding-top:16px">
+      <div style="font-size:12px;font-weight:600;color:#787B86;margin-bottom:12px;text-transform:uppercase;letter-spacing:0.5px">Change Password</div>
+      <form id="change-pw-form">
+        <input id="cpw-current"  type="password" placeholder="Current password" autocomplete="current-password"
+               style="width:100%;margin-bottom:8px" class="auth-inp" />
+        <input id="cpw-new"      type="password" placeholder="New password (min 8 chars)" autocomplete="new-password"
+               style="width:100%;margin-bottom:8px" class="auth-inp" />
+        <input id="cpw-confirm"  type="password" placeholder="Confirm new password" autocomplete="new-password"
+               style="width:100%;margin-bottom:10px" class="auth-inp" />
+        <button type="submit" style="width:100%;padding:8px;background:#2A2E39;border:1px solid #363A45;color:#D1D4DC;border-radius:4px;cursor:pointer;font-size:12px">Update Password</button>
+        <div id="cpw-msg" style="font-size:12px;margin-top:8px;text-align:center"></div>
+      </form>
+    </div>
   </div>
 </div>
 

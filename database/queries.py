@@ -376,6 +376,24 @@ async def get_real_trades_for_user(
     return [dict(r) for r in rows]
 
 
+async def get_real_completed_pnls(db: aiosqlite.Connection) -> list[dict]:
+    """
+    Return all completed trade P&Ls from trade_history (real executed SELLs).
+    Only includes rows where pnl IS NOT NULL (i.e. a BUY position existed before the SELL).
+    Used by the adaptive monitor — learns only from actual CoinDCX executions.
+    """
+    cursor = await db.execute(
+        """
+        SELECT th.pnl AS pnl_pct, th.created_at
+        FROM trade_history th
+        WHERE th.pnl IS NOT NULL
+        ORDER BY th.created_at ASC
+        """
+    )
+    rows = await cursor.fetchall()
+    return [dict(r) for r in rows]
+
+
 async def load_adaptive_state(db: aiosqlite.Connection) -> Optional[dict]:
     """Load persisted adaptive engine state. Returns None if not yet saved."""
     cursor = await db.execute("SELECT state_json FROM adaptive_state WHERE id = 1")
@@ -448,6 +466,43 @@ async def get_user_by_id(db: aiosqlite.Connection, user_id: int) -> Optional[dic
 
 async def enable_totp(db: aiosqlite.Connection, user_id: int) -> None:
     await db.execute("UPDATE users SET totp_enabled = 1 WHERE id = ?", (user_id,))
+    await db.commit()
+
+
+async def get_user_by_email(db: aiosqlite.Connection, email: str) -> Optional[dict]:
+    cursor = await db.execute("SELECT * FROM users WHERE email = ?", (email.strip().lower(),))
+    row = await cursor.fetchone()
+    return dict(row) if row else None
+
+
+async def update_password(db: aiosqlite.Connection, user_id: int, new_hash: str) -> None:
+    await db.execute("UPDATE users SET password_hash = ? WHERE id = ?", (new_hash, user_id))
+    await db.commit()
+
+
+async def set_password_reset_token(
+    db: aiosqlite.Connection, user_id: int, token: str, expiry: int
+) -> None:
+    await db.execute(
+        "UPDATE users SET password_reset_token = ?, password_reset_expiry = ? WHERE id = ?",
+        (token, expiry, user_id),
+    )
+    await db.commit()
+
+
+async def get_user_by_reset_token(db: aiosqlite.Connection, token: str) -> Optional[dict]:
+    cursor = await db.execute(
+        "SELECT * FROM users WHERE password_reset_token = ?", (token,)
+    )
+    row = await cursor.fetchone()
+    return dict(row) if row else None
+
+
+async def clear_password_reset_token(db: aiosqlite.Connection, user_id: int) -> None:
+    await db.execute(
+        "UPDATE users SET password_reset_token = NULL, password_reset_expiry = NULL WHERE id = ?",
+        (user_id,),
+    )
     await db.commit()
 
 
