@@ -512,14 +512,59 @@ async def upsert_trigger_position(
     coins_held: float,
     avg_entry: float,
     usdt_spent: float,
+    stop_loss_price: Optional[float] = None,
+    take_profit_price: Optional[float] = None,
 ) -> None:
+    # Preserve existing SL/TP if not explicitly updated
+    if stop_loss_price is None or take_profit_price is None:
+        existing = await get_trigger_position(db, trigger_id)
+        if existing:
+            if stop_loss_price is None:
+                stop_loss_price = existing.get("stop_loss_price")
+            if take_profit_price is None:
+                take_profit_price = existing.get("take_profit_price")
+
     await db.execute(
         """INSERT OR REPLACE INTO trigger_positions
-           (trigger_id, symbol, coins_held, avg_entry, usdt_spent, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?)""",
-        (trigger_id, symbol.upper(), coins_held, avg_entry, usdt_spent, int(time.time())),
+           (trigger_id, symbol, coins_held, avg_entry, usdt_spent,
+            stop_loss_price, take_profit_price, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        (trigger_id, symbol.upper(), coins_held, avg_entry, usdt_spent,
+         stop_loss_price, take_profit_price, int(time.time())),
     )
     await db.commit()
+
+
+async def get_open_positions_count(db: aiosqlite.Connection, user_id: int) -> int:
+    """Count open (non-zero) positions for all triggers belonging to user_id."""
+    cursor = await db.execute(
+        """SELECT COUNT(*) FROM trigger_positions tp
+           JOIN triggers t ON t.id = tp.trigger_id
+           WHERE t.user_id = ? AND tp.coins_held > 1e-8""",
+        (user_id,),
+    )
+    row = await cursor.fetchone()
+    return row[0] if row else 0
+
+
+async def get_positions_for_sl_tp_check(
+    db: aiosqlite.Connection, symbol: str
+) -> list[dict]:
+    """
+    Return all open positions for a given symbol that have stop-loss or
+    take-profit prices set.  Used by the stream loop to auto-exit positions.
+    """
+    cursor = await db.execute(
+        """SELECT tp.*, t.user_id, t.active
+           FROM trigger_positions tp
+           JOIN triggers t ON t.id = tp.trigger_id
+           WHERE tp.symbol = ?
+             AND tp.coins_held > 1e-8
+             AND (tp.stop_loss_price IS NOT NULL OR tp.take_profit_price IS NOT NULL)""",
+        (symbol.upper(),),
+    )
+    rows = await cursor.fetchall()
+    return [dict(row) for row in rows]
 
 
 async def delete_trigger_position(db: aiosqlite.Connection, trigger_id: int) -> None:
