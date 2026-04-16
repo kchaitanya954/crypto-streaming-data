@@ -34,16 +34,70 @@ log = logging.getLogger("orchestrator")
 
 # ── Background signal worker ───────────────────────────────────────────────────
 
+async def _check_sl_tp(symbol: str, current_price: float, db, settings) -> None:
+    """
+    After every closed candle, check all open positions on this symbol against
+    their stop-loss / take-profit prices and auto-sell when triggered.
+    """
+    from database import queries
+    from exchange.auto_trade import execute_trigger_trade
+    from signals.detector import Signal
+    import time as _time
+
+    positions = await queries.get_positions_for_sl_tp_check(db, symbol)
+    for pos in positions:
+        trigger_id = pos["trigger_id"]
+        sl_price   = pos.get("stop_loss_price")
+        tp_price   = pos.get("take_profit_price")
+
+        reason = None
+        if sl_price and current_price <= sl_price:
+            reason = "stop_loss"
+        elif tp_price and current_price >= tp_price:
+            reason = "take_profit"
+
+        if not reason:
+            continue
+
+        log.info(
+            "SL/TP triggered: trigger=%d symbol=%s price=%.4f reason=%s (SL=%.4f TP=%.4f)",
+            trigger_id, symbol.upper(), current_price, reason,
+            sl_price or 0, tp_price or 0,
+        )
+
+        # Build a minimal synthetic signal for the SELL executor
+        trigger = await queries.get_trigger(db, trigger_id)
+        if not trigger or not trigger.get("active"):
+            continue
+
+        fake_signal = Signal(
+            direction="SELL",
+            confidence="HIGH",
+            entry_price=current_price,
+            open_time=int(_time.time() * 1000),
+            macd_val=0.0, signal_val=0.0, histogram=0.0,
+            adx_val=0.0, trend_note=reason,
+            reasons=[reason],
+        )
+
+        asyncio.create_task(
+            execute_trigger_trade(db, trigger, fake_signal, symbol.upper(),
+                                  trigger["interval"], signal_id=None, reason=reason)
+        )
+
+
 async def _stream_pair(symbol: str, interval: str, db, tg_bot, exchange, settings) -> None:
     """
     Stream one symbol/interval pair forever, detect signals, and fire
     Telegram alerts whenever an active trigger matches.
-    Restarts automatically on any error.
+    Restarts automatically on any error with exponential backoff.
     """
     from streaming.stream import stream_klines, fetch_historical_klines
     from signals.detector import SignalDetector, params_for_interval
     from database import queries
     from telegram_bot.alerts import send_signal_alert
+
+    retry_delay = 10  # seconds; doubles on each crash, capped at 300 s
 
     while True:
         try:
@@ -71,6 +125,13 @@ async def _stream_pair(symbol: str, interval: str, db, tg_bot, exchange, setting
                     log.info("BG heartbeat  %s %s  candle#%d  close=%.4f  adx=%s",
                              symbol.upper(), interval, candle_count, kline.close,
                              f"{snap.adx_val:.1f}" if snap.adx_val else "n/a")
+
+                # ── Stop-loss / take-profit check (every candle) ─────────────
+                try:
+                    await _check_sl_tp(symbol, kline.close, db, settings)
+                except Exception as exc:
+                    log.error("SL/TP check error %s: %s", symbol.upper(), exc)
+
                 if signal is None:
                     continue
 
@@ -148,9 +209,14 @@ async def _stream_pair(symbol: str, interval: str, db, tg_bot, exchange, setting
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            log.warning("BG worker %s %s crashed (%s) — restarting in 10 s",
-                        symbol.upper(), interval, exc)
-            await asyncio.sleep(10)
+            log.warning("BG worker %s %s crashed (%s) — restarting in %ds",
+                        symbol.upper(), interval, exc, retry_delay)
+            await asyncio.sleep(retry_delay)
+            retry_delay = min(retry_delay * 2, 300)  # exponential backoff, cap 5 min
+            continue
+
+        # Successful run — reset backoff
+        retry_delay = 10
 
 
 async def background_signal_worker(db, tg_bot, exchange, settings) -> None:

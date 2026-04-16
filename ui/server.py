@@ -66,37 +66,26 @@ async def _current_user(
 
 async def _get_user_exchange(db, user_id: int, request: Request = None):
     """
-    Build a CoinDCXClient using the user's encrypted DB keys.
-    Falls back to the global .env keys (app.state.exchange) if per-user keys
-    are not yet saved or cannot be decrypted — this lets portfolio work
-    before the user has explicitly saved API keys via Account Settings.
+    Build a CoinDCXClient using only the logged-in user's own encrypted DB keys.
+    Never falls back to any global keys — each user must configure their own.
     """
     from auth.encryption import safe_decrypt
     from exchange.coindcx_client import CoinDCXClient
     import aiohttp
 
-    key = secret = None
     row = await queries.get_user_settings(db, user_id)
-    if row and row.get("coindcx_api_key_enc"):
-        key    = safe_decrypt(row["coindcx_api_key_enc"])
-        secret = safe_decrypt(row["coindcx_api_secret_enc"])
-
-    # Fallback: use global .env keys injected into app.state by orchestrator
-    if not key or not secret:
-        global_exchange = getattr(
-            (request.app.state if request else app.state), "exchange", None
+    if not row or not row.get("coindcx_api_key_enc"):
+        raise HTTPException(
+            status_code=400,
+            detail="CoinDCX API keys not configured. Go to ⚙ Account Settings and save your API Key and Secret.",
         )
-        if global_exchange:
-            key    = global_exchange._api_key
-            secret = global_exchange._api_secret
-            _log.info("User %d: using global .env CoinDCX keys (per-user keys not set)", user_id)
-
+    key    = safe_decrypt(row["coindcx_api_key_enc"])
+    secret = safe_decrypt(row["coindcx_api_secret_enc"])
     if not key or not secret:
         raise HTTPException(
             status_code=400,
-            detail="CoinDCX API keys not configured. Please save them in Account Settings (⚙ → CoinDCX API Key/Secret).",
+            detail="CoinDCX credentials could not be decrypted — please re-enter them in ⚙ Account Settings.",
         )
-
     session = aiohttp.ClientSession()
     return CoinDCXClient(api_key=key, api_secret=secret, session=session), session
 

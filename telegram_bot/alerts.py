@@ -121,6 +121,83 @@ async def send_signal_alert(
     return None
 
 
+async def send_trade_notification(
+    bot: Bot,
+    chat_id: str,
+    side: str,
+    symbol: str,
+    quantity: float,
+    price: float,
+    usdt_amount: float,
+    trigger_id: int,
+    pnl_pct: Optional[float] = None,
+    reason: str = "signal",
+) -> None:
+    """
+    Send a trade execution confirmation to the user's Telegram chat.
+
+    side:        "BUY" or "SELL"
+    reason:      "signal" | "stop_loss" | "take_profit"
+    pnl_pct:     Only set for SELL — realised P&L percentage
+    """
+    if side.upper() == "BUY":
+        icon = "✅"
+        action_line = f"*BUY Executed*"
+    else:
+        icon = "🔴"
+        action_line = "*SELL Executed*"
+
+    reason_label = {
+        "stop_loss":   "🛑 Stop-Loss",
+        "take_profit": "🎯 Take-Profit",
+        "signal":      "📊 Signal",
+    }.get(reason, reason)
+
+    base_currency = symbol.upper().replace("USDT", "").replace("usdt", "")
+    lines = [
+        f"{icon} {action_line} — {reason_label}",
+        f"Pair: `{symbol.upper()}`  |  Trigger: `#{trigger_id}`",
+        f"Qty: `{quantity:.6f}` {base_currency}  @  `${price:,.4f}`",
+        f"USDT: `${usdt_amount:,.2f}`",
+    ]
+    if pnl_pct is not None:
+        pnl_icon = "🟢" if pnl_pct >= 0 else "🔴"
+        lines.append(f"P&L: {pnl_icon} `{pnl_pct:+.2f}%`")
+
+    try:
+        await bot.send_message(
+            chat_id=chat_id,
+            text="\n".join(lines),
+            parse_mode=ParseMode.MARKDOWN,
+        )
+    except Exception:
+        pass  # never let notification failure break trade flow
+
+
+async def send_trade_error(
+    bot: Bot,
+    chat_id: str,
+    trigger_id: int,
+    symbol: str,
+    side: str,
+    reason: str,
+) -> None:
+    """Notify user when auto-trade fails to execute."""
+    try:
+        await bot.send_message(
+            chat_id=chat_id,
+            text=(
+                f"⚠️ *Auto-trade Failed*\n"
+                f"Trigger: `#{trigger_id}` | `{symbol.upper()}`\n"
+                f"Side: `{side.upper()}`\n"
+                f"Reason: {reason}"
+            ),
+            parse_mode=ParseMode.MARKDOWN,
+        )
+    except Exception:
+        pass
+
+
 async def send_trigger_alert(
     bot: Bot,
     chat_id: str,

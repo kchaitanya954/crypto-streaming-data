@@ -132,8 +132,10 @@ async def init_db(db_path: str) -> aiosqlite.Connection:
         ("triggers",      "trade_amount_usdt",  "REAL"),
         ("triggers",      "user_id",            "INTEGER"),
         ("users",         "is_admin",           "INTEGER NOT NULL DEFAULT 0"),
-        ("orders",        "user_id",            "INTEGER"),
-        ("orders",        "trigger_id",         "INTEGER"),
+        ("orders",             "user_id",            "INTEGER"),
+        ("orders",             "trigger_id",         "INTEGER"),
+        ("trigger_positions",  "stop_loss_price",    "REAL"),
+        ("trigger_positions",  "take_profit_price",  "REAL"),
     ]:
         try:
             await db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {defn}")
