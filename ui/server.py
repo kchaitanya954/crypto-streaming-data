@@ -64,18 +64,39 @@ async def _current_user(
         raise HTTPException(status_code=401, detail="Invalid token")
 
 
-async def _get_user_exchange(db, user_id: int):
-    """Build a CoinDCXClient from the user's encrypted DB settings."""
+async def _get_user_exchange(db, user_id: int, request: Request = None):
+    """
+    Build a CoinDCXClient using the user's encrypted DB keys.
+    Falls back to the global .env keys (app.state.exchange) if per-user keys
+    are not yet saved or cannot be decrypted — this lets portfolio work
+    before the user has explicitly saved API keys via Account Settings.
+    """
     from auth.encryption import safe_decrypt
     from exchange.coindcx_client import CoinDCXClient
     import aiohttp
+
+    key = secret = None
     row = await queries.get_user_settings(db, user_id)
-    if not row or not row.get("coindcx_api_key_enc"):
-        raise HTTPException(status_code=400, detail="CoinDCX API keys not configured in account settings")
-    key    = safe_decrypt(row["coindcx_api_key_enc"])
-    secret = safe_decrypt(row["coindcx_api_secret_enc"])
+    if row and row.get("coindcx_api_key_enc"):
+        key    = safe_decrypt(row["coindcx_api_key_enc"])
+        secret = safe_decrypt(row["coindcx_api_secret_enc"])
+
+    # Fallback: use global .env keys injected into app.state by orchestrator
     if not key or not secret:
-        raise HTTPException(status_code=400, detail="Could not decrypt CoinDCX credentials")
+        global_exchange = getattr(
+            (request.app.state if request else app.state), "exchange", None
+        )
+        if global_exchange:
+            key    = global_exchange._api_key
+            secret = global_exchange._api_secret
+            _log.info("User %d: using global .env CoinDCX keys (per-user keys not set)", user_id)
+
+    if not key or not secret:
+        raise HTTPException(
+            status_code=400,
+            detail="CoinDCX API keys not configured. Please save them in Account Settings (⚙ → CoinDCX API Key/Secret).",
+        )
+
     session = aiohttp.ClientSession()
     return CoinDCXClient(api_key=key, api_secret=secret, session=session), session
 
@@ -648,7 +669,7 @@ async def api_portfolio(request: Request, user: dict = Depends(_current_user)):
         return JSONResponse({"error": "DB not configured"}, status_code=503)
     user_id = int(user["sub"])
     try:
-        exchange, session = await _get_user_exchange(db, user_id)
+        exchange, session = await _get_user_exchange(db, user_id, request)
         async with session:
             balances = await exchange.get_balances()
         return balances
@@ -739,7 +760,7 @@ async def api_create_trigger(
 
     # Balance check against user's CoinDCX account
     try:
-        exchange, session = await _get_user_exchange(db, user_id)
+        exchange, session = await _get_user_exchange(db, user_id, request)
         async with session:
             balances = await exchange.get_balances()
         usdt_row = next((b for b in balances if b.get("currency") == "USDT"), None)
@@ -1305,7 +1326,7 @@ async def api_coindcx_trades(
         return JSONResponse({"error": "DB not configured"}, status_code=503)
 
     user_id = int(user["sub"])
-    exchange, session = await _get_user_exchange(db, user_id)
+    exchange, session = await _get_user_exchange(db, user_id, request)
 
     inr_rate: float = getattr(request.app.state, "inr_rate", None) or 83.5
 
