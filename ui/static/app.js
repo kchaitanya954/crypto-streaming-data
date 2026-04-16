@@ -431,11 +431,19 @@ function loadHistoricalSignals() {
 // ── Portfolio panel ───────────────────────────────────────────────────────────
 
 function fetchPortfolio() {
+  const updEl = document.getElementById('pf-updated');
+  if (updEl) updEl.textContent = 'Loading…';
   apiFetch('/api/portfolio')
     .then(r => r.json())
     .then(data => {
-      if (!Array.isArray(data)) return;
       const list = document.getElementById('portfolio-list');
+      if (data.error || data.detail) {
+        // Not configured — show message instead of polling
+        list.innerHTML = `<div class="pf-empty" style="color:#787B86;font-size:11px">${data.detail || data.error}</div>`;
+        if (updEl) updEl.textContent = '';
+        return;
+      }
+      if (!Array.isArray(data)) return;
       list.innerHTML = '';
       if (data.length === 0) {
         list.innerHTML = '<div class="pf-empty">No balances</div>';
@@ -454,17 +462,16 @@ function fetchPortfolio() {
           (locked > 0 ? `<span class="pf-locked">${locked.toFixed(6)} locked</span>` : '');
         list.appendChild(row);
       });
-      document.getElementById('pf-updated').textContent =
+      if (updEl) updEl.textContent =
         'Updated ' + new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
     })
     .catch(() => {
-      document.getElementById('pf-updated').textContent = 'Unavailable';
+      if (updEl) updEl.textContent = 'Unavailable';
     });
 }
 
-// Poll portfolio every 30 seconds
-fetchPortfolio();
-setInterval(fetchPortfolio, 30000);
+// Load portfolio once on dashboard init — no auto-poll (uses authenticated user's own API keys)
+// Use the refresh button in the UI to reload manually.
 
 // ── Signal card + filter + manage ────────────────────────────────────────────
 
@@ -1903,8 +1910,11 @@ function initDashboard() {
   // Load all data + start WS stream
   loadHistoricalSignals();
   loadTriggers();
+  fetchPortfolio();   // load once on login — user clicks ⟳ to refresh manually
   connect(currentSymbol, currentInterval);
 }
+
+document.getElementById('pf-refresh-btn').addEventListener('click', fetchPortfolio);
 
 function _showUserChip(username) {
   const chip = document.getElementById('user-chip');

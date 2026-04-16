@@ -734,9 +734,13 @@
 
     <!-- Portfolio panel -->
     <div id="portfolio-panel">
-      <div class="sidebar-title">Portfolio (CoinDCX)</div>
+      <div class="sidebar-title" style="display:flex;align-items:center;justify-content:space-between">
+        <span>Portfolio (CoinDCX)</span>
+        <button id="pf-refresh-btn" title="Refresh balances"
+          style="background:none;border:none;color:#4C525E;cursor:pointer;font-size:13px;padding:0 2px">⟳</button>
+      </div>
       <div id="portfolio-list">
-        <div class="pf-empty">Loading…</div>
+        <div class="pf-empty">—</div>
       </div>
       <div id="pf-updated"></div>
     </div>

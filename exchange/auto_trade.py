@@ -44,21 +44,15 @@ async def execute_trigger_trade(
         return  # legacy trigger without user or amount — skip
 
     user_settings = await queries.get_user_settings(db, user_id)
-    key = secret = None
-    if user_settings:
-        key    = safe_decrypt(user_settings.get("coindcx_api_key_enc"))
-        secret = safe_decrypt(user_settings.get("coindcx_api_secret_enc"))
+    if not user_settings:
+        _log.warning("Trigger %d: no settings for user %d — skipping trade", trigger_id, user_id)
+        return
 
-    # Fallback: try global .env keys via environment variables
+    key    = safe_decrypt(user_settings.get("coindcx_api_key_enc"))
+    secret = safe_decrypt(user_settings.get("coindcx_api_secret_enc"))
     if not key or not secret:
-        import os
-        key    = os.environ.get("COINDCX_API_KEY")
-        secret = os.environ.get("COINDCX_API_SECRET")
-        if key and secret:
-            _log.info("Trigger %d: using global .env CoinDCX keys (per-user keys not set)", trigger_id)
-
-    if not key or not secret:
-        _log.warning("Trigger %d: no CoinDCX API keys available — skipping trade", trigger_id)
+        _log.warning("Trigger %d: user %d has no CoinDCX API keys configured — skipping trade. "
+                     "Ask them to save keys in Account Settings.", trigger_id, user_id)
         return
 
     try:
