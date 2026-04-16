@@ -277,12 +277,12 @@ async def execute_trigger_trade(
                     _log.warning("Trigger %d: could not verify balance before SELL (%s) — proceeding",
                                  trigger_id, bal_exc)
 
-                # Dust guard: if the full position is worth < $0.50, just clear DB
+                # Dust guard: if the full position is worth < $0.10, just clear DB
                 full_qty  = round(pos["coins_held"], 8)
                 dust_usdt = full_qty * signal.entry_price
-                if dust_usdt < 0.5:
+                if dust_usdt < 0.10:
                     _log.warning(
-                        "Trigger %d: position %.8f %s (~$%.2f) is dust — clearing DB",
+                        "Trigger %d: position %.8f %s (~$%.4f) is dust — clearing DB",
                         trigger_id, full_qty, base_currency, dust_usdt,
                     )
                     await queries.upsert_trigger_position(
@@ -290,20 +290,39 @@ async def execute_trigger_trade(
                     )
                     return
 
-                # If partial sell is smaller than the full position and the partial
-                # amount is a trivially small fraction, escalate to full position sell
-                partial_usdt = coins_to_sell * signal.entry_price
-                if partial_usdt < 0.5 and full_qty > coins_to_sell:
-                    _log.info(
-                        "Trigger %d: partial SELL $%.2f too small — escalating to full %.8f %s ($%.2f)",
-                        trigger_id, partial_usdt, full_qty, base_currency, dust_usdt,
+                # Try the partial sell; if CoinDCX rejects qty-too-small, escalate to full
+                from aiohttp import ClientResponseError as _CRE
+                async def _place_sell(qty: float) -> dict:
+                    return await exchange.create_order(
+                        side="sell", market=symbol,
+                        order_type="market_order", quantity=qty,
                     )
-                    coins_to_sell = full_qty
 
-                result = await exchange.create_order(
-                    side="sell", market=symbol,
-                    order_type="market_order", quantity=coins_to_sell,
-                )
+                try:
+                    result = await _place_sell(coins_to_sell)
+                except _CRE as exc:
+                    # OMS-VF-0004 = "Quantity should be greater than X"
+                    if exc.status == 400 and "OMS-VF-0004" in str(exc.message):
+                        if full_qty > coins_to_sell + 1e-10:
+                            _log.info(
+                                "Trigger %d: partial SELL %.8f rejected (qty too small) "
+                                "— escalating to full %.8f %s",
+                                trigger_id, coins_to_sell, full_qty, base_currency,
+                            )
+                            coins_to_sell = full_qty
+                            result = await _place_sell(coins_to_sell)
+                        else:
+                            # Already trying full position but still too small → dust
+                            _log.warning(
+                                "Trigger %d: full position %.8f %s still below exchange min — clearing DB",
+                                trigger_id, full_qty, base_currency,
+                            )
+                            await queries.upsert_trigger_position(
+                                db, trigger_id, symbol, 0.0, 0.0, 0.0
+                            )
+                            return
+                    else:
+                        raise
                 cdx_order_id = result.get("id") or result.get("order_id")
                 avg_entry    = pos["avg_entry"]
                 pnl_pct      = (signal.entry_price - avg_entry) / avg_entry * 100 if avg_entry else 0.0
