@@ -547,9 +547,30 @@ async def list_users(db: aiosqlite.Connection) -> list[dict]:
 
 
 async def delete_user(db: aiosqlite.Connection, user_id: int) -> None:
-    """Delete a user and their settings/triggers."""
-    await db.execute("DELETE FROM user_settings WHERE user_id = ?", (user_id,))
+    """
+    Delete a user and ALL their associated data in dependency order:
+      trade_history → orders → trigger_positions → triggers → user_settings → users
+    Signals are global market data (no user_id) — left intact.
+    """
+    # 1. trade_history rows linked to the user's orders
+    await db.execute(
+        "DELETE FROM trade_history WHERE order_id IN "
+        "(SELECT id FROM orders WHERE user_id = ?)",
+        (user_id,),
+    )
+    # 2. orders placed by this user
+    await db.execute("DELETE FROM orders WHERE user_id = ?", (user_id,))
+    # 3. trigger_positions for the user's triggers
+    await db.execute(
+        "DELETE FROM trigger_positions WHERE trigger_id IN "
+        "(SELECT id FROM triggers WHERE user_id = ?)",
+        (user_id,),
+    )
+    # 4. triggers
     await db.execute("DELETE FROM triggers WHERE user_id = ?", (user_id,))
+    # 5. user settings (encrypted API keys, Telegram creds)
+    await db.execute("DELETE FROM user_settings WHERE user_id = ?", (user_id,))
+    # 6. the user row itself
     await db.execute("DELETE FROM users WHERE id = ?", (user_id,))
     await db.commit()
 
