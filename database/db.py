@@ -86,6 +86,34 @@ CREATE TABLE IF NOT EXISTS adaptive_state (
     state_json TEXT    NOT NULL,
     updated_at INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS users (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    username      TEXT    NOT NULL UNIQUE,
+    email         TEXT    NOT NULL UNIQUE,
+    password_hash TEXT    NOT NULL,
+    totp_secret   TEXT    NOT NULL,
+    totp_enabled  INTEGER NOT NULL DEFAULT 0,
+    created_at    INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS user_settings (
+    user_id                INTEGER PRIMARY KEY REFERENCES users(id),
+    telegram_token         TEXT,
+    telegram_chat_id       TEXT,
+    coindcx_api_key_enc    TEXT,
+    coindcx_api_secret_enc TEXT,
+    updated_at             INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS trigger_positions (
+    trigger_id  INTEGER PRIMARY KEY REFERENCES triggers(id),
+    symbol      TEXT    NOT NULL,
+    coins_held  REAL    NOT NULL DEFAULT 0,
+    avg_entry   REAL    NOT NULL DEFAULT 0,
+    usdt_spent  REAL    NOT NULL DEFAULT 0,
+    updated_at  INTEGER NOT NULL
+);
 """
 
 
@@ -97,9 +125,18 @@ async def init_db(db_path: str) -> aiosqlite.Connection:
     await db.executescript(_SCHEMA)
     await db.commit()
     # Safe migrations — add new columns if they don't exist yet
-    for col, defn in [("adx_threshold", "REAL"), ("cooldown_bars", "INTEGER"), ("name", "TEXT")]:
+    for table, col, defn in [
+        ("triggers",      "adx_threshold",     "REAL"),
+        ("triggers",      "cooldown_bars",      "INTEGER"),
+        ("triggers",      "name",               "TEXT"),
+        ("triggers",      "trade_amount_usdt",  "REAL"),
+        ("triggers",      "user_id",            "INTEGER"),
+        ("users",         "is_admin",           "INTEGER NOT NULL DEFAULT 0"),
+        ("orders",        "user_id",            "INTEGER"),
+        ("orders",        "trigger_id",         "INTEGER"),
+    ]:
         try:
-            await db.execute(f"ALTER TABLE triggers ADD COLUMN {col} {defn}")
+            await db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {defn}")
             await db.commit()
         except Exception:
             pass  # column already exists

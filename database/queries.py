@@ -69,6 +69,8 @@ async def insert_order(
     price: Optional[float] = None,
     signal_id: Optional[int] = None,
     telegram_msg_id: Optional[int] = None,
+    user_id: Optional[int] = None,
+    trigger_id: Optional[int] = None,
 ) -> int:
     """Insert a new order record. Returns the new row id."""
     now = int(time.time())
@@ -76,11 +78,11 @@ async def insert_order(
         """
         INSERT INTO orders
             (signal_id, symbol, side, order_type, quantity, price,
-             status, telegram_msg_id, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)
+             status, telegram_msg_id, user_id, trigger_id, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)
         """,
         (signal_id, symbol.upper(), side, order_type, quantity, price,
-         telegram_msg_id, now, now),
+         telegram_msg_id, user_id, trigger_id, now, now),
     )
     await db.commit()
     return cursor.lastrowid
@@ -163,11 +165,18 @@ async def get_recent_signals(
     symbol: Optional[str] = None,
     interval: Optional[str] = None,
     limit: int = 100,
+    user_id: Optional[int] = None,
 ) -> list[dict]:
-    """Return recent signals, newest first. All filters are optional."""
+    """Return recent signals, newest first. Filtered by user's triggers when user_id given."""
     conditions, params = [], []
     if symbol:   conditions.append("symbol = ?");   params.append(symbol.upper())
     if interval: conditions.append("interval = ?"); params.append(interval)
+    if user_id is not None:
+        conditions.append(
+            "EXISTS (SELECT 1 FROM triggers WHERE triggers.user_id = ?"
+            " AND triggers.symbol = signals.symbol AND triggers.interval = signals.interval)"
+        )
+        params.append(user_id)
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     cursor = await db.execute(
         f"SELECT * FROM signals {where} ORDER BY created_at DESC LIMIT ?",
@@ -188,6 +197,7 @@ async def get_signals_for_analytics(
     interval: Optional[str] = None,
     confidence: Optional[str] = None,
     since: Optional[int] = None,
+    user_id: Optional[int] = None,
 ) -> list[dict]:
     """Return signals for analytics (oldest-first), filtered by params."""
     conditions, params = [], []
@@ -199,6 +209,12 @@ async def get_signals_for_analytics(
         conditions.append("confidence = ?"); params.append(confidence.upper())
     if since:
         conditions.append("created_at >= ?"); params.append(since)
+    if user_id is not None:
+        conditions.append(
+            "EXISTS (SELECT 1 FROM triggers WHERE triggers.user_id = ?"
+            " AND triggers.symbol = signals.symbol AND triggers.interval = signals.interval)"
+        )
+        params.append(user_id)
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     cursor = await db.execute(
         f"SELECT * FROM signals {where} ORDER BY open_time ASC", params
@@ -244,14 +260,22 @@ async def get_trigger(db: aiosqlite.Connection, trigger_id: int) -> Optional[dic
     return dict(row) if row else None
 
 
-async def get_triggers(db: aiosqlite.Connection, active_only: bool = True) -> list[dict]:
-    """Return all triggers (active only by default)."""
+async def get_triggers(
+    db: aiosqlite.Connection,
+    active_only: bool = True,
+    user_id: Optional[int] = None,
+) -> list[dict]:
+    """Return triggers, optionally filtered by active status and/or user."""
+    conditions, params = [], []
     if active_only:
-        cursor = await db.execute(
-            "SELECT * FROM triggers WHERE active = 1 ORDER BY created_at DESC"
-        )
-    else:
-        cursor = await db.execute("SELECT * FROM triggers ORDER BY created_at DESC")
+        conditions.append("active = 1")
+    if user_id is not None:
+        conditions.append("user_id = ?")
+        params.append(user_id)
+    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    cursor = await db.execute(
+        f"SELECT * FROM triggers {where} ORDER BY created_at DESC", params
+    )
     rows = await cursor.fetchall()
     return [dict(row) for row in rows]
 
@@ -264,14 +288,18 @@ async def create_trigger(
     adx_threshold: Optional[float] = None,
     cooldown_bars: Optional[int] = None,
     name: Optional[str] = None,
+    trade_amount_usdt: Optional[float] = None,
+    user_id: Optional[int] = None,
 ) -> int:
     """Insert a new trigger. Returns the new row id."""
     cursor = await db.execute(
         """INSERT INTO triggers
-               (symbol, interval, min_confidence, adx_threshold, cooldown_bars, name, active, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, 1, ?)""",
+               (symbol, interval, min_confidence, adx_threshold, cooldown_bars,
+                name, trade_amount_usdt, user_id, active, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)""",
         (symbol.upper(), interval, min_confidence.upper(),
-         adx_threshold, cooldown_bars, name, int(time.time())),
+         adx_threshold, cooldown_bars, name,
+         trade_amount_usdt, user_id, int(time.time())),
     )
     await db.commit()
     return cursor.lastrowid
@@ -290,16 +318,18 @@ async def update_trigger(
     adx_threshold = _SENTINEL,
     cooldown_bars  = _SENTINEL,
     name: Optional[str] = None,
+    trade_amount_usdt: Optional[float] = None,
 ) -> None:
     """Update any subset of trigger fields."""
     fields, params = [], []
-    if symbol         is not None:      fields.append("symbol = ?");         params.append(symbol.upper())
-    if interval       is not None:      fields.append("interval = ?");       params.append(interval)
-    if min_confidence is not None:      fields.append("min_confidence = ?"); params.append(min_confidence.upper())
-    if active         is not None:      fields.append("active = ?");         params.append(1 if active else 0)
-    if adx_threshold  is not _SENTINEL: fields.append("adx_threshold = ?");  params.append(adx_threshold)
-    if cooldown_bars  is not _SENTINEL: fields.append("cooldown_bars = ?");  params.append(cooldown_bars)
-    if name           is not None:      fields.append("name = ?");           params.append(name)
+    if symbol             is not None:      fields.append("symbol = ?");             params.append(symbol.upper())
+    if interval           is not None:      fields.append("interval = ?");           params.append(interval)
+    if min_confidence     is not None:      fields.append("min_confidence = ?");     params.append(min_confidence.upper())
+    if active             is not None:      fields.append("active = ?");             params.append(1 if active else 0)
+    if adx_threshold      is not _SENTINEL: fields.append("adx_threshold = ?");      params.append(adx_threshold)
+    if cooldown_bars      is not _SENTINEL: fields.append("cooldown_bars = ?");      params.append(cooldown_bars)
+    if name               is not None:      fields.append("name = ?");               params.append(name)
+    if trade_amount_usdt  is not None:      fields.append("trade_amount_usdt = ?");  params.append(trade_amount_usdt)
     if not fields:
         return
     params.append(trigger_id)
@@ -311,6 +341,39 @@ async def delete_trigger(db: aiosqlite.Connection, trigger_id: int) -> None:
     """Hard-delete a trigger row."""
     await db.execute("DELETE FROM triggers WHERE id = ?", (trigger_id,))
     await db.commit()
+
+
+async def get_real_trades_for_user(
+    db: aiosqlite.Connection,
+    user_id: int,
+    since: Optional[int] = None,
+) -> list[dict]:
+    """
+    Return all filled orders for a user, ordered by time.
+    Includes USDT amount (qty × price) for each side.
+    """
+    conditions = ["o.user_id = ?", "o.status = 'filled'", "o.price IS NOT NULL"]
+    params: list = [user_id]
+    if since:
+        conditions.append("o.created_at >= ?")
+        params.append(since)
+    where = " AND ".join(conditions)
+    cursor = await db.execute(
+        f"""
+        SELECT
+            o.id, o.symbol, o.side, o.quantity, o.price,
+            o.trigger_id, o.created_at,
+            ROUND(o.quantity * o.price, 6) AS usdt_amount,
+            th.pnl AS pnl_pct
+        FROM orders o
+        LEFT JOIN trade_history th ON th.order_id = o.id
+        WHERE {where}
+        ORDER BY o.created_at ASC
+        """,
+        params,
+    )
+    rows = await cursor.fetchall()
+    return [dict(r) for r in rows]
 
 
 async def load_adaptive_state(db: aiosqlite.Connection) -> Optional[dict]:
@@ -350,3 +413,173 @@ def trigger_matches(
     if trig_adx and adx_val is not None and adx_val < trig_adx:
         return False
     return True
+
+
+# ── User queries ────────────────────────────────────────────────────────────────
+
+async def create_user(
+    db: aiosqlite.Connection,
+    username: str,
+    email: str,
+    password_hash: str,
+    totp_secret: str,
+) -> int:
+    """Insert a new user. Returns the new row id."""
+    cursor = await db.execute(
+        """INSERT INTO users (username, email, password_hash, totp_secret, totp_enabled, created_at)
+           VALUES (?, ?, ?, ?, 0, ?)""",
+        (username.strip(), email.strip().lower(), password_hash, totp_secret, int(time.time())),
+    )
+    await db.commit()
+    return cursor.lastrowid
+
+
+async def get_user_by_username(db: aiosqlite.Connection, username: str) -> Optional[dict]:
+    cursor = await db.execute("SELECT * FROM users WHERE username = ?", (username.strip(),))
+    row = await cursor.fetchone()
+    return dict(row) if row else None
+
+
+async def get_user_by_id(db: aiosqlite.Connection, user_id: int) -> Optional[dict]:
+    cursor = await db.execute("SELECT * FROM users WHERE id = ?", (user_id,))
+    row = await cursor.fetchone()
+    return dict(row) if row else None
+
+
+async def enable_totp(db: aiosqlite.Connection, user_id: int) -> None:
+    await db.execute("UPDATE users SET totp_enabled = 1 WHERE id = ?", (user_id,))
+    await db.commit()
+
+
+# ── User settings queries ────────────────────────────────────────────────────────
+
+async def get_user_settings(db: aiosqlite.Connection, user_id: int) -> Optional[dict]:
+    cursor = await db.execute("SELECT * FROM user_settings WHERE user_id = ?", (user_id,))
+    row = await cursor.fetchone()
+    return dict(row) if row else None
+
+
+async def upsert_user_settings(
+    db: aiosqlite.Connection,
+    user_id: int,
+    telegram_token: Optional[str] = None,
+    telegram_chat_id: Optional[str] = None,
+    coindcx_api_key_enc: Optional[str] = None,
+    coindcx_api_secret_enc: Optional[str] = None,
+) -> None:
+    """Insert or update user settings, preserving existing values for omitted fields."""
+    existing = await get_user_settings(db, user_id)
+    if existing:
+        await db.execute(
+            """UPDATE user_settings SET
+               telegram_token         = COALESCE(?, telegram_token),
+               telegram_chat_id       = COALESCE(?, telegram_chat_id),
+               coindcx_api_key_enc    = COALESCE(?, coindcx_api_key_enc),
+               coindcx_api_secret_enc = COALESCE(?, coindcx_api_secret_enc),
+               updated_at             = ?
+               WHERE user_id = ?""",
+            (telegram_token or None, telegram_chat_id or None,
+             coindcx_api_key_enc or None, coindcx_api_secret_enc or None,
+             int(time.time()), user_id),
+        )
+    else:
+        await db.execute(
+            """INSERT INTO user_settings
+               (user_id, telegram_token, telegram_chat_id,
+                coindcx_api_key_enc, coindcx_api_secret_enc, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (user_id, telegram_token or None, telegram_chat_id or None,
+             coindcx_api_key_enc or None, coindcx_api_secret_enc or None,
+             int(time.time())),
+        )
+    await db.commit()
+
+
+# ── Trigger position queries ──────────────────────────────────────────────────────
+
+async def get_trigger_position(db: aiosqlite.Connection, trigger_id: int) -> Optional[dict]:
+    cursor = await db.execute(
+        "SELECT * FROM trigger_positions WHERE trigger_id = ?", (trigger_id,)
+    )
+    row = await cursor.fetchone()
+    return dict(row) if row else None
+
+
+async def upsert_trigger_position(
+    db: aiosqlite.Connection,
+    trigger_id: int,
+    symbol: str,
+    coins_held: float,
+    avg_entry: float,
+    usdt_spent: float,
+) -> None:
+    await db.execute(
+        """INSERT OR REPLACE INTO trigger_positions
+           (trigger_id, symbol, coins_held, avg_entry, usdt_spent, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        (trigger_id, symbol.upper(), coins_held, avg_entry, usdt_spent, int(time.time())),
+    )
+    await db.commit()
+
+
+async def delete_trigger_position(db: aiosqlite.Connection, trigger_id: int) -> None:
+    await db.execute("DELETE FROM trigger_positions WHERE trigger_id = ?", (trigger_id,))
+    await db.commit()
+
+
+# ── Admin queries ─────────────────────────────────────────────────────────────
+
+async def set_admin(db: aiosqlite.Connection, user_id: int, is_admin: bool) -> None:
+    await db.execute(
+        "UPDATE users SET is_admin = ? WHERE id = ?", (1 if is_admin else 0, user_id)
+    )
+    await db.commit()
+
+
+async def list_users(db: aiosqlite.Connection) -> list[dict]:
+    """Return all users (password_hash and totp_secret excluded)."""
+    cursor = await db.execute(
+        "SELECT id, username, email, totp_enabled, is_admin, created_at FROM users"
+        " ORDER BY created_at ASC"
+    )
+    rows = await cursor.fetchall()
+    return [dict(row) for row in rows]
+
+
+async def delete_user(db: aiosqlite.Connection, user_id: int) -> None:
+    """Delete a user and their settings/triggers."""
+    await db.execute("DELETE FROM user_settings WHERE user_id = ?", (user_id,))
+    await db.execute("DELETE FROM triggers WHERE user_id = ?", (user_id,))
+    await db.execute("DELETE FROM users WHERE id = ?", (user_id,))
+    await db.commit()
+
+
+async def db_stats(db: aiosqlite.Connection) -> dict:
+    """Return row counts for all tables."""
+    tables = [
+        "users", "signals", "candles", "triggers",
+        "orders", "trade_history", "trigger_positions",
+    ]
+    result = {}
+    for table in tables:
+        cursor = await db.execute(f"SELECT COUNT(*) FROM {table}")
+        row = await cursor.fetchone()
+        result[table] = row[0] if row else 0
+    return result
+
+
+async def clear_signals(db: aiosqlite.Connection) -> int:
+    """Delete all signals. Returns count deleted."""
+    cursor = await db.execute("DELETE FROM signals")
+    await db.commit()
+    return cursor.rowcount
+
+
+async def clear_all_data(db: aiosqlite.Connection) -> dict:
+    """Wipe signals, candles, orders, trade_history, trigger_positions. Keeps users/triggers."""
+    counts = {}
+    for table in ["signals", "candles", "orders", "trade_history", "trigger_positions"]:
+        cursor = await db.execute(f"DELETE FROM {table}")
+        counts[table] = cursor.rowcount
+    await db.commit()
+    return counts

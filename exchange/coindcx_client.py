@@ -168,3 +168,44 @@ class CoinDCXClient:
         if market:
             body["market"] = market.upper()
         return await self._post("/exchange/v1/orders/active_orders", body, spot=True)
+
+    async def get_trade_history(
+        self,
+        limit: int = 500,
+        from_id: Optional[str] = None,
+    ) -> list[dict]:
+        """
+        POST /exchange/v1/orders/trade_history
+
+        Returns individual trade fills (executions) with fee details.
+        Each item: {order_id, market, side, price, quantity,
+                    fee_amount, fee_currency, timestamp, trade_id}
+        """
+        body: dict = {
+            "timestamp": int(time.time() * 1000),
+            "limit": min(limit, 500),
+        }
+        if from_id:
+            body["from_id"] = from_id
+        return await self._post("/exchange/v1/orders/trade_history", body, spot=True)
+
+    async def get_order_history(
+        self,
+        limit: int = 100,
+        market: Optional[str] = None,
+    ) -> list[dict]:
+        """
+        POST /exchange/v1/orders
+
+        Returns historical (closed/cancelled/filled) orders.
+        Each item: {id, market, side, order_type, status,
+                    total_quantity, avg_price, fee_amount, fee_currency,
+                    created_at, updated_at}
+        """
+        body: dict = {
+            "timestamp": int(time.time() * 1000),
+            "limit": min(limit, 500),
+        }
+        if market:
+            body["market"] = market.upper()
+        return await self._post("/exchange/v1/orders", body, spot=True)
