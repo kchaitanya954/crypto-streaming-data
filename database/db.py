@@ -126,12 +126,14 @@ async def init_db(db_path: str) -> aiosqlite.Connection:
     await db.commit()
     # Safe migrations — add new columns if they don't exist yet
     for table, col, defn in [
-        ("triggers", "adx_threshold",     "REAL"),
-        ("triggers", "cooldown_bars",     "INTEGER"),
-        ("triggers", "name",              "TEXT"),
-        ("triggers", "trade_amount_usdt", "REAL"),
-        ("triggers", "user_id",           "INTEGER"),
-        ("users",    "is_admin",          "INTEGER NOT NULL DEFAULT 0"),
+        ("triggers",      "adx_threshold",     "REAL"),
+        ("triggers",      "cooldown_bars",      "INTEGER"),
+        ("triggers",      "name",               "TEXT"),
+        ("triggers",      "trade_amount_usdt",  "REAL"),
+        ("triggers",      "user_id",            "INTEGER"),
+        ("users",         "is_admin",           "INTEGER NOT NULL DEFAULT 0"),
+        ("orders",        "user_id",            "INTEGER"),
+        ("orders",        "trigger_id",         "INTEGER"),
     ]:
         try:
             await db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {defn}")

@@ -1280,6 +1280,90 @@ function loadAnalytics() {
     .then(r => r.json())
     .then(renderAnalytics)
     .catch(() => {});
+  // Load real trade P&L alongside signal analytics
+  apiFetch(`/api/analytics/real-trades?period=${period}`)
+    .then(r => r.json())
+    .then(renderRealTrades)
+    .catch(() => {});
+}
+
+function renderRealTrades(d) {
+  if (!d || d.error) return;
+  const fmt2 = n => (n != null ? n.toFixed(2) : '—');
+  const fmt4 = n => (n != null ? n.toFixed(4) : '—');
+
+  const noData  = document.getElementById('rt-no-data');
+  const summary = document.getElementById('rt-summary');
+  const openWrap = document.getElementById('rt-open-wrap');
+
+  // Show open positions even if no completed cycles
+  if (d.open_positions && d.open_positions.length > 0) {
+    openWrap.style.display = '';
+    document.getElementById('rt-open-list').innerHTML = d.open_positions.map(p => `
+      <span style="background:#131722;border:1px solid #26A69A33;border-radius:4px;padding:4px 8px;font-size:11px;color:#D1D4DC">
+        <span style="color:#26A69A;font-weight:700">${p.symbol}</span>
+        ${p.qty_held.toPrecision(5)} coins
+        · avg buy <span style="color:#FF9800">$${fmt2(p.avg_buy_price)}</span>
+        · invested <span style="color:#EF5350">$${fmt2(p.total_bought_usdt)}</span>
+      </span>`).join('');
+  } else {
+    openWrap.style.display = 'none';
+  }
+
+  if (d.completed_cycles === 0) {
+    noData.style.display = '';
+    summary.style.display = 'none';
+    document.getElementById('rt-cycles-body').innerHTML = '';
+    return;
+  }
+
+  noData.style.display = 'none';
+  summary.style.display = '';
+
+  const setCard = (id, val, cls) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.textContent = val;
+    el.className = 'an-card-val' + (cls ? ' ' + cls : '');
+  };
+
+  setCard('rt-v-cycles',   d.completed_cycles);
+  setCard('rt-v-winrate',  d.win_rate != null ? d.win_rate + '%' : '—',
+                           d.win_rate != null ? pctClass(d.win_rate - 50) : '');
+  setCard('rt-v-invested', '$' + fmt2(d.total_invested_usdt));
+  setCard('rt-v-returned', '$' + fmt2(d.total_returned_usdt));
+  setCard('rt-v-pnl-usdt',
+    (d.net_pnl_usdt >= 0 ? '+$' : '-$') + Math.abs(d.net_pnl_usdt).toFixed(2),
+    pctClass(d.net_pnl_usdt));
+  setCard('rt-v-pnl-pct',
+    d.net_pnl_pct != null ? pct(d.net_pnl_pct) : '—',
+    d.net_pnl_pct != null ? pctClass(d.net_pnl_pct) : '');
+
+  const tbody = document.getElementById('rt-cycles-body');
+  tbody.innerHTML = (d.cycles || []).map(c => {
+    const pnlColor = c.net_pnl_usdt >= 0 ? '#26A69A' : '#EF5350';
+    const sign     = c.net_pnl_usdt >= 0 ? '+' : '';
+    const dt       = c.last_sell_time ? new Date(c.last_sell_time * 1000) : null;
+    const ts       = dt
+      ? dt.toLocaleDateString([], {month:'short',day:'numeric'}) + ' ' +
+        dt.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})
+      : '—';
+    const statusColor = c.is_closed ? '#4C525E' : '#FF9800';
+    const statusLabel = c.is_closed ? 'Closed' : `Open (${c.remaining_qty.toPrecision(4)} left)`;
+    return `<tr>
+      <td style="font-weight:600;color:#D1D4DC">${c.symbol}</td>
+      <td style="color:#26A69A">${c.buy_count}</td>
+      <td style="color:#EF5350">${c.sell_count}</td>
+      <td style="color:#787B86">$${fmt4(c.avg_buy_price)}</td>
+      <td style="color:#787B86">$${fmt4(c.avg_sell_price)}</td>
+      <td style="color:#EF5350">$${fmt2(c.total_bought_usdt)}</td>
+      <td style="color:#26A69A">$${fmt2(c.total_sold_usdt)}</td>
+      <td style="color:${pnlColor};font-weight:700">${sign}$${Math.abs(c.net_pnl_usdt).toFixed(2)}</td>
+      <td style="color:${pnlColor};font-weight:700">${pct(c.net_pnl_pct)}</td>
+      <td style="color:${statusColor};font-size:10px">${statusLabel}</td>
+      <td style="color:#4C525E;font-size:10px">${ts}</td>
+    </tr>`;
+  }).join('') || '<tr><td colspan="11" style="color:#4C525E;text-align:center">No completed cycles</td></tr>';
 }
 
 function renderAnalytics(d) {
@@ -1687,7 +1771,7 @@ document.getElementById('login-form').addEventListener('submit', async e => {
   localStorage.setItem('auth_username', authUsername);
   localStorage.setItem('auth_is_admin', authIsAdmin);
   hideAuthModal();
-  document.getElementById('logout-btn').style.display = '';
+  _showUserChip(authUsername);
   if (authIsAdmin) document.getElementById('admin-btn').style.display = '';
   initDashboard();
 });
@@ -1752,8 +1836,8 @@ document.getElementById('logout-btn').addEventListener('click', () => {
   localStorage.removeItem('auth_username');
   localStorage.removeItem('auth_is_admin');
   if (ws) { ws.close(); ws = null; }
-  document.getElementById('logout-btn').style.display = 'none';
-  document.getElementById('admin-btn').style.display  = 'none';
+  _hideUserChip();
+  document.getElementById('admin-btn').style.display = 'none';
   showAuthModal();
 });
 
@@ -1822,17 +1906,40 @@ function initDashboard() {
   connect(currentSymbol, currentInterval);
 }
 
+function _showUserChip(username) {
+  const chip = document.getElementById('user-chip');
+  if (chip) {
+    chip.style.display = 'flex';
+    const nameEl = document.getElementById('user-chip-name');
+    if (nameEl) nameEl.textContent = username || 'User';
+  }
+}
+
+function _hideUserChip() {
+  const chip = document.getElementById('user-chip');
+  if (chip) chip.style.display = 'none';
+}
+
 async function checkAuth() {
   if (!authToken) { showAuthModal(); return; }
   const r = await fetch('/api/auth/me', { headers: authHeaders() });
   if (!r.ok) {
-    authToken = null; authUsername = null;
+    authToken = null; authUsername = null; authIsAdmin = false;
     localStorage.removeItem('auth_token');
     localStorage.removeItem('auth_username');
+    localStorage.removeItem('auth_is_admin');
+    _hideUserChip();
+    document.getElementById('admin-btn').style.display = 'none';
     showAuthModal();
     return;
   }
-  document.getElementById('logout-btn').style.display = '';
+  const me = await r.json();
+  // Refresh username/admin from server in case localStorage is stale
+  authUsername = me.username || authUsername;
+  authIsAdmin  = !!me.is_admin;
+  localStorage.setItem('auth_username', authUsername);
+  localStorage.setItem('auth_is_admin', authIsAdmin);
+  _showUserChip(authUsername);
   if (authIsAdmin) document.getElementById('admin-btn').style.display = '';
   initDashboard();
 }

@@ -69,6 +69,8 @@ async def insert_order(
     price: Optional[float] = None,
     signal_id: Optional[int] = None,
     telegram_msg_id: Optional[int] = None,
+    user_id: Optional[int] = None,
+    trigger_id: Optional[int] = None,
 ) -> int:
     """Insert a new order record. Returns the new row id."""
     now = int(time.time())
@@ -76,11 +78,11 @@ async def insert_order(
         """
         INSERT INTO orders
             (signal_id, symbol, side, order_type, quantity, price,
-             status, telegram_msg_id, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)
+             status, telegram_msg_id, user_id, trigger_id, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)
         """,
         (signal_id, symbol.upper(), side, order_type, quantity, price,
-         telegram_msg_id, now, now),
+         telegram_msg_id, user_id, trigger_id, now, now),
     )
     await db.commit()
     return cursor.lastrowid
@@ -339,6 +341,39 @@ async def delete_trigger(db: aiosqlite.Connection, trigger_id: int) -> None:
     """Hard-delete a trigger row."""
     await db.execute("DELETE FROM triggers WHERE id = ?", (trigger_id,))
     await db.commit()
+
+
+async def get_real_trades_for_user(
+    db: aiosqlite.Connection,
+    user_id: int,
+    since: Optional[int] = None,
+) -> list[dict]:
+    """
+    Return all filled orders for a user, ordered by time.
+    Includes USDT amount (qty × price) for each side.
+    """
+    conditions = ["o.user_id = ?", "o.status = 'filled'", "o.price IS NOT NULL"]
+    params: list = [user_id]
+    if since:
+        conditions.append("o.created_at >= ?")
+        params.append(since)
+    where = " AND ".join(conditions)
+    cursor = await db.execute(
+        f"""
+        SELECT
+            o.id, o.symbol, o.side, o.quantity, o.price,
+            o.trigger_id, o.created_at,
+            ROUND(o.quantity * o.price, 6) AS usdt_amount,
+            th.pnl AS pnl_pct
+        FROM orders o
+        LEFT JOIN trade_history th ON th.order_id = o.id
+        WHERE {where}
+        ORDER BY o.created_at ASC
+        """,
+        params,
+    )
+    rows = await cursor.fetchall()
+    return [dict(r) for r in rows]
 
 
 async def load_adaptive_state(db: aiosqlite.Connection) -> Optional[dict]:

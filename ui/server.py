@@ -222,9 +222,24 @@ async def api_login(request: Request, body: LoginRequest):
 
 
 @app.get("/api/auth/me")
-async def api_me(user: dict = Depends(_current_user)):
-    """Validate token and return current user info."""
-    return {"user_id": int(user["sub"]), "username": user["username"]}
+async def api_me(request: Request, user: dict = Depends(_current_user)):
+    """
+    Validate token and return current user info.
+    Rejects tokens issued before this server process started — forces re-login
+    after a Docker rebuild / restart so stale localStorage sessions are cleared.
+    """
+    startup_time = getattr(request.app.state, "startup_time", 0)
+    token_iat    = int(user.get("iat", 0))
+    if startup_time and token_iat < startup_time:
+        raise HTTPException(
+            status_code=401,
+            detail="Session expired — server was restarted, please log in again",
+        )
+    return {
+        "user_id":  int(user["sub"]),
+        "username": user["username"],
+        "is_admin": bool(user.get("is_admin")),
+    }
 
 
 # ── Profile/Settings endpoints ──────────────────────────────────────────────────
@@ -1150,6 +1165,131 @@ async def api_analytics(
     }
 
 
+@app.get("/api/analytics/real-trades")
+async def api_real_trades_analytics(
+    request: Request,
+    period:  str  = Query(default="7d"),
+    user:    dict = Depends(_current_user),
+):
+    """
+    Real trade P&L based on actual executed orders stored in the DB.
+    Groups orders into BUY→SELL cycles per (symbol, trigger_id).
+    P&L is shown in USDT (actual money), not signal-price percentages.
+    Only cycles with at least one BUY and one SELL are shown as completed.
+    """
+    db = getattr(request.app.state, "db", None)
+    if db is None:
+        return JSONResponse({"error": "DB not configured"}, status_code=503)
+
+    user_id = int(user["sub"])
+    now     = int(_time.time())
+    since   = now - _PERIOD_SECS[period] if period in _PERIOD_SECS else None
+
+    orders = await queries.get_real_trades_for_user(db, user_id, since=since)
+    if not orders:
+        return {
+            "total_cycles":        0,
+            "completed_cycles":    0,
+            "total_invested_usdt": 0.0,
+            "total_returned_usdt": 0.0,
+            "net_pnl_usdt":        0.0,
+            "net_pnl_pct":         None,
+            "win_rate":            None,
+            "cycles":              [],
+            "open_positions":      [],
+        }
+
+    # Group orders by (symbol, trigger_id) — each group is one trading position
+    from collections import defaultdict
+    groups: dict[tuple, list] = defaultdict(list)
+    for o in orders:
+        key = (o["symbol"], o["trigger_id"])
+        groups[key].append(o)
+
+    completed_cycles: list[dict] = []
+    open_positions:   list[dict] = []
+
+    for (symbol, trigger_id), group in groups.items():
+        buys  = [o for o in group if o["side"] == "buy"]
+        sells = [o for o in group if o["side"] == "sell"]
+
+        total_bought_usdt = sum(o["usdt_amount"] for o in buys)
+        total_sold_usdt   = sum(o["usdt_amount"] for o in sells)
+        total_bought_qty  = sum(o["quantity"]    for o in buys)
+        total_sold_qty    = sum(o["quantity"]    for o in sells)
+        remaining_qty     = round(total_bought_qty - total_sold_qty, 8)
+
+        if sells:
+            # At least one sell — compute P&L for what's been sold
+            # Proportion of buys that were sold (for partial exits)
+            sell_fraction    = min(total_sold_qty / total_bought_qty, 1.0) if total_bought_qty else 0
+            cost_for_sold    = round(total_bought_usdt * sell_fraction, 4)
+            net_pnl_usdt     = round(total_sold_usdt - cost_for_sold, 4)
+            net_pnl_pct      = round(net_pnl_usdt / cost_for_sold * 100, 4) if cost_for_sold else 0.0
+            avg_buy_price    = total_bought_usdt / total_bought_qty if total_bought_qty else 0
+            avg_sell_price   = total_sold_usdt   / total_sold_qty   if total_sold_qty   else 0
+
+            completed_cycles.append({
+                "symbol":             symbol,
+                "trigger_id":         trigger_id,
+                "buy_count":          len(buys),
+                "sell_count":         len(sells),
+                "total_bought_usdt":  round(total_bought_usdt, 4),
+                "total_sold_usdt":    round(total_sold_usdt, 4),
+                "avg_buy_price":      round(avg_buy_price, 4),
+                "avg_sell_price":     round(avg_sell_price, 4),
+                "net_pnl_usdt":       net_pnl_usdt,
+                "net_pnl_pct":        net_pnl_pct,
+                "remaining_qty":      max(remaining_qty, 0.0),
+                "is_closed":          remaining_qty < 1e-8,
+                "first_buy_time":     buys[0]["created_at"]  if buys  else None,
+                "last_sell_time":     sells[-1]["created_at"] if sells else None,
+                "orders":             [
+                    {
+                        "side":       o["side"],
+                        "qty":        round(o["quantity"], 8),
+                        "price":      round(o["price"], 4),
+                        "usdt":       round(o["usdt_amount"], 4),
+                        "time":       o["created_at"],
+                    }
+                    for o in sorted(group, key=lambda x: x["created_at"])
+                ],
+            })
+        elif buys:
+            # Only buys so far — open position
+            avg_buy_price = total_bought_usdt / total_bought_qty if total_bought_qty else 0
+            open_positions.append({
+                "symbol":            symbol,
+                "trigger_id":        trigger_id,
+                "buy_count":         len(buys),
+                "total_bought_usdt": round(total_bought_usdt, 4),
+                "qty_held":          round(total_bought_qty, 8),
+                "avg_buy_price":     round(avg_buy_price, 4),
+                "since":             buys[0]["created_at"],
+            })
+
+    completed_cycles.sort(key=lambda c: c["last_sell_time"] or 0, reverse=True)
+
+    total_invested = sum(c["total_bought_usdt"] for c in completed_cycles)
+    total_returned = sum(c["total_sold_usdt"]   for c in completed_cycles)
+    net_pnl_usdt   = round(sum(c["net_pnl_usdt"]  for c in completed_cycles), 4)
+    net_pnl_pct    = round(net_pnl_usdt / total_invested * 100, 4) if total_invested else None
+    wins           = [c for c in completed_cycles if c["net_pnl_usdt"] > 0]
+    win_rate       = round(len(wins) / len(completed_cycles) * 100, 1) if completed_cycles else None
+
+    return {
+        "total_cycles":        len(completed_cycles) + len(open_positions),
+        "completed_cycles":    len(completed_cycles),
+        "total_invested_usdt": round(total_invested, 4),
+        "total_returned_usdt": round(total_returned, 4),
+        "net_pnl_usdt":        net_pnl_usdt,
+        "net_pnl_pct":         net_pnl_pct,
+        "win_rate":            win_rate,
+        "cycles":              completed_cycles[:50],   # most recent 50
+        "open_positions":      open_positions,
+    }
+
+
 @app.get("/api/trades/coindcx")
 async def api_coindcx_trades(
     request: Request,
@@ -1308,6 +1448,8 @@ async def _on_startup():
     Then restore adaptive engine state and start the background monitor.
     """
     import asyncio, os
+    # Record when this server process started — used to invalidate pre-restart tokens
+    app.state.startup_time = int(_time.time())
     # Standalone mode: no orchestrator set app.state.db — initialise it now
     if getattr(app.state, "db", None) is None:
         from database.db import init_db
@@ -1363,156 +1505,6 @@ async def _inr_rate_refresh_loop() -> None:
         await asyncio.sleep(3600)   # refresh every hour
 
 
-# ── Auto-trade execution ───────────────────────────────────────────────────────
-
-_engine_lock = asyncio.Lock()
-
-
-async def _execute_trigger_trade(db, trigger: dict, signal, symbol: str, interval: str, signal_id) -> None:
-    """
-    Execute a market order on CoinDCX for a matched trigger.
-    BUY  → spend trigger.trade_amount_usdt to buy base asset.
-    SELL → sell all coins held by this trigger's position.
-    Updates trigger_positions and feeds the adaptive engine with real P&L.
-    """
-    import aiohttp
-    from auth.encryption import safe_decrypt
-    from exchange.coindcx_client import CoinDCXClient
-    from signals.adaptive_strategy import engine as _adaptive_engine
-
-    user_id    = trigger.get("user_id")
-    trigger_id = trigger["id"]
-    amount     = trigger.get("trade_amount_usdt") or 0.0
-
-    if not user_id or not amount:
-        return  # legacy trigger without user or amount — skip auto-trade
-
-    user_settings = await queries.get_user_settings(db, user_id)
-    if not user_settings:
-        return
-
-    key    = safe_decrypt(user_settings.get("coindcx_api_key_enc"))
-    secret = safe_decrypt(user_settings.get("coindcx_api_secret_enc"))
-    if not key or not secret:
-        return
-
-    try:
-        async with aiohttp.ClientSession() as session:
-            exchange = CoinDCXClient(api_key=key, api_secret=secret, session=session)
-
-            if signal.direction == "BUY":
-                # Adaptive position sizing: scale the trigger budget by the engine's buy %
-                adaptive_pct = _adaptive_engine.buy_pct_for(signal.confidence, signal.adx_val)
-                adaptive_usdt = round(amount * adaptive_pct / 100.0, 4)
-                adaptive_usdt = max(adaptive_usdt, 1.0)   # floor at $1 to avoid dust orders
-
-                if _adaptive_engine.circuit_breaker:
-                    _log.warning("Trigger %d: circuit breaker active — skipping BUY", trigger_id)
-                    return
-
-                # Check current USDT balance
-                balances = await exchange.get_balances()
-                usdt_row = next((b for b in balances if b.get("currency") == "USDT"), None)
-                usdt_bal = float(usdt_row.get("balance", 0)) if usdt_row else 0.0
-                if usdt_bal < adaptive_usdt:
-                    _log.warning(
-                        "Trigger %d: insufficient USDT %.2f < %.2f (adaptive %.0f%% of %.2f)",
-                        trigger_id, usdt_bal, adaptive_usdt, adaptive_pct, amount,
-                    )
-                    return
-
-                qty = round(adaptive_usdt / signal.entry_price, 8)
-                result = await exchange.create_order(
-                    side="buy", market=symbol,
-                    order_type="market_order", quantity=qty,
-                )
-                cdx_order_id = result.get("id") or result.get("order_id")
-
-                # Record order
-                order_id = await queries.insert_order(
-                    db, symbol, "buy", "market_order", qty,
-                    price=signal.entry_price, signal_id=signal_id,
-                )
-                await queries.update_order_status(db, order_id, "filled", cdx_order_id)
-
-                # Update trigger position (DCA-style: blend avg entry)
-                pos = await queries.get_trigger_position(db, trigger_id)
-                if pos and pos["coins_held"] > 0:
-                    total_coins = pos["coins_held"] + qty
-                    new_avg = (pos["avg_entry"] * pos["coins_held"] + signal.entry_price * qty) / total_coins
-                    await queries.upsert_trigger_position(
-                        db, trigger_id, symbol, total_coins, new_avg, pos["usdt_spent"] + adaptive_usdt
-                    )
-                else:
-                    await queries.upsert_trigger_position(
-                        db, trigger_id, symbol, qty, signal.entry_price, adaptive_usdt
-                    )
-                _log.info(
-                    "Trigger %d BUY executed: %.8f %s @ %.4f  adaptive=%.0f%% → $%.2f",
-                    trigger_id, qty, symbol, signal.entry_price, adaptive_pct, adaptive_usdt,
-                )
-
-            elif signal.direction == "SELL":
-                pos = await queries.get_trigger_position(db, trigger_id)
-                if not pos or pos["coins_held"] < 1e-8:
-                    return  # nothing to sell
-
-                # Adaptive sell ratio: sell a fraction based on confidence/drawdown
-                sell_ratio    = _adaptive_engine.sell_ratio_for(signal.confidence)
-                coins_to_sell = round(pos["coins_held"] * sell_ratio, 8)
-                if coins_to_sell < 1e-8:
-                    return
-
-                result = await exchange.create_order(
-                    side="sell", market=symbol,
-                    order_type="market_order", quantity=coins_to_sell,
-                )
-                cdx_order_id = result.get("id") or result.get("order_id")
-                avg_entry    = pos["avg_entry"]
-                pnl_pct      = (signal.entry_price - avg_entry) / avg_entry * 100 if avg_entry else 0.0
-
-                # Record order + trade fill
-                order_id = await queries.insert_order(
-                    db, symbol, "sell", "market_order", coins_to_sell,
-                    price=signal.entry_price, signal_id=signal_id,
-                )
-                await queries.update_order_status(db, order_id, "filled", cdx_order_id)
-                await queries.insert_trade(
-                    db, order_id, symbol, "sell",
-                    coins_to_sell, signal.entry_price, pnl=pnl_pct,
-                )
-
-                # Reduce position by sold amount (partial sell support)
-                coins_remaining = round(pos["coins_held"] - coins_to_sell, 8)
-                usdt_remaining  = round(pos["usdt_spent"] * (1.0 - sell_ratio), 4)
-                await queries.upsert_trigger_position(
-                    db, trigger_id, symbol,
-                    max(coins_remaining, 0.0),
-                    pos["avg_entry"],   # avg entry unchanged
-                    max(usdt_remaining, 0.0),
-                )
-
-                # Fetch real portfolio value for accurate adaptive engine update
-                try:
-                    balances_after = await exchange.get_balances()
-                    portfolio_val = sum(float(b.get("balance", 0)) for b in balances_after if b.get("currency") == "USDT")
-                except Exception:
-                    portfolio_val = _adaptive_engine.peak_portfolio
-
-                # Feed real trade into adaptive engine immediately
-                async with _engine_lock:
-                    _adaptive_engine.update([{"pnl_pct": pnl_pct, "portfolio_val": portfolio_val}])
-                await queries.save_adaptive_state(db, _adaptive_engine.to_dict())
-
-                _log.info(
-                    "Trigger %d SELL executed: %.8f %s @ %.4f  ratio=%.0f%%  PnL=%.4f%%  remaining=%.8f",
-                    trigger_id, coins_to_sell, symbol, signal.entry_price,
-                    sell_ratio * 100, pnl_pct, coins_remaining,
-                )
-
-    except Exception as exc:
-        _log.error("Auto-trade failed for trigger %d: %s", trigger_id, exc)
-
 
 async def _adaptive_monitor_loop() -> None:
     """
@@ -1555,6 +1547,7 @@ async def _adaptive_monitor_loop() -> None:
                 running = running * (1 + t["pnl_pct"] / 100)
                 t["portfolio_val"] = running
 
+            from exchange.auto_trade import _engine_lock
             async with _engine_lock:
                 _adaptive_engine.update(all_trades)
             await queries.save_adaptive_state(db, _adaptive_engine.to_dict())
@@ -1692,32 +1685,9 @@ async def _connection_loop(
                     await ws.send_json(signal_payload)
 
                     # Send Telegram alert and execute auto-trades for each matched trigger
-                    if trigger_matched:
-                        if tg_bot is not None and settings is not None:
-                            try:
-                                from telegram_bot.alerts import send_signal_alert
-                                await send_signal_alert(
-                                    bot=tg_bot,
-                                    chat_id=settings.telegram_chat_id,
-                                    signal=signal,
-                                    symbol=symbol.upper(),
-                                    interval=interval,
-                                    phase=settings.trading_phase,
-                                    db=db,
-                                    exchange=getattr(app_state.state, "exchange", None),
-                                    settings=settings,
-                                    signal_id=signal_id,
-                                )
-                            except Exception:
-                                pass
-                        # Fire-and-forget auto-trade tasks per matched trigger
-                        if db is not None:
-                            for trig in matched_triggers:
-                                asyncio.create_task(
-                                    _execute_trigger_trade(
-                                        db, trig, signal, symbol.upper(), interval, signal_id
-                                    )
-                                )
+                    # Auto-trading is handled by the background worker (orchestrator.py),
+                    # which runs 24/7 regardless of browser state.
+                    # The WebSocket only streams signal data to the UI.
             else:
                 await ws.send_json({
                     "type":   "live",

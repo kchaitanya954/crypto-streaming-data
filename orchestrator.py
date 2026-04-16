@@ -78,34 +78,70 @@ async def _stream_pair(symbol: str, interval: str, db, tg_bot, exchange, setting
                          symbol.upper(), interval, signal.direction,
                          signal.confidence, signal.entry_price)
 
-                # Persist to DB
+                # Persist to DB and capture signal_id for trade linkage
+                signal_id = None
                 try:
-                    await queries.insert_signal(db, symbol, interval, signal)
+                    signal_id = await queries.insert_signal(db, symbol, interval, signal)
                 except Exception:
                     pass
 
-                # Fire Telegram alert if any active trigger matches
+                # Fire Telegram alert and execute auto-trades for matched triggers
                 try:
+                    from exchange.auto_trade import execute_trigger_trade
                     active_triggers = await queries.get_triggers(db, active_only=True)
-                    matched = any(
-                        queries.trigger_matches(t, symbol, interval, signal.confidence, signal.adx_val)
-                        for t in active_triggers
-                    )
-                    if matched:
-                        await send_signal_alert(
-                            bot=tg_bot,
-                            chat_id=settings.telegram_chat_id,
-                            signal=signal,
-                            symbol=symbol.upper(),
-                            interval=interval,
-                            phase=settings.trading_phase,
-                            db=db,
-                            exchange=exchange,
-                            settings=settings,
-                        )
-                        log.info("Trigger alert sent  %s %s %s %s",
-                                 signal.direction, signal.confidence,
-                                 symbol.upper(), interval)
+                    matched_triggers = [
+                        t for t in active_triggers
+                        if t.get("user_id") is not None
+                        and queries.trigger_matches(t, symbol, interval, signal.confidence, signal.adx_val)
+                    ]
+                    if matched_triggers:
+
+                        # Send Telegram alert once (uses first matched trigger's user settings)
+                        try:
+                            user_settings = await queries.get_user_settings(db, matched_triggers[0]["user_id"])
+                            from auth.encryption import safe_decrypt
+                            tg_token   = safe_decrypt((user_settings or {}).get("telegram_token"))
+                            tg_chat_id = safe_decrypt((user_settings or {}).get("telegram_chat_id"))
+                            if tg_token and tg_chat_id:
+                                from telegram import Bot
+                                per_user_bot = Bot(token=tg_token)
+                                await send_signal_alert(
+                                    bot=per_user_bot,
+                                    chat_id=tg_chat_id,
+                                    signal=signal,
+                                    symbol=symbol.upper(),
+                                    interval=interval,
+                                    phase=settings.trading_phase,
+                                    db=db,
+                                    exchange=exchange,
+                                    settings=settings,
+                                )
+                            else:
+                                # Fall back to global bot
+                                await send_signal_alert(
+                                    bot=tg_bot,
+                                    chat_id=settings.telegram_chat_id,
+                                    signal=signal,
+                                    symbol=symbol.upper(),
+                                    interval=interval,
+                                    phase=settings.trading_phase,
+                                    db=db,
+                                    exchange=exchange,
+                                    settings=settings,
+                                )
+                        except Exception as exc:
+                            log.error("BG Telegram alert error: %s", exc)
+
+                        # Execute trade for each matched trigger
+                        for trig in matched_triggers:
+                            asyncio.create_task(
+                                execute_trigger_trade(
+                                    db, trig, signal, symbol.upper(), interval, signal_id
+                                )
+                            )
+                            log.info("BG auto-trade queued  trigger=%d  %s %s %s %s",
+                                     trig["id"], signal.direction, signal.confidence,
+                                     symbol.upper(), interval)
                 except Exception as exc:
                     log.error("BG trigger check error: %s", exc)
 
