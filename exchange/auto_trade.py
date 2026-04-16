@@ -44,12 +44,21 @@ async def execute_trigger_trade(
         return  # legacy trigger without user or amount — skip
 
     user_settings = await queries.get_user_settings(db, user_id)
-    if not user_settings:
-        return
+    key = secret = None
+    if user_settings:
+        key    = safe_decrypt(user_settings.get("coindcx_api_key_enc"))
+        secret = safe_decrypt(user_settings.get("coindcx_api_secret_enc"))
 
-    key    = safe_decrypt(user_settings.get("coindcx_api_key_enc"))
-    secret = safe_decrypt(user_settings.get("coindcx_api_secret_enc"))
+    # Fallback: try global .env keys via environment variables
     if not key or not secret:
+        import os
+        key    = os.environ.get("COINDCX_API_KEY")
+        secret = os.environ.get("COINDCX_API_SECRET")
+        if key and secret:
+            _log.info("Trigger %d: using global .env CoinDCX keys (per-user keys not set)", trigger_id)
+
+    if not key or not secret:
+        _log.warning("Trigger %d: no CoinDCX API keys available — skipping trade", trigger_id)
         return
 
     try:
@@ -58,13 +67,21 @@ async def execute_trigger_trade(
 
             # ── BUY ──────────────────────────────────────────────────────────
             if signal.direction == "BUY":
-                if _adaptive_engine.circuit_breaker:
-                    _log.warning("Trigger %d: circuit breaker active — skipping BUY", trigger_id)
+                cb_active = (
+                    _adaptive_engine.consecutive_losses >= 3
+                    or _adaptive_engine.current_drawdown_pct >= 10
+                )
+                if cb_active:
+                    _log.warning("Trigger %d: circuit breaker active (losses=%d DD=%.1f%%) — skipping BUY",
+                                 trigger_id, _adaptive_engine.consecutive_losses,
+                                 _adaptive_engine.current_drawdown_pct)
                     return
 
                 # Scale the trigger budget by the adaptive engine's recommended %
                 adaptive_pct  = _adaptive_engine.buy_pct_for(signal.confidence, signal.adx_val)
-                adaptive_usdt = max(round(amount * adaptive_pct / 100.0, 4), 1.0)
+                adaptive_usdt = max(round(amount * adaptive_pct / 100.0, 4), 5.0)  # $5 min (CoinDCX floor)
+                _log.info("Trigger %d BUY sizing: budget=$%.2f  adaptive=%.1f%%  order=$%.2f",
+                          trigger_id, amount, adaptive_pct, adaptive_usdt)
 
                 balances = await exchange.get_balances()
                 usdt_row = next((b for b in balances if b.get("currency") == "USDT"), None)
@@ -173,4 +190,6 @@ async def execute_trigger_trade(
                 )
 
     except Exception as exc:
-        _log.error("Auto-trade failed for trigger %d: %s", trigger_id, exc)
+        import traceback
+        _log.error("Auto-trade failed for trigger %d: %s\n%s",
+                   trigger_id, exc, traceback.format_exc())
