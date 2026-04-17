@@ -30,63 +30,50 @@ TAKE_PROFIT_PCT  = 4.0   # sell if price rises 4% above avg entry
 # TP must exceed 2x fee to be profitable; SL is tightened by the sell-side fee.
 COINDCX_FEE_RATE = 0.001  # 0.1%
 
-# Market constraints cache: populated from CoinDCX /exchange/v1/markets_details on first use.
-# Falls back to conservative hardcoded values if API call fails.
-# Keys are base currency (e.g. "BTC", "ETH"); values: {"min_qty": float, "step": float, "decimals": int}
-_market_cache: dict[str, dict] = {}
-_market_cache_lock = asyncio.Lock()
-
-# Hardcoded fallbacks (used before API fetch or on failure)
-_FALLBACK_CONSTRAINTS: dict[str, dict] = {
-    "BTC":  {"min_qty": 0.00001, "step": 0.00001, "decimals": 5},
-    "ETH":  {"min_qty": 0.0001,  "step": 0.0001,  "decimals": 4},
-    "BNB":  {"min_qty": 0.001,   "step": 0.001,   "decimals": 3},
-    "SOL":  {"min_qty": 0.01,    "step": 0.01,    "decimals": 2},
-    "XRP":  {"min_qty": 1.0,     "step": 1.0,     "decimals": 0},
-    "DOGE": {"min_qty": 1.0,     "step": 1.0,     "decimals": 0},
-    "MATIC":{"min_qty": 1.0,     "step": 1.0,     "decimals": 0},
-    "ADA":  {"min_qty": 1.0,     "step": 1.0,     "decimals": 0},
+# Market constraints cache.
+# Keys: base currency ("BTC", "ETH"); values: {"min_qty": float, "step": float}
+# Seeded with known-correct values from real CoinDCX error messages.
+# Updated at runtime when OMS-VF-0004 reveals the actual minimum.
+_market_cache: dict[str, dict] = {
+    "BTC":   {"min_qty": 0.00001, "step": 0.00001},
+    "ETH":   {"min_qty": 0.0001,  "step": 0.0001},
+    "BNB":   {"min_qty": 0.001,   "step": 0.001},
+    "SOL":   {"min_qty": 0.01,    "step": 0.01},
+    "XRP":   {"min_qty": 1.0,     "step": 1.0},
+    "DOGE":  {"min_qty": 1.0,     "step": 1.0},
+    "MATIC": {"min_qty": 1.0,     "step": 1.0},
+    "ADA":   {"min_qty": 1.0,     "step": 1.0},
+    "AVAX":  {"min_qty": 0.01,    "step": 0.01},
+    "LINK":  {"min_qty": 0.1,     "step": 0.1},
+    "DOT":   {"min_qty": 0.1,     "step": 0.1},
+    "LTC":   {"min_qty": 0.001,   "step": 0.001},
 }
-_DEFAULT_CONSTRAINTS = {"min_qty": 0.0001, "step": 0.0001, "decimals": 4}
+_DEFAULT_CONSTRAINTS = {"min_qty": 0.0001, "step": 0.0001}
 
 
-async def _get_market_constraints(exchange, base: str) -> dict:
+def _get_market_constraints(base: str) -> dict:
+    """Return {min_qty, step} for a base currency. Falls back to safe defaults."""
+    return _market_cache.get(base.upper(), _DEFAULT_CONSTRAINTS)
+
+
+def _learn_min_qty_from_error(base: str, error_msg: str) -> None:
     """
-    Return {min_qty, step, decimals} for a base currency.
-    Fetches from CoinDCX markets_details on first call and caches for the session.
+    Parse the actual minimum from a CoinDCX OMS-VF-0004 error message and cache it.
+    Message format: "Quantity should be greater than 0.0001"
     """
-    key = base.upper()
-    async with _market_cache_lock:
-        if key in _market_cache:
-            return _market_cache[key]
-
-        # First call — try to fetch all market details from CoinDCX
-        if not _market_cache:
-            try:
-                details = await exchange._get("/exchange/v1/markets_details")
-                for m in details:
-                    # market format: "BTCUSDT", base_currency_short_name: "BTC"
-                    b = (m.get("base_currency_short_name") or "").upper()
-                    if not b:
-                        continue
-                    min_q = float(m.get("min_quantity") or 0)
-                    step  = float(m.get("step") or min_q or 0.0001)
-                    if min_q > 0 and b not in _market_cache:
-                        # Derive decimal places from step size
-                        import decimal as _dec
-                        decimals = abs(_dec.Decimal(str(step)).normalize().as_tuple().exponent)
-                        _market_cache[b] = {"min_qty": min_q, "step": step, "decimals": decimals}
-                _log.info("Market constraints loaded for %d pairs", len(_market_cache))
-            except Exception as exc:
-                _log.warning("Could not fetch market details (%s) — using fallbacks", exc)
-
-        result = _market_cache.get(key) or _FALLBACK_CONSTRAINTS.get(key) or _DEFAULT_CONSTRAINTS
-        _market_cache[key] = result  # cache fallback too so we don't retry every trade
-        return result
+    import re
+    m = re.search(r"greater than\s+([\d.]+)", error_msg)
+    if m:
+        try:
+            actual_min = float(m.group(1))
+            _market_cache[base.upper()] = {"min_qty": actual_min, "step": actual_min}
+            _log.info("Learned min_qty for %s = %s (from exchange error)", base.upper(), actual_min)
+        except ValueError:
+            pass
 
 
 def _apply_constraints(raw: float, constraints: dict) -> float:
-    """Floor quantity to the market's step size (satisfies both precision and min_qty checks)."""
+    """Floor quantity to the market's step size."""
     step   = constraints["step"]
     factor = 1.0 / step
     return math.floor(raw * factor) / factor
@@ -252,31 +239,36 @@ async def execute_trigger_trade(
                     return
 
                 base_currency = symbol.upper().replace("USDT", "")
-                constraints   = await _get_market_constraints(exchange, base_currency)
-                min_qty       = constraints["min_qty"]
 
-                # Deduct BUY-side fee — what we actually receive after exchange takes cut
-                qty_gross = adaptive_usdt / signal.entry_price
-                qty       = _apply_constraints(qty_gross * (1 - COINDCX_FEE_RATE), constraints)
+                # Quantity floored to known step size (precision only — no pre-validation)
+                constraints = _get_market_constraints(base_currency)
+                qty_gross   = adaptive_usdt / signal.entry_price
+                qty         = _apply_constraints(qty_gross * (1 - COINDCX_FEE_RATE), constraints)
 
-                if qty < min_qty:
-                    _log.warning(
-                        "Trigger %d: BUY qty %.8f %s < exchange min %.8f — skipping (budget too small for one lot)",
-                        trigger_id, qty, base_currency, min_qty,
+                from aiohttp import ClientResponseError as _CRE
+                try:
+                    result = await exchange.create_order(
+                        side="buy", market=symbol,
+                        order_type="market_order", quantity=qty,
                     )
-                    if tg_bot:
-                        min_usdt = round(min_qty * signal.entry_price, 2)
-                        await send_trade_error(
-                            tg_bot, tg_chat_id, trigger_id, symbol, "BUY",
-                            f"Trigger slice ${adaptive_usdt:.2f} < exchange minimum (~${min_usdt}). "
-                            f"Increase trigger amount or wait for a higher-confidence signal.",
+                except _CRE as exc:
+                    msg = str(exc.message)
+                    if exc.status == 400 and any(
+                        c in msg for c in ("OMS-VF-0004", "OMS-VF-0006")
+                    ):
+                        _learn_min_qty_from_error(base_currency, msg)
+                        real_min  = _get_market_constraints(base_currency)["min_qty"]
+                        min_usdt  = round(real_min * signal.entry_price, 4)
+                        warn_text = (
+                            f"BUY slice ${adaptive_usdt:.4f} is below the exchange minimum "
+                            f"({real_min} {base_currency} ≈ ${min_usdt:.2f}). "
+                            f"Increase trigger amount or confidence threshold."
                         )
-                    return
-
-                result = await exchange.create_order(
-                    side="buy", market=symbol,
-                    order_type="market_order", quantity=qty,
-                )
+                        _log.warning("Trigger %d: %s", trigger_id, warn_text)
+                        if tg_bot:
+                            await send_trade_error(tg_bot, tg_chat_id, trigger_id, symbol, "BUY", warn_text)
+                        return
+                    raise
                 cdx_order_id = result.get("id") or result.get("order_id")
 
                 order_id = await queries.insert_order(
@@ -374,34 +366,10 @@ async def execute_trigger_trade(
                 if coins_to_sell < 1e-8:
                     return
 
-                constraints   = await _get_market_constraints(exchange, base_currency)
-                min_qty       = constraints["min_qty"]
-
-                # Full position quantity (floored to step size)
-                full_qty  = _apply_constraints(pos["coins_held"], constraints)
-                dust_usdt = full_qty * signal.entry_price
-
-                # If the entire position is below exchange minimum → it's dust, clear DB
-                if full_qty < min_qty:
-                    _log.warning(
-                        "Trigger %d: full position %.8f %s ($%.4f) < exchange min %.8f — clearing DB",
-                        trigger_id, full_qty, base_currency, dust_usdt, min_qty,
-                    )
-                    await queries.upsert_trigger_position(
-                        db, trigger_id, symbol, 0.0, 0.0, 0.0
-                    )
-                    return
-
-                # Apply step-size constraints to the sell quantity
+                # Floor to step size for precision (no pre-validation against min_qty)
+                constraints   = _get_market_constraints(base_currency)
+                full_qty      = _apply_constraints(pos["coins_held"], constraints)
                 coins_to_sell = _apply_constraints(coins_to_sell, constraints)
-
-                # If partial sell is below minimum, escalate to full position
-                if coins_to_sell < min_qty:
-                    _log.info(
-                        "Trigger %d: partial SELL %.8f < min %.8f — escalating to full %.8f %s",
-                        trigger_id, coins_to_sell, min_qty, full_qty, base_currency,
-                    )
-                    coins_to_sell = full_qty
 
                 from aiohttp import ClientResponseError as _CRE
                 async def _place_sell(qty: float) -> dict:
@@ -414,34 +382,38 @@ async def execute_trigger_trade(
                     result = await _place_sell(coins_to_sell)
                 except _CRE as exc:
                     msg = str(exc.message)
-                    # OMS-VF-0004 = qty too small; OMS-VF-0006 = wrong precision
                     if exc.status == 400 and any(
-                        code in msg for code in ("OMS-VF-0004", "OMS-VF-0006")
+                        c in msg for c in ("OMS-VF-0004", "OMS-VF-0006")
                     ):
-                        # Last resort: try full position; if still rejected it's dust
-                        if coins_to_sell < full_qty:
-                            _log.info("Trigger %d: escalating to full %.8f %s after rejection",
-                                      trigger_id, full_qty, base_currency)
+                        # Learn real minimum from the error, then escalate or clear
+                        _learn_min_qty_from_error(base_currency, msg)
+                        real_min = _get_market_constraints(base_currency)["min_qty"]
+
+                        if full_qty >= real_min and full_qty > coins_to_sell:
+                            # Partial was too small — escalate to full position
+                            _log.info(
+                                "Trigger %d: partial %.8f below min %.8f — escalating to full %.8f %s",
+                                trigger_id, coins_to_sell, real_min, full_qty, base_currency,
+                            )
                             try:
                                 result = await _place_sell(full_qty)
                                 coins_to_sell = full_qty
-                            except _CRE:
+                            except _CRE as exc2:
+                                _learn_min_qty_from_error(base_currency, str(exc2.message))
                                 _log.warning(
-                                    "Trigger %d: full position %.8f %s also rejected — clearing DB as dust",
+                                    "Trigger %d: full position %.8f %s still rejected — clearing DB as dust",
                                     trigger_id, full_qty, base_currency,
                                 )
-                                await queries.upsert_trigger_position(
-                                    db, trigger_id, symbol, 0.0, 0.0, 0.0
-                                )
+                                await queries.upsert_trigger_position(db, trigger_id, symbol, 0.0, 0.0, 0.0)
                                 return
                         else:
+                            # Full position is also below minimum — it's dust
+                            dust_usdt = round(full_qty * signal.entry_price, 4)
                             _log.warning(
-                                "Trigger %d: full position %.8f %s still below min — clearing DB",
-                                trigger_id, full_qty, base_currency,
+                                "Trigger %d: position %.8f %s ($%.4f) is below exchange min %.8f — clearing DB",
+                                trigger_id, full_qty, base_currency, dust_usdt, real_min,
                             )
-                            await queries.upsert_trigger_position(
-                                db, trigger_id, symbol, 0.0, 0.0, 0.0
-                            )
+                            await queries.upsert_trigger_position(db, trigger_id, symbol, 0.0, 0.0, 0.0)
                             return
                     else:
                         raise
