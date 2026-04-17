@@ -157,32 +157,14 @@ async def execute_trigger_trade(
                         )
                     return
 
-                # ── Adaptive signal filter (tighten criteria, keep trading) ───
-                # After real consecutive losses, we don't STOP — we get SELECTIVE.
-                # Adaptive position sizing already reduces size; this layer
-                # additionally demands stronger signal quality.
-                if losses >= 5:
-                    # 5+ real losses: require HIGH confidence only.
-                    # The signal detector already gates on ADX internally — adding a
-                    # second ADX threshold here causes the bot to freeze completely
-                    # (HIGH signals at ADX 24-29 are valid but were double-blocked).
-                    if signal.confidence != "HIGH":
-                        _log.info("Trigger %d: adaptive filter (5+ losses) — skipping %s confidence BUY, need HIGH",
-                                  trigger_id, signal.confidence)
-                        return
-                    _log.info("Trigger %d: adaptive filter PASSED (5+ losses, HIGH confidence)", trigger_id)
-
-                elif losses >= 3:
-                    # 3-4 real losses: raise bar to HIGH confidence only
-                    if signal.confidence not in ("HIGH", "MEDIUM"):
-                        _log.info("Trigger %d: adaptive filter (3+ losses) — skipping LOW confidence BUY",
-                                  trigger_id)
-                        return
-                    if signal.confidence == "MEDIUM" and (signal.adx_val or 0) < 25:
-                        _log.info("Trigger %d: adaptive filter (3+ losses) — MEDIUM needs ADX≥25, got %.1f",
-                                  trigger_id, signal.adx_val or 0)
-                        return
-                    _log.info("Trigger %d: adaptive filter PASSED (3+ losses, %s confidence)", trigger_id, signal.confidence)
+                # No confidence-based blocking — the adaptive engine already handles
+                # loss streaks by reducing BUY size via Kelly + drawdown multipliers.
+                # Blocking signals entirely prevents recovery; smaller size does not.
+                if losses > 0:
+                    _log.info(
+                        "Trigger %d: %d consecutive losses — Kelly-reduced sizing, still trading",
+                        trigger_id, losses,
+                    )
 
                 # ── Max concurrent open positions check ──────────────────────
                 open_count = await queries.get_open_positions_count(db, user_id)

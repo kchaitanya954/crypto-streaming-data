@@ -107,14 +107,26 @@
     /* ── Sidebar ── */
     #sidebar {
       width: 240px;
-      min-width: 240px;
+      min-width: 160px;
+      max-width: 520px;
       background: #1E222D;
-      border-right: 1px solid #2A2E39;
+      border-right: none;
       display: flex;
       flex-direction: column;
       overflow-y: auto;
       overflow-x: hidden;
+      flex-shrink: 0;
     }
+
+    #sidebar-resize {
+      width: 5px;
+      cursor: col-resize;
+      background: #2A2E39;
+      flex-shrink: 0;
+      transition: background 0.15s;
+      z-index: 10;
+    }
+    #sidebar-resize:hover, #sidebar-resize.dragging { background: #2962FF; }
 
     .sidebar-title {
       padding: 9px 12px;
@@ -808,6 +820,9 @@
       <div id="triggers-list"><div class="trig-empty">No triggers</div></div>
     </div>
   </div>
+
+  <!-- Sidebar resize handle -->
+  <div id="sidebar-resize" title="Drag to resize"></div>
 
   <!-- Charts -->
   <div id="charts">
