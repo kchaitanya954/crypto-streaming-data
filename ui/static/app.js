@@ -2523,3 +2523,47 @@ document.getElementById('admin-btn').addEventListener('click', () => {
 document.getElementById('admin-close').addEventListener('click', () => {
   document.getElementById('admin-modal').style.display = 'none';
 });
+
+// ── Sidebar resize ────────────────────────────────────────────────────────────
+(function _initSidebarResize() {
+  const handle  = document.getElementById('sidebar-resize');
+  const sidebar = document.getElementById('sidebar');
+  if (!handle || !sidebar) return;
+
+  // Restore saved width
+  const saved = localStorage.getItem('sidebar_width');
+  if (saved) sidebar.style.width = saved + 'px';
+
+  let dragging = false, startX = 0, startW = 0;
+
+  handle.addEventListener('mousedown', e => {
+    dragging = true;
+    startX   = e.clientX;
+    startW   = sidebar.offsetWidth;
+    handle.classList.add('dragging');
+    document.body.style.cursor    = 'col-resize';
+    document.body.style.userSelect = 'none';
+    e.preventDefault();
+  });
+
+  document.addEventListener('mousemove', e => {
+    if (!dragging) return;
+    const newW = Math.min(520, Math.max(160, startW + (e.clientX - startX)));
+    sidebar.style.width = newW + 'px';
+  });
+
+  document.addEventListener('mouseup', () => {
+    if (!dragging) return;
+    dragging = false;
+    handle.classList.remove('dragging');
+    document.body.style.cursor    = '';
+    document.body.style.userSelect = '';
+    localStorage.setItem('sidebar_width', sidebar.offsetWidth);
+  });
+
+  // Double-click to reset to default
+  handle.addEventListener('dblclick', () => {
+    sidebar.style.width = '240px';
+    localStorage.removeItem('sidebar_width');
+  });
+})();
