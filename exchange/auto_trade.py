@@ -371,6 +371,15 @@ async def execute_trigger_trade(
                 full_qty      = _apply_constraints(pos["coins_held"], constraints)
                 coins_to_sell = _apply_constraints(coins_to_sell, constraints)
 
+                # Guard: step-floor may reduce coins_to_sell to 0 for tiny partial slices
+                if coins_to_sell <= 0 or coins_to_sell < constraints["min_qty"]:
+                    _log.warning(
+                        "Trigger %d SELL skipped: coins_to_sell=%.8f after step-floor is below "
+                        "min_qty=%.8f %s (likely partial slice of a tiny position)",
+                        trigger_id, coins_to_sell, constraints["min_qty"], base_currency,
+                    )
+                    return
+
                 from aiohttp import ClientResponseError as _CRE
                 async def _place_sell(qty: float) -> dict:
                     return await exchange.create_order(
@@ -382,8 +391,8 @@ async def execute_trigger_trade(
                     result = await _place_sell(coins_to_sell)
                 except _CRE as exc:
                     msg = str(exc.message)
-                    if exc.status == 400 and any(
-                        c in msg for c in ("OMS-VF-0004", "OMS-VF-0006")
+                    if exc.status in (400, 422) and any(
+                        c in msg for c in ("OMS-VF-0004", "OMS-VF-0006", "total_quantity", "positive number")
                     ):
                         # Learn real minimum from the error, then escalate or clear
                         _learn_min_qty_from_error(base_currency, msg)
