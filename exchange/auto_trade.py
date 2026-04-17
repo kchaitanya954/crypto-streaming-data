@@ -162,16 +162,15 @@ async def execute_trigger_trade(
                 # Adaptive position sizing already reduces size; this layer
                 # additionally demands stronger signal quality.
                 if losses >= 5:
-                    # 5+ real losses: only act on HIGH confidence with strong ADX
+                    # 5+ real losses: require HIGH confidence only.
+                    # The signal detector already gates on ADX internally — adding a
+                    # second ADX threshold here causes the bot to freeze completely
+                    # (HIGH signals at ADX 24-29 are valid but were double-blocked).
                     if signal.confidence != "HIGH":
                         _log.info("Trigger %d: adaptive filter (5+ losses) — skipping %s confidence BUY, need HIGH",
                                   trigger_id, signal.confidence)
                         return
-                    if (signal.adx_val or 0) < 30:
-                        _log.info("Trigger %d: adaptive filter (5+ losses) — skipping ADX=%.1f BUY, need ≥30",
-                                  trigger_id, signal.adx_val or 0)
-                        return
-                    _log.info("Trigger %d: adaptive filter PASSED (5+ losses, HIGH+ADX≥30)", trigger_id)
+                    _log.info("Trigger %d: adaptive filter PASSED (5+ losses, HIGH confidence)", trigger_id)
 
                 elif losses >= 3:
                     # 3-4 real losses: raise bar to HIGH confidence only
@@ -371,13 +370,15 @@ async def execute_trigger_trade(
                 full_qty      = _apply_constraints(pos["coins_held"], constraints)
                 coins_to_sell = _apply_constraints(coins_to_sell, constraints)
 
-                # Guard: step-floor may reduce coins_to_sell to 0 for tiny partial slices
+                # Guard: step-floor may reduce coins_to_sell to 0 for dust positions.
+                # Clear the stale DB entry so future SELL signals don't re-enter this path.
                 if coins_to_sell <= 0 or coins_to_sell < constraints["min_qty"]:
                     _log.warning(
                         "Trigger %d SELL skipped: coins_to_sell=%.8f after step-floor is below "
-                        "min_qty=%.8f %s (likely partial slice of a tiny position)",
+                        "min_qty=%.8f %s — dust position, clearing DB",
                         trigger_id, coins_to_sell, constraints["min_qty"], base_currency,
                     )
+                    await queries.upsert_trigger_position(db, trigger_id, symbol, 0.0, 0.0, 0.0)
                     return
 
                 from aiohttp import ClientResponseError as _CRE
