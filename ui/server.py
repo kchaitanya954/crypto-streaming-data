@@ -1330,6 +1330,22 @@ async def api_analytics(
     }
 
 
+@app.get("/api/analytics/daily")
+async def api_daily_pnl(
+    request: Request,
+    date:    str  = Query(default=""),
+    user:    dict = Depends(_current_user),
+):
+    """
+    Daily P&L summary grouped by trigger for a given IST date (YYYY-MM-DD).
+    Defaults to today IST if no date provided.
+    """
+    db      = request.app.state.db
+    user_id = int(user["sub"])
+    rows    = await queries.get_daily_pnl_by_trigger(db, user_id, date or None)
+    return {"date": date or None, "rows": rows}
+
+
 @app.get("/api/analytics/real-trades")
 async def api_real_trades_analytics(
     request: Request,
@@ -1622,6 +1638,7 @@ async def _on_startup():
         app.state.db = await init_db(db_path)
     asyncio.create_task(_load_adaptive_state_when_ready())
     asyncio.create_task(_inr_rate_refresh_loop())
+    asyncio.create_task(_daily_pnl_scheduler())
 
 
 async def _load_adaptive_state_when_ready() -> None:
@@ -1679,6 +1696,59 @@ async def _inr_rate_refresh_loop() -> None:
                 app.state.inr_rate_ts = int(_time.time())
         await asyncio.sleep(3600)   # refresh every hour
 
+
+
+async def _daily_pnl_scheduler() -> None:
+    """
+    Fire a daily P&L report to every active user's Telegram at 10:00 AM IST (04:30 UTC).
+    Uses asyncio.sleep() to wake precisely at the next 04:30 UTC.
+    """
+    import asyncio
+    import datetime as _dt
+    import logging
+    from telegram_bot.alerts import send_daily_pnl_report
+    from auth.encryption import safe_decrypt
+    from telegram import Bot
+
+    log = logging.getLogger("daily_pnl")
+
+    while True:
+        # Calculate seconds until next 04:30 UTC (= 10:00 IST)
+        now_utc  = _dt.datetime.utcnow()
+        target   = now_utc.replace(hour=4, minute=30, second=0, microsecond=0)
+        if now_utc >= target:
+            target += _dt.timedelta(days=1)
+        wait_sec = (target - now_utc).total_seconds()
+        log.info("Daily P&L report scheduled in %.0f s (at %s UTC)", wait_sec, target.strftime("%H:%M"))
+        await asyncio.sleep(wait_sec)
+
+        db = getattr(app.state, "db", None)
+        if db is None:
+            continue
+
+        # IST date string for "today" at report time
+        ist_now  = _dt.datetime.utcnow() + _dt.timedelta(seconds=19800)
+        date_iso = ist_now.strftime("%Y-%m-%d")
+
+        try:
+            # Send report to every user who has Telegram configured
+            users = await queries.get_all_users(db)
+            for user in users:
+                user_id = user["id"]
+                try:
+                    settings = await queries.get_user_settings(db, user_id)
+                    tg_token   = safe_decrypt((settings or {}).get("telegram_token"))
+                    tg_chat_id = safe_decrypt((settings or {}).get("telegram_chat_id"))
+                    if not tg_token or not tg_chat_id:
+                        continue
+                    rows = await queries.get_daily_pnl_by_trigger(db, user_id, date_iso)
+                    bot  = Bot(token=tg_token)
+                    await send_daily_pnl_report(bot, tg_chat_id, rows, date_iso)
+                    log.info("Daily P&L report sent to user %d for %s", user_id, date_iso)
+                except Exception as exc:
+                    log.error("Daily P&L report failed for user %d: %s", user_id, exc)
+        except Exception as exc:
+            log.error("Daily P&L scheduler error: %s", exc)
 
 
 async def _adaptive_monitor_loop() -> None:

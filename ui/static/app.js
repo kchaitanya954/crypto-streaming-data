@@ -1252,6 +1252,7 @@ document.getElementById('analytics-btn').addEventListener('click', () => {
   document.getElementById('analytics-modal').classList.add('open');
   analyticsOpen = true;
   loadAnalytics();
+  loadDailyPnl();
   apiFetch('/api/adaptive').then(r => r.json()).then(renderAdaptiveState).catch(() => {});
 });
 
@@ -1617,6 +1618,74 @@ function renderAdaptiveState(eng) {
     cbEl.textContent  = eng.circuit_breaker ? 'ACTIVE' : 'OFF';
     cbEl.style.color  = eng.circuit_breaker ? '#EF5350' : '#26A69A';
   }
+}
+
+// ── Daily P&L ─────────────────────────────────────────────────────────────────
+
+(function _initDailyPnl() {
+  // Default date input to today (IST ≈ local date in most cases)
+  const dateEl = document.getElementById('daily-pnl-date');
+  if (dateEl) dateEl.value = new Date().toISOString().slice(0, 10);
+})();
+
+document.getElementById('daily-pnl-refresh').addEventListener('click', loadDailyPnl);
+
+function loadDailyPnl() {
+  const dateEl  = document.getElementById('daily-pnl-date');
+  const date    = (dateEl && dateEl.value) ? dateEl.value : '';
+  const tableEl = document.getElementById('daily-pnl-table');
+  const noEl    = document.getElementById('daily-pnl-no-data');
+  const bodyEl  = document.getElementById('daily-pnl-body');
+
+  tableEl.style.display = 'none';
+  noEl.style.display    = 'none';
+  bodyEl.innerHTML      = '<tr><td colspan="9" style="color:#4C525E">Loading…</td></tr>';
+  tableEl.style.display = 'table';
+
+  apiFetch(`/api/analytics/daily?date=${date}`)
+    .then(d => renderDailyPnl(d))
+    .catch(() => {
+      bodyEl.innerHTML = '<tr><td colspan="9" style="color:#F23645">Failed to load</td></tr>';
+    });
+}
+
+function renderDailyPnl(data) {
+  const tableEl = document.getElementById('daily-pnl-table');
+  const noEl    = document.getElementById('daily-pnl-no-data');
+  const bodyEl  = document.getElementById('daily-pnl-body');
+  const rows    = (data && data.rows) || [];
+
+  if (!rows.length) {
+    tableEl.style.display = 'none';
+    noEl.style.display    = 'block';
+    return;
+  }
+
+  tableEl.style.display = 'table';
+  noEl.style.display    = 'none';
+
+  bodyEl.innerHTML = rows.map((r, i) => {
+    const isTotal   = r.trigger_id === null;
+    const pnl       = r.net_pnl_usdt || 0;
+    const pnlColor  = pnl >= 0 ? '#26A69A' : '#F23645';
+    const pnlSign   = pnl >= 0 ? '+' : '';
+    const avgPct    = r.avg_pnl_pct != null ? `${r.avg_pnl_pct >= 0 ? '+' : ''}${r.avg_pnl_pct.toFixed(2)}%` : '—';
+    const rowStyle  = isTotal
+      ? 'background:#1E222D;font-weight:700;border-top:1px solid #3A3F4E'
+      : (i % 2 === 0 ? '' : 'background:#161A25');
+
+    return `<tr style="${rowStyle}">
+      <td>${isTotal ? '<b>ALL</b>' : `#${r.trigger_id}`}</td>
+      <td>${r.symbol}</td>
+      <td>${r.interval}</td>
+      <td>${r.buy_count}</td>
+      <td>$${(r.buy_usdt || 0).toFixed(4)}</td>
+      <td>${r.sell_count}</td>
+      <td>$${(r.sell_usdt || 0).toFixed(4)}</td>
+      <td style="color:${r.avg_pnl_pct >= 0 ? '#26A69A' : '#F23645'}">${avgPct}</td>
+      <td style="color:${pnlColor};font-weight:600">${pnlSign}$${pnl.toFixed(4)}</td>
+    </tr>`;
+  }).join('');
 }
 
 // ── Real CoinDCX Trades ───────────────────────────────────────────────────────
