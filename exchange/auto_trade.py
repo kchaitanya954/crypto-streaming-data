@@ -14,6 +14,7 @@ Improvements:
 
 import asyncio
 import logging
+import math
 
 _log = logging.getLogger("auto_trade")
 _engine_lock = asyncio.Lock()
@@ -24,6 +25,71 @@ MAX_OPEN_POSITIONS = 5
 # Default risk parameters (% of avg entry price)
 STOP_LOSS_PCT    = 2.0   # sell if price drops 2% below avg entry
 TAKE_PROFIT_PCT  = 4.0   # sell if price rises 4% above avg entry
+
+# CoinDCX taker fee (market orders). Round-trip cost = 2x this.
+# TP must exceed 2x fee to be profitable; SL is tightened by the sell-side fee.
+COINDCX_FEE_RATE = 0.001  # 0.1%
+
+# Market constraints cache: populated from CoinDCX /exchange/v1/markets_details on first use.
+# Falls back to conservative hardcoded values if API call fails.
+# Keys are base currency (e.g. "BTC", "ETH"); values: {"min_qty": float, "step": float, "decimals": int}
+_market_cache: dict[str, dict] = {}
+_market_cache_lock = asyncio.Lock()
+
+# Hardcoded fallbacks (used before API fetch or on failure)
+_FALLBACK_CONSTRAINTS: dict[str, dict] = {
+    "BTC":  {"min_qty": 0.00001, "step": 0.00001, "decimals": 5},
+    "ETH":  {"min_qty": 0.0001,  "step": 0.0001,  "decimals": 4},
+    "BNB":  {"min_qty": 0.001,   "step": 0.001,   "decimals": 3},
+    "SOL":  {"min_qty": 0.01,    "step": 0.01,    "decimals": 2},
+    "XRP":  {"min_qty": 1.0,     "step": 1.0,     "decimals": 0},
+    "DOGE": {"min_qty": 1.0,     "step": 1.0,     "decimals": 0},
+    "MATIC":{"min_qty": 1.0,     "step": 1.0,     "decimals": 0},
+    "ADA":  {"min_qty": 1.0,     "step": 1.0,     "decimals": 0},
+}
+_DEFAULT_CONSTRAINTS = {"min_qty": 0.0001, "step": 0.0001, "decimals": 4}
+
+
+async def _get_market_constraints(exchange, base: str) -> dict:
+    """
+    Return {min_qty, step, decimals} for a base currency.
+    Fetches from CoinDCX markets_details on first call and caches for the session.
+    """
+    key = base.upper()
+    async with _market_cache_lock:
+        if key in _market_cache:
+            return _market_cache[key]
+
+        # First call — try to fetch all market details from CoinDCX
+        if not _market_cache:
+            try:
+                details = await exchange._get("/exchange/v1/markets_details")
+                for m in details:
+                    # market format: "BTCUSDT", base_currency_short_name: "BTC"
+                    b = (m.get("base_currency_short_name") or "").upper()
+                    if not b:
+                        continue
+                    min_q = float(m.get("min_quantity") or 0)
+                    step  = float(m.get("step") or min_q or 0.0001)
+                    if min_q > 0 and b not in _market_cache:
+                        # Derive decimal places from step size
+                        import decimal as _dec
+                        decimals = abs(_dec.Decimal(str(step)).normalize().as_tuple().exponent)
+                        _market_cache[b] = {"min_qty": min_q, "step": step, "decimals": decimals}
+                _log.info("Market constraints loaded for %d pairs", len(_market_cache))
+            except Exception as exc:
+                _log.warning("Could not fetch market details (%s) — using fallbacks", exc)
+
+        result = _market_cache.get(key) or _FALLBACK_CONSTRAINTS.get(key) or _DEFAULT_CONSTRAINTS
+        _market_cache[key] = result  # cache fallback too so we don't retry every trade
+        return result
+
+
+def _apply_constraints(raw: float, constraints: dict) -> float:
+    """Floor quantity to the market's step size (satisfies both precision and min_qty checks)."""
+    step   = constraints["step"]
+    factor = 1.0 / step
+    return math.floor(raw * factor) / factor
 
 
 async def _get_user_telegram(user_settings: dict):
@@ -146,15 +212,26 @@ async def execute_trigger_trade(
                         )
                     return
 
-                # ── Adaptive position sizing ─────────────────────────────────
-                # Scale the trigger budget by the adaptive engine's recommended %.
-                # No hardcoded USDT floor — CoinDCX will reject if truly too small
-                # and the error will surface in logs/Telegram.
+                # ── Adaptive slice sizing (% of *remaining* trigger budget) ──
+                # BUY deploys a fraction of what's left unspent in this trigger.
+                # Example: trigger=$10, MEDIUM → 50% of $10=$5 first trade,
+                #          then 50% of remaining $5=$2.50, then $1.25, etc.
+                # This prevents over-investing and keeps capital for DCA signals.
+                pos_before   = await queries.get_trigger_position(db, trigger_id)
+                usdt_spent   = pos_before["usdt_spent"] if pos_before else 0.0
+                remaining    = max(round(amount - usdt_spent, 4), 0.0)
+
+                if remaining < 0.50:
+                    _log.info(
+                        "Trigger %d: remaining budget $%.4f exhausted — skipping BUY",
+                        trigger_id, remaining,
+                    )
+                    return
+
                 adaptive_pct  = _adaptive_engine.buy_pct_for(signal.confidence, signal.adx_val)
-                adaptive_usdt = round(amount * adaptive_pct / 100.0, 4)
-                # Never invest less than $0.50 (sanity guard against near-zero adaptive_pct)
-                if adaptive_usdt < 0.5:
-                    adaptive_usdt = round(amount, 4)
+                adaptive_usdt = round(remaining * adaptive_pct / 100.0, 4)
+                # Clamp to remaining budget (never exceed what's left)
+                adaptive_usdt = min(adaptive_usdt, remaining)
 
                 _log.info("Trigger %d BUY sizing: budget=$%.2f  adaptive=%.1f%%  order=$%.2f",
                           trigger_id, amount, adaptive_pct, adaptive_usdt)
@@ -174,7 +251,28 @@ async def execute_trigger_trade(
                         )
                     return
 
-                qty = round(adaptive_usdt / signal.entry_price, 8)
+                base_currency = symbol.upper().replace("USDT", "")
+                constraints   = await _get_market_constraints(exchange, base_currency)
+                min_qty       = constraints["min_qty"]
+
+                # Deduct BUY-side fee — what we actually receive after exchange takes cut
+                qty_gross = adaptive_usdt / signal.entry_price
+                qty       = _apply_constraints(qty_gross * (1 - COINDCX_FEE_RATE), constraints)
+
+                if qty < min_qty:
+                    _log.warning(
+                        "Trigger %d: BUY qty %.8f %s < exchange min %.8f — skipping (budget too small for one lot)",
+                        trigger_id, qty, base_currency, min_qty,
+                    )
+                    if tg_bot:
+                        min_usdt = round(min_qty * signal.entry_price, 2)
+                        await send_trade_error(
+                            tg_bot, tg_chat_id, trigger_id, symbol, "BUY",
+                            f"Trigger slice ${adaptive_usdt:.2f} < exchange minimum (~${min_usdt}). "
+                            f"Increase trigger amount or wait for a higher-confidence signal.",
+                        )
+                    return
+
                 result = await exchange.create_order(
                     side="buy", market=symbol,
                     order_type="market_order", quantity=qty,
@@ -190,28 +288,32 @@ async def execute_trigger_trade(
 
                 # DCA blend: if a position already exists, blend avg entry
                 pos = await queries.get_trigger_position(db, trigger_id)
+                # Effective entry price accounting for BUY fee (break-even is higher)
+                effective_entry = signal.entry_price * (1 + COINDCX_FEE_RATE)
                 if pos and pos["coins_held"] > 0:
                     total_coins = pos["coins_held"] + qty
                     new_avg = (
-                        pos["avg_entry"] * pos["coins_held"] + signal.entry_price * qty
+                        pos["avg_entry"] * pos["coins_held"] + effective_entry * qty
                     ) / total_coins
+                    # SL/TP account for SELL-side fee too (round-trip cost = 2x fee)
                     new_sl = round(new_avg * (1 - STOP_LOSS_PCT / 100), 8)
-                    new_tp = round(new_avg * (1 + TAKE_PROFIT_PCT / 100), 8)
+                    new_tp = round(new_avg * (1 + TAKE_PROFIT_PCT / 100 + COINDCX_FEE_RATE), 8)
                     await queries.upsert_trigger_position(
                         db, trigger_id, symbol, total_coins, new_avg,
                         pos["usdt_spent"] + adaptive_usdt,
                         stop_loss_price=new_sl, take_profit_price=new_tp,
                     )
                 else:
-                    sl_price = round(signal.entry_price * (1 - STOP_LOSS_PCT / 100), 8)
-                    tp_price = round(signal.entry_price * (1 + TAKE_PROFIT_PCT / 100), 8)
+                    # TP must exceed round-trip fee (2x) to be profitable
+                    sl_price = round(effective_entry * (1 - STOP_LOSS_PCT / 100), 8)
+                    tp_price = round(effective_entry * (1 + TAKE_PROFIT_PCT / 100 + COINDCX_FEE_RATE), 8)
                     await queries.upsert_trigger_position(
-                        db, trigger_id, symbol, qty, signal.entry_price, adaptive_usdt,
+                        db, trigger_id, symbol, qty, effective_entry, adaptive_usdt,
                         stop_loss_price=sl_price, take_profit_price=tp_price,
                     )
                     _log.info(
-                        "Trigger %d SL=%.4f  TP=%.4f",
-                        trigger_id, sl_price, tp_price,
+                        "Trigger %d SL=%.4f  TP=%.4f  (fee-adjusted effective_entry=%.4f)",
+                        trigger_id, sl_price, tp_price, effective_entry,
                     )
 
                 _log.info(
@@ -231,10 +333,35 @@ async def execute_trigger_trade(
 
             # ── SELL ─────────────────────────────────────────────────────────
             elif signal.direction == "SELL":
+                base_currency = symbol.upper().replace("USDT", "")
                 pos = await queries.get_trigger_position(db, trigger_id)
+
+                # SELL only operates on coins this trigger bought (tracked in DB).
+                # Never touch the user's other holdings — trigger budget is isolated.
                 if not pos or pos["coins_held"] < 1e-8:
-                    _log.info("Trigger %d SELL skipped: no coins held in DB", trigger_id)
+                    _log.info("Trigger %d SELL skipped: trigger has no open position", trigger_id)
                     return
+
+                # Verify actual exchange balance — clears stale DB records
+                actual_bal = pos["coins_held"]  # default: trust DB
+                try:
+                    balances  = await exchange.get_balances()
+                    coin_row  = next(
+                        (b for b in balances if b.get("currency") == base_currency), None
+                    )
+                    actual_bal = float(coin_row.get("balance", 0)) if coin_row else 0.0
+                    if actual_bal < 1e-8:
+                        _log.warning(
+                            "Trigger %d SELL: DB shows %.8f %s but exchange balance=0 — clearing stale position",
+                            trigger_id, pos["coins_held"], base_currency,
+                        )
+                        await queries.upsert_trigger_position(
+                            db, trigger_id, symbol, 0.0, 0.0, 0.0
+                        )
+                        return
+                except Exception as bal_exc:
+                    _log.warning("Trigger %d: could not verify balance before SELL (%s) — proceeding with DB",
+                                 trigger_id, bal_exc)
 
                 # For stop-loss / take-profit, always sell the full position
                 if reason in ("stop_loss", "take_profit"):
@@ -242,55 +369,40 @@ async def execute_trigger_trade(
                 else:
                     sell_ratio = _adaptive_engine.sell_ratio_for(signal.confidence)
 
-                coins_to_sell = round(pos["coins_held"] * sell_ratio, 8)
+                # Sell from trigger's tracked position, capped to actual exchange balance
+                coins_to_sell = min(round(pos["coins_held"] * sell_ratio, 8), actual_bal)
                 if coins_to_sell < 1e-8:
                     return
 
-                # Verify actual coin balance on exchange — DB position may be
-                # stale (e.g. coins sold manually or from a previous session).
-                base_currency = symbol.upper().replace("USDT", "")
-                try:
-                    balances = await exchange.get_balances()
-                    coin_row  = next(
-                        (b for b in balances if b.get("currency") == base_currency), None
-                    )
-                    actual_bal = float(coin_row.get("balance", 0)) if coin_row else 0.0
-                    if actual_bal < 1e-8:
-                        _log.warning(
-                            "Trigger %d SELL skipped: DB shows %.8f %s but exchange balance is %.8f"
-                            " — clearing stale DB position",
-                            trigger_id, coins_to_sell, base_currency, actual_bal,
-                        )
-                        # Clear the stale position so future BUYs work correctly
-                        await queries.upsert_trigger_position(
-                            db, trigger_id, symbol, 0.0, 0.0, 0.0
-                        )
-                        return
-                    # Cap sell quantity to what we actually hold (prevents over-sell)
-                    if coins_to_sell > actual_bal:
-                        _log.warning(
-                            "Trigger %d: capping sell %.8f → %.8f %s (exchange balance)",
-                            trigger_id, coins_to_sell, actual_bal, base_currency,
-                        )
-                        coins_to_sell = round(actual_bal, 8)
-                except Exception as bal_exc:
-                    _log.warning("Trigger %d: could not verify balance before SELL (%s) — proceeding",
-                                 trigger_id, bal_exc)
+                constraints   = await _get_market_constraints(exchange, base_currency)
+                min_qty       = constraints["min_qty"]
 
-                # Dust guard: if the full position is worth < $0.10, just clear DB
-                full_qty  = round(pos["coins_held"], 8)
+                # Full position quantity (floored to step size)
+                full_qty  = _apply_constraints(pos["coins_held"], constraints)
                 dust_usdt = full_qty * signal.entry_price
-                if dust_usdt < 0.10:
+
+                # If the entire position is below exchange minimum → it's dust, clear DB
+                if full_qty < min_qty:
                     _log.warning(
-                        "Trigger %d: position %.8f %s (~$%.4f) is dust — clearing DB",
-                        trigger_id, full_qty, base_currency, dust_usdt,
+                        "Trigger %d: full position %.8f %s ($%.4f) < exchange min %.8f — clearing DB",
+                        trigger_id, full_qty, base_currency, dust_usdt, min_qty,
                     )
                     await queries.upsert_trigger_position(
                         db, trigger_id, symbol, 0.0, 0.0, 0.0
                     )
                     return
 
-                # Try the partial sell; if CoinDCX rejects qty-too-small, escalate to full
+                # Apply step-size constraints to the sell quantity
+                coins_to_sell = _apply_constraints(coins_to_sell, constraints)
+
+                # If partial sell is below minimum, escalate to full position
+                if coins_to_sell < min_qty:
+                    _log.info(
+                        "Trigger %d: partial SELL %.8f < min %.8f — escalating to full %.8f %s",
+                        trigger_id, coins_to_sell, min_qty, full_qty, base_currency,
+                    )
+                    coins_to_sell = full_qty
+
                 from aiohttp import ClientResponseError as _CRE
                 async def _place_sell(qty: float) -> dict:
                     return await exchange.create_order(
@@ -301,20 +413,30 @@ async def execute_trigger_trade(
                 try:
                     result = await _place_sell(coins_to_sell)
                 except _CRE as exc:
-                    # OMS-VF-0004 = "Quantity should be greater than X"
-                    if exc.status == 400 and "OMS-VF-0004" in str(exc.message):
-                        if full_qty > coins_to_sell + 1e-10:
-                            _log.info(
-                                "Trigger %d: partial SELL %.8f rejected (qty too small) "
-                                "— escalating to full %.8f %s",
-                                trigger_id, coins_to_sell, full_qty, base_currency,
-                            )
-                            coins_to_sell = full_qty
-                            result = await _place_sell(coins_to_sell)
+                    msg = str(exc.message)
+                    # OMS-VF-0004 = qty too small; OMS-VF-0006 = wrong precision
+                    if exc.status == 400 and any(
+                        code in msg for code in ("OMS-VF-0004", "OMS-VF-0006")
+                    ):
+                        # Last resort: try full position; if still rejected it's dust
+                        if coins_to_sell < full_qty:
+                            _log.info("Trigger %d: escalating to full %.8f %s after rejection",
+                                      trigger_id, full_qty, base_currency)
+                            try:
+                                result = await _place_sell(full_qty)
+                                coins_to_sell = full_qty
+                            except _CRE:
+                                _log.warning(
+                                    "Trigger %d: full position %.8f %s also rejected — clearing DB as dust",
+                                    trigger_id, full_qty, base_currency,
+                                )
+                                await queries.upsert_trigger_position(
+                                    db, trigger_id, symbol, 0.0, 0.0, 0.0
+                                )
+                                return
                         else:
-                            # Already trying full position but still too small → dust
                             _log.warning(
-                                "Trigger %d: full position %.8f %s still below exchange min — clearing DB",
+                                "Trigger %d: full position %.8f %s still below min — clearing DB",
                                 trigger_id, full_qty, base_currency,
                             )
                             await queries.upsert_trigger_position(
@@ -324,9 +446,11 @@ async def execute_trigger_trade(
                     else:
                         raise
                 cdx_order_id = result.get("id") or result.get("order_id")
-                avg_entry    = pos["avg_entry"]
-                pnl_pct      = (signal.entry_price - avg_entry) / avg_entry * 100 if avg_entry else 0.0
-                sell_usdt    = round(coins_to_sell * signal.entry_price, 4)
+                avg_entry    = (pos["avg_entry"] if pos else None) or signal.entry_price
+                # Net proceeds after SELL-side fee; P&L vs fee-adjusted avg_entry
+                net_sell_price = signal.entry_price * (1 - COINDCX_FEE_RATE)
+                pnl_pct        = (net_sell_price - avg_entry) / avg_entry * 100
+                sell_usdt      = round(coins_to_sell * net_sell_price, 4)
 
                 order_id = await queries.insert_order(
                     db, symbol, "sell", "market_order", coins_to_sell,
@@ -339,12 +463,14 @@ async def execute_trigger_trade(
                     coins_to_sell, signal.entry_price, pnl=pnl_pct,
                 )
 
-                # Reduce position (partial sell support)
-                coins_remaining = max(round(pos["coins_held"] - coins_to_sell, 8), 0.0)
-                usdt_remaining  = max(round(pos["usdt_spent"] * (1.0 - sell_ratio), 4), 0.0)
+                # Reduce position in DB
+                db_held      = pos["coins_held"] if pos else 0.0
+                db_spent     = pos["usdt_spent"] if pos else 0.0
+                coins_remaining = max(round(db_held - coins_to_sell, 8), 0.0)
+                usdt_remaining  = max(round(db_spent * (1.0 - sell_ratio), 4), 0.0)
                 await queries.upsert_trigger_position(
                     db, trigger_id, symbol,
-                    coins_remaining, pos["avg_entry"], usdt_remaining,
+                    coins_remaining, avg_entry, usdt_remaining,
                 )
 
                 # ── Update adaptive engine with full real trade history ────────
