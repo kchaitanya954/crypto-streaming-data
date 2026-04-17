@@ -394,6 +394,76 @@ async def get_real_completed_pnls(db: aiosqlite.Connection) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+async def get_daily_pnl_by_trigger(
+    db: aiosqlite.Connection,
+    user_id: int,
+    date_iso: Optional[str] = None,  # "YYYY-MM-DD" in IST; defaults to today IST
+) -> list[dict]:
+    """
+    Return per-trigger P&L summary for a given IST calendar day.
+
+    Each row:
+        trigger_id, symbol, interval,
+        buy_count, buy_usdt,
+        sell_count, sell_usdt, sell_pnl_pct_avg,
+        net_pnl_usdt
+    Plus a final synthetic row with trigger_id=None for the grand total.
+    """
+    import datetime as _dt
+
+    IST_OFFSET = 19800  # +5:30 in seconds
+    if date_iso is None:
+        ist_now  = _dt.datetime.utcnow() + _dt.timedelta(seconds=IST_OFFSET)
+        date_iso = ist_now.strftime("%Y-%m-%d")
+
+    # SQLite: shift epoch to IST before extracting date
+    cursor = await db.execute(
+        """
+        SELECT
+            o.trigger_id,
+            t.symbol,
+            t.interval,
+            SUM(CASE WHEN o.side = 'buy'  THEN 1   ELSE 0 END) AS buy_count,
+            SUM(CASE WHEN o.side = 'buy'  THEN COALESCE(o.quantity * o.price, 0) ELSE 0 END) AS buy_usdt,
+            SUM(CASE WHEN o.side = 'sell' THEN 1   ELSE 0 END) AS sell_count,
+            SUM(CASE WHEN o.side = 'sell' THEN COALESCE(th.filled_qty * th.filled_price, 0) ELSE 0 END) AS sell_usdt,
+            AVG(CASE WHEN o.side = 'sell' THEN th.pnl ELSE NULL END) AS avg_pnl_pct
+        FROM orders o
+        JOIN triggers t ON t.id = o.trigger_id
+        LEFT JOIN trade_history th ON th.order_id = o.id
+        WHERE o.user_id    = ?
+          AND o.status     = 'filled'
+          AND DATE((o.created_at / 1000) + ?, 'unixepoch') = ?
+        GROUP BY o.trigger_id
+        ORDER BY o.trigger_id
+        """,
+        (user_id, IST_OFFSET, date_iso),
+    )
+    rows = [dict(r) for r in await cursor.fetchall()]
+
+    # Compute net_pnl_usdt per row (sell_usdt - buy_usdt for the day)
+    for r in rows:
+        r["net_pnl_usdt"] = round((r["sell_usdt"] or 0) - (r["buy_usdt"] or 0), 4)
+        r["avg_pnl_pct"]  = round(r["avg_pnl_pct"], 4) if r["avg_pnl_pct"] is not None else None
+
+    # Grand-total row
+    if rows:
+        total = {
+            "trigger_id":   None,
+            "symbol":       "ALL",
+            "interval":     "—",
+            "buy_count":    sum(r["buy_count"]  for r in rows),
+            "buy_usdt":     round(sum(r["buy_usdt"]  or 0 for r in rows), 4),
+            "sell_count":   sum(r["sell_count"] for r in rows),
+            "sell_usdt":    round(sum(r["sell_usdt"] or 0 for r in rows), 4),
+            "avg_pnl_pct":  None,
+            "net_pnl_usdt": round(sum(r["net_pnl_usdt"] for r in rows), 4),
+        }
+        rows.append(total)
+
+    return rows
+
+
 async def load_adaptive_state(db: aiosqlite.Connection) -> Optional[dict]:
     """Load persisted adaptive engine state. Returns None if not yet saved."""
     cursor = await db.execute("SELECT state_json FROM adaptive_state WHERE id = 1")
@@ -450,6 +520,13 @@ async def create_user(
     )
     await db.commit()
     return cursor.lastrowid
+
+
+async def get_all_users(db: aiosqlite.Connection) -> list[dict]:
+    """Return all registered users (id, username, email)."""
+    cursor = await db.execute("SELECT id, username, email FROM users")
+    rows = await cursor.fetchall()
+    return [dict(r) for r in rows]
 
 
 async def get_user_by_username(db: aiosqlite.Connection, username: str) -> Optional[dict]:

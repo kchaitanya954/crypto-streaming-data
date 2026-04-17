@@ -162,16 +162,15 @@ async def execute_trigger_trade(
                 # Adaptive position sizing already reduces size; this layer
                 # additionally demands stronger signal quality.
                 if losses >= 5:
-                    # 5+ real losses: only act on HIGH confidence with strong ADX
+                    # 5+ real losses: require HIGH confidence only.
+                    # The signal detector already gates on ADX internally — adding a
+                    # second ADX threshold here causes the bot to freeze completely
+                    # (HIGH signals at ADX 24-29 are valid but were double-blocked).
                     if signal.confidence != "HIGH":
                         _log.info("Trigger %d: adaptive filter (5+ losses) — skipping %s confidence BUY, need HIGH",
                                   trigger_id, signal.confidence)
                         return
-                    if (signal.adx_val or 0) < 30:
-                        _log.info("Trigger %d: adaptive filter (5+ losses) — skipping ADX=%.1f BUY, need ≥30",
-                                  trigger_id, signal.adx_val or 0)
-                        return
-                    _log.info("Trigger %d: adaptive filter PASSED (5+ losses, HIGH+ADX≥30)", trigger_id)
+                    _log.info("Trigger %d: adaptive filter PASSED (5+ losses, HIGH confidence)", trigger_id)
 
                 elif losses >= 3:
                     # 3-4 real losses: raise bar to HIGH confidence only
@@ -366,19 +365,28 @@ async def execute_trigger_trade(
                 if coins_to_sell < 1e-8:
                     return
 
-                # Floor to step size for precision (no pre-validation against min_qty)
+                # Floor both quantities to exchange step size
                 constraints   = _get_market_constraints(base_currency)
                 full_qty      = _apply_constraints(pos["coins_held"], constraints)
                 coins_to_sell = _apply_constraints(coins_to_sell, constraints)
 
-                # Guard: step-floor may reduce coins_to_sell to 0 for tiny partial slices
-                if coins_to_sell <= 0 or coins_to_sell < constraints["min_qty"]:
-                    _log.warning(
-                        "Trigger %d SELL skipped: coins_to_sell=%.8f after step-floor is below "
-                        "min_qty=%.8f %s (likely partial slice of a tiny position)",
-                        trigger_id, coins_to_sell, constraints["min_qty"], base_currency,
-                    )
-                    return
+                # Step-floor can produce 0 for dust (e.g. 0.000042 ETH with step 0.0001 → 0)
+                if coins_to_sell <= 0:
+                    if full_qty > 0:
+                        # Partial floored to 0 — escalate to full position
+                        _log.info(
+                            "Trigger %d: partial SELL floored to 0 — escalating to full %.8f %s",
+                            trigger_id, full_qty, base_currency,
+                        )
+                        coins_to_sell = full_qty
+                    else:
+                        # Full position also rounds to 0 — it's genuinely dust, clear DB
+                        _log.warning(
+                            "Trigger %d: position %.8f %s rounds to 0 at step %.8f — clearing DB as dust",
+                            trigger_id, pos["coins_held"], base_currency, constraints["step"],
+                        )
+                        await queries.upsert_trigger_position(db, trigger_id, symbol, 0.0, 0.0, 0.0)
+                        return
 
                 from aiohttp import ClientResponseError as _CRE
                 async def _place_sell(qty: float) -> dict:
@@ -391,9 +399,15 @@ async def execute_trigger_trade(
                     result = await _place_sell(coins_to_sell)
                 except _CRE as exc:
                     msg = str(exc.message)
-                    if exc.status in (400, 422) and any(
-                        c in msg for c in ("OMS-VF-0004", "OMS-VF-0006", "total_quantity", "positive number")
-                    ):
+                    _qty_error = exc.status in (400, 422) and any(
+                        c in msg for c in (
+                            "OMS-VF-0004", "OMS-VF-0006",
+                            "BFF-SO-004",
+                            "total_quantity", "positive number",
+                            "Quantity should be",
+                        )
+                    )
+                    if _qty_error:
                         # Learn real minimum from the error, then escalate or clear
                         _learn_min_qty_from_error(base_currency, msg)
                         real_min = _get_market_constraints(base_currency)["min_qty"]

@@ -198,6 +198,57 @@ async def send_trade_error(
         pass
 
 
+async def send_daily_pnl_report(
+    bot: Bot,
+    chat_id: str,
+    rows: list[dict],
+    date_iso: str,
+) -> None:
+    """
+    Send a daily P&L summary grouped by trigger.
+    `rows` is the output of get_daily_pnl_by_trigger() — last row is the grand total (trigger_id=None).
+    """
+    if not rows:
+        text = f"📊 *Daily P&L Report — {date_iso}*\n\nNo trades executed today."
+        try:
+            await bot.send_message(chat_id=chat_id, text=text, parse_mode=ParseMode.MARKDOWN)
+        except Exception:
+            pass
+        return
+
+    lines = [f"📊 *Daily P&L Report — {date_iso}*\n"]
+
+    for r in rows:
+        is_total = r["trigger_id"] is None
+        pnl      = r["net_pnl_usdt"] or 0.0
+        pnl_icon = "🟢" if pnl >= 0 else "🔴"
+        pnl_str  = f"{pnl:+.4f} USDT"
+
+        if is_total:
+            lines.append("─────────────────────")
+            header = "📋 *ALL TRIGGERS*"
+        else:
+            header = (
+                f"*Trigger #{r['trigger_id']}*  `{r['symbol']}` | `{r['interval']}`"
+            )
+
+        avg_pct = r.get("avg_pnl_pct")
+        pct_str = f"  _{avg_pct:+.2f}% avg_" if avg_pct is not None else ""
+
+        lines.append(
+            f"{header}\n"
+            f"  Buys:  {r['buy_count']}  (${r['buy_usdt']:.4f})\n"
+            f"  Sells: {r['sell_count']}  (${r['sell_usdt']:.4f})\n"
+            f"  Net P&L: {pnl_icon} `{pnl_str}`{pct_str}"
+        )
+
+    text = "\n".join(lines)
+    try:
+        await bot.send_message(chat_id=chat_id, text=text, parse_mode=ParseMode.MARKDOWN)
+    except Exception:
+        pass
+
+
 async def send_trigger_alert(
     bot: Bot,
     chat_id: str,

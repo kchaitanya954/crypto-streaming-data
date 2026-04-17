@@ -1037,6 +1037,31 @@
       </div>
     </div>
 
+    <!-- ── Daily P&L Report ──────────────────────────────────────────────────── -->
+    <div class="an-section" style="border-top:2px solid #F59E0B">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+        <div class="an-section-title" style="color:#FCD34D">Daily P&amp;L (by Trigger)</div>
+        <div style="display:flex;gap:8px;align-items:center">
+          <input type="date" id="daily-pnl-date" class="an-sel" style="font-size:11px;padding:3px 6px" />
+          <button id="daily-pnl-refresh" class="an-refresh-btn" style="font-size:10px">⟳ Load</button>
+        </div>
+      </div>
+      <div id="daily-pnl-no-data" style="color:#4C525E;font-size:12px;padding:8px 0;display:none">
+        No trades found for this date.
+      </div>
+      <table class="an-table" id="daily-pnl-table" style="display:none">
+        <thead>
+          <tr>
+            <th>Trigger</th><th>Symbol</th><th>Interval</th>
+            <th>Buys</th><th>Buy USDT</th>
+            <th>Sells</th><th>Sell USDT</th>
+            <th>Avg P&amp;L %</th><th>Net P&amp;L (USDT)</th>
+          </tr>
+        </thead>
+        <tbody id="daily-pnl-body"></tbody>
+      </table>
+    </div>
+
     <!-- ── Real CoinDCX Trades ─────────────────────────────────────────────── -->
     <div class="an-section" style="border-top:2px solid #9C27B0">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
