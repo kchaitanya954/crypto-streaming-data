@@ -193,20 +193,11 @@ async def _stream_pair(symbol: str, interval: str, db, tg_bot, exchange, setting
                         except Exception as exc:
                             log.error("BG Telegram alert error: %s", exc)
 
-                        # Execute trade for each matched trigger
+                        # Execute trade for each matched trigger.
+                        # Position check (DB vs exchange balance) is handled inside
+                        # execute_trigger_trade — no pre-filtering here so that manual
+                        # holdings (bought outside the bot) can also be sold.
                         for trig in matched_triggers:
-                            # Position-first rule: a SELL signal is only valid when
-                            # the trigger already holds coins. Without a prior BUY
-                            # there is nothing to sell — skip early and clearly.
-                            if signal.direction == "SELL":
-                                pos = await queries.get_trigger_position(db, trig["id"])
-                                if not pos or pos.get("coins_held", 0) < 1e-8:
-                                    log.info(
-                                        "BG skip SELL trigger=%d — no open position (BUY must come first)",
-                                        trig["id"]
-                                    )
-                                    continue
-
                             asyncio.create_task(
                                 execute_trigger_trade(
                                     db, trig, signal, symbol.upper(), interval, signal_id

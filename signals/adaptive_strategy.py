@@ -25,10 +25,16 @@ from typing import Optional
 
 _WINDOW      = 20    # rolling trade window
 _MIN_TRADES  = 5     # min trades before Kelly kicks in
-_MAX_BUY_PCT = 20.0  # hard cap: never more than 20% in one trade
-_MIN_BUY_PCT = 0.5   # floor: always at least 0.5%
 
-CONF_MULT = {"HIGH": 1.0, "MEDIUM": 0.6, "LOW": 0.3}
+# BUY: percentage of *remaining* trigger budget to deploy per signal.
+# These are base values by confidence; Kelly/drawdown/ADX scale them.
+# Example: $10 trigger, MEDIUM signal → deploy 50% of remaining = $5 first trade,
+# then 50% of $5 = $2.50 second trade, etc. (geometric scaling).
+BUY_BASE_PCT = {"HIGH": 70.0, "MEDIUM": 50.0, "LOW": 30.0}
+_MAX_BUY_PCT = 90.0   # never deploy more than 90% of remaining in one trade
+_MIN_BUY_PCT = 10.0   # always deploy at least 10% of remaining
+
+# SELL: fraction of *coins held by trigger* to sell per signal.
 SELL_BASE = {"HIGH": 1.0, "MEDIUM": 0.6, "LOW": 0.3}
 
 
@@ -76,42 +82,48 @@ class AdaptiveState:
 
     def buy_pct_for(self, confidence: str, adx_val: Optional[float] = None) -> float:
         """
-        Recommended buy % of portfolio for this signal.
+        Recommended % of *remaining trigger budget* to deploy for this signal.
 
-        Multipliers applied to Half-Kelly base:
-          - Confidence:  HIGH=1.0, MEDIUM=0.6, LOW=0.3
-          - ADX strength: <20=0.75, 20-30=1.0, 30-40=1.10, 40+=1.25
-          - Perf mult:   0.25–2.0 based on rolling P&L
-          - Drawdown:    DD>=5%→0.75, >=10%→0.5, >=20%→0.25
-          - Consec loss: 3+→0.5, 5+→0.2
+        Base by confidence: HIGH=70%, MEDIUM=50%, LOW=30%
+        Scaled by:
+          - Kelly performance (0.5x–1.5x)
+          - ADX strength: <20→0.8x, 20-30→1.0x, 30-40→1.1x, 40+→1.2x
+          - Perf multiplier: 0.25–2.0
+          - Drawdown guard: DD>=5%→0.8x, >=10%→0.6x, >=20%→0.3x
+          - Consecutive losses: 3+→0.6x, 5+→0.3x
+        Clamped to [10%, 90%] so at least 10% is always deployed and
+        at most 90% of remaining — preserving budget for future signals.
         """
-        base = self.kelly_fraction() * 100  # e.g. 0.05 → 5.0%
+        base = BUY_BASE_PCT.get(confidence.upper(), 50.0)
 
-        conf_mult = CONF_MULT.get(confidence.upper(), 0.5)
+        # Kelly scales the base: good track record → deploy more aggressively
+        kelly = self.kelly_fraction()         # 0.0 – 0.15
+        kelly_scale = 0.5 + kelly / 0.15 * 1.0  # maps 0→0.5, 0.075→1.0, 0.15→1.5
+        kelly_scale = max(0.5, min(1.5, kelly_scale))
 
         adx_mult = 1.0
         if adx_val is not None:
             if adx_val >= 40:
-                adx_mult = 1.25
+                adx_mult = 1.20
             elif adx_val >= 30:
                 adx_mult = 1.10
             elif adx_val < 20:
-                adx_mult = 0.75
+                adx_mult = 0.80
 
         dd_mult = 1.0
         if self.current_drawdown_pct >= 20:
-            dd_mult = 0.25
+            dd_mult = 0.30
         elif self.current_drawdown_pct >= 10:
-            dd_mult = 0.50
+            dd_mult = 0.60
         elif self.current_drawdown_pct >= 5:
-            dd_mult = 0.75
+            dd_mult = 0.80
 
         if self.consecutive_losses >= 5:
-            dd_mult = min(dd_mult, 0.20)
+            dd_mult = min(dd_mult, 0.30)
         elif self.consecutive_losses >= 3:
-            dd_mult = min(dd_mult, 0.50)
+            dd_mult = min(dd_mult, 0.60)
 
-        pct = base * conf_mult * self.perf_multiplier * adx_mult * dd_mult
+        pct = base * kelly_scale * self.perf_multiplier * adx_mult * dd_mult
         return round(max(_MIN_BUY_PCT, min(pct, _MAX_BUY_PCT)), 2)
 
     def sell_ratio_for(self, confidence: str) -> float:
@@ -212,8 +224,8 @@ class AdaptiveState:
             "consecutive_losses": self.consecutive_losses,
             "circuit_breaker":    self.consecutive_losses >= 3 or self.current_drawdown_pct >= 10,
             "rec_buy": {
-                "HIGH":   self.buy_pct_for("HIGH",   30.0),
-                "MEDIUM": self.buy_pct_for("MEDIUM", 25.0),
+                "HIGH":   self.buy_pct_for("HIGH",   40.0),
+                "MEDIUM": self.buy_pct_for("MEDIUM", 30.0),
                 "LOW":    self.buy_pct_for("LOW",    20.0),
             },
             "rec_sell": {
