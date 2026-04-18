@@ -1317,18 +1317,20 @@ function renderRealTrades(d) {
   const fmt2 = n => (n != null ? n.toFixed(2) : '—');
   const fmt4 = n => (n != null ? n.toFixed(4) : '—');
 
-  const noData  = document.getElementById('rt-no-data');
-  const summary = document.getElementById('rt-summary');
+  const noData   = document.getElementById('rt-no-data');
+  const summary  = document.getElementById('rt-summary');
   const openWrap = document.getElementById('rt-open-wrap');
 
-  // Show open positions even if no completed cycles
+  // Open positions: show fee-adjusted effective cost and break-even
   if (d.open_positions && d.open_positions.length > 0) {
     openWrap.style.display = '';
     document.getElementById('rt-open-list').innerHTML = d.open_positions.map(p => `
       <span style="background:#131722;border:1px solid #26A69A33;border-radius:4px;padding:4px 8px;font-size:11px;color:#D1D4DC">
         <span style="color:#26A69A;font-weight:700">${p.symbol}</span>
         ${p.qty_held.toPrecision(5)} coins
-        · avg buy <span style="color:#FF9800">$${fmt2(p.avg_buy_price)}</span>
+        · buy price <span style="color:#FF9800">$${fmt4(p.avg_buy_price)}</span>
+        · cost/coin w/fee <span style="color:#EF5350">$${fmt4(p.avg_buy_eff)}</span>
+        · break-even <span style="color:#F59E0B">$${fmt4(p.breakeven_price)}</span>
         · invested <span style="color:#EF5350">$${fmt2(p.total_bought_usdt)}</span>
       </span>`).join('');
   } else {
@@ -1357,6 +1359,7 @@ function renderRealTrades(d) {
                            d.win_rate != null ? pctClass(d.win_rate - 50) : '');
   setCard('rt-v-invested', '$' + fmt2(d.total_invested_usdt));
   setCard('rt-v-returned', '$' + fmt2(d.total_returned_usdt));
+  setCard('rt-v-fees',     '-$' + fmt2(d.total_fees_usdt || 0), 'neg');
   setCard('rt-v-pnl-usdt',
     (d.net_pnl_usdt >= 0 ? '+$' : '-$') + Math.abs(d.net_pnl_usdt).toFixed(2),
     pctClass(d.net_pnl_usdt));
@@ -1366,29 +1369,34 @@ function renderRealTrades(d) {
 
   const tbody = document.getElementById('rt-cycles-body');
   tbody.innerHTML = (d.cycles || []).map(c => {
-    const pnlColor = c.net_pnl_usdt >= 0 ? '#26A69A' : '#EF5350';
-    const sign     = c.net_pnl_usdt >= 0 ? '+' : '';
-    const dt       = c.last_sell_time ? new Date(c.last_sell_time * 1000) : null;
-    const ts       = dt
+    const pnlColor    = c.net_pnl_usdt >= 0 ? '#26A69A' : '#EF5350';
+    const sign        = c.net_pnl_usdt >= 0 ? '+' : '';
+    const dt          = c.last_sell_time ? new Date(c.last_sell_time * 1000) : null;
+    const ts          = dt
       ? dt.toLocaleDateString([], {month:'short',day:'numeric'}) + ' ' +
         dt.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})
       : '—';
     const statusColor = c.is_closed ? '#4C525E' : '#FF9800';
     const statusLabel = c.is_closed ? 'Closed' : `Open (${c.remaining_qty.toPrecision(4)} left)`;
+    // Highlight if sell price was below break-even (loss from fees)
+    const beColor     = c.avg_sell_price < c.breakeven_price ? '#EF5350' : '#26A69A';
     return `<tr>
       <td style="font-weight:600;color:#D1D4DC">${c.symbol}</td>
       <td style="color:#26A69A">${c.buy_count}</td>
       <td style="color:#EF5350">${c.sell_count}</td>
-      <td style="color:#787B86">$${fmt4(c.avg_buy_price)}</td>
-      <td style="color:#787B86">$${fmt4(c.avg_sell_price)}</td>
+      <td style="color:#787B86" title="Signal price at buy">$${fmt4(c.avg_buy_price)}</td>
+      <td style="color:#FF9800;font-weight:600" title="Actual cost per coin including 0.1% buy fee">$${fmt4(c.avg_buy_eff)}</td>
+      <td style="color:#787B86" title="Signal price at sell">$${fmt4(c.avg_sell_price)}</td>
+      <td style="color:${beColor};font-size:10px" title="Minimum sell price to profit after 0.2% round-trip fee">$${fmt4(c.breakeven_price)}</td>
       <td style="color:#EF5350">$${fmt2(c.total_bought_usdt)}</td>
       <td style="color:#26A69A">$${fmt2(c.total_sold_usdt)}</td>
-      <td style="color:${pnlColor};font-weight:700">${sign}$${Math.abs(c.net_pnl_usdt).toFixed(2)}</td>
+      <td style="color:#787B86;font-size:10px">-$${(c.fee_cost_usdt||0).toFixed(4)}</td>
+      <td style="color:${pnlColor};font-weight:700">${sign}$${Math.abs(c.net_pnl_usdt).toFixed(4)}</td>
       <td style="color:${pnlColor};font-weight:700">${pct(c.net_pnl_pct)}</td>
       <td style="color:${statusColor};font-size:10px">${statusLabel}</td>
       <td style="color:#4C525E;font-size:10px">${ts}</td>
     </tr>`;
-  }).join('') || '<tr><td colspan="11" style="color:#4C525E;text-align:center">No completed cycles</td></tr>';
+  }).join('') || '<tr><td colspan="14" style="color:#4C525E;text-align:center">No completed cycles</td></tr>';
 }
 
 function renderAnalytics(d) {
@@ -1623,9 +1631,12 @@ function renderAdaptiveState(eng) {
 // ── Daily P&L ─────────────────────────────────────────────────────────────────
 
 (function _initDailyPnl() {
-  // Default date input to today (IST ≈ local date in most cases)
+  // Default to today in IST (UTC+5:30)
   const dateEl = document.getElementById('daily-pnl-date');
-  if (dateEl) dateEl.value = new Date().toISOString().slice(0, 10);
+  if (dateEl) {
+    const istNow = new Date(Date.now() + 5.5 * 60 * 60 * 1000);
+    dateEl.value = istNow.toISOString().slice(0, 10);
+  }
 })();
 
 document.getElementById('daily-pnl-refresh').addEventListener('click', loadDailyPnl);
@@ -1665,25 +1676,29 @@ function renderDailyPnl(data) {
   noEl.style.display    = 'none';
 
   bodyEl.innerHTML = rows.map((r, i) => {
-    const isTotal   = r.trigger_id === null;
-    const pnl       = r.net_pnl_usdt || 0;
-    const pnlColor  = pnl >= 0 ? '#26A69A' : '#F23645';
-    const pnlSign   = pnl >= 0 ? '+' : '';
-    const avgPct    = r.avg_pnl_pct != null ? `${r.avg_pnl_pct >= 0 ? '+' : ''}${r.avg_pnl_pct.toFixed(2)}%` : '—';
-    const rowStyle  = isTotal
-      ? 'background:#1E222D;font-weight:700;border-top:1px solid #3A3F4E'
+    const isTotal  = r.trigger_id === null;
+    const pnl      = r.net_pnl_usdt || 0;
+    const pnlColor = pnl >= 0 ? '#26A69A' : '#F23645';
+    const pnlSign  = pnl >= 0 ? '+' : '';
+    const fee      = r.fee_usdt || 0;
+    const avgPct   = r.avg_pnl_pct != null
+      ? `<span style="color:${r.avg_pnl_pct >= 0 ? '#26A69A' : '#F23645'}">${r.avg_pnl_pct >= 0 ? '+' : ''}${r.avg_pnl_pct.toFixed(2)}%</span>`
+      : '<span style="color:#4C525E">—</span>';
+    const rowStyle = isTotal
+      ? 'background:#1E222D;font-weight:700;border-top:2px solid #3A3F4E'
       : (i % 2 === 0 ? '' : 'background:#161A25');
 
     return `<tr style="${rowStyle}">
-      <td>${isTotal ? '<b>ALL</b>' : `#${r.trigger_id}`}</td>
-      <td>${r.symbol}</td>
-      <td>${r.interval}</td>
-      <td>${r.buy_count}</td>
-      <td>$${(r.buy_usdt || 0).toFixed(4)}</td>
-      <td>${r.sell_count}</td>
-      <td>$${(r.sell_usdt || 0).toFixed(4)}</td>
-      <td style="color:${r.avg_pnl_pct >= 0 ? '#26A69A' : '#F23645'}">${avgPct}</td>
-      <td style="color:${pnlColor};font-weight:600">${pnlSign}$${pnl.toFixed(4)}</td>
+      <td style="color:${isTotal ? '#D1D4DC' : '#787B86'}">${isTotal ? '<b>ALL</b>' : `#${r.trigger_id}`}</td>
+      <td style="font-weight:${isTotal ? 700 : 400};color:#D1D4DC">${r.symbol}</td>
+      <td style="color:#787B86">${r.interval}</td>
+      <td style="color:#26A69A">${r.buy_count}</td>
+      <td style="color:#787B86">$${(r.buy_usdt || 0).toFixed(4)}</td>
+      <td style="color:#EF5350">${r.sell_count}</td>
+      <td style="color:#787B86">$${(r.sell_usdt || 0).toFixed(4)}</td>
+      <td style="color:#FF9800;font-size:10px">-$${fee.toFixed(4)}</td>
+      <td>${avgPct}</td>
+      <td style="color:${pnlColor};font-weight:${isTotal ? 800 : 600}">${pnlSign}$${Math.abs(pnl).toFixed(4)}</td>
     </tr>`;
   }).join('');
 }
