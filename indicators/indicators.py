@@ -6,7 +6,7 @@ Leading values where the indicator is not yet defined are None.
 """
 
 from dataclasses import dataclass
-from typing import List, Optional, Sequence, Union
+from typing import List, Optional, Sequence
 
 
 def sma(prices: Sequence[float], period: int) -> List[Optional[float]]:

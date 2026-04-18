@@ -67,11 +67,20 @@ class AdaptiveState:
         Half-Kelly position size as fraction of portfolio.
         Formula: f* = (W*b - L) / b,  b = avg_win / avg_loss
         Returns Half-Kelly capped at 15%.
+        Falls back to 0.05 when there are no winning trades yet (b=0 guard).
         """
         if self.trades_analyzed < _MIN_TRADES:
             return 0.05  # conservative 5% default until enough data
 
-        b = self.avg_win_pct / max(self.avg_loss_pct, 0.01)
+        avg_loss = max(self.avg_loss_pct, 0.01)
+        if self.avg_win_pct <= 0:
+            # No winning trades recorded yet — use conservative default
+            return 0.02
+
+        b = self.avg_win_pct / avg_loss
+        if b <= 0:
+            return 0.0
+
         W = self.win_rate
         L = 1.0 - W
         kelly = (W * b - L) / b

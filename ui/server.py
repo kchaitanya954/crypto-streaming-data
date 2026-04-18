@@ -17,7 +17,6 @@ Run via orchestrator (full stack):
 """
 
 import asyncio
-import json as _json
 import logging as _logging
 import time as _time
 from collections import defaultdict
@@ -304,7 +303,8 @@ async def api_forgot_password(request: Request, body: ForgotPasswordRequest):
     if db is None:
         return JSONResponse({"error": "DB not ready"}, status_code=503)
 
-    import os, secrets
+    import os
+    import secrets
     user_row = await queries.get_user_by_email(db, body.email.strip())
     if user_row:
         token   = secrets.token_urlsafe(32)
@@ -348,7 +348,8 @@ async def api_reset_password(request: Request, body: ResetPasswordRequest):
 
 async def _send_reset_email(email: str, username: str, token: str, request: Request) -> None:
     """Send a password-reset email via SMTP (configured via env vars)."""
-    import os, smtplib
+    import os
+    import smtplib
     from email.mime.text import MIMEText
 
     smtp_host = os.getenv("SMTP_HOST", "")
@@ -1390,35 +1391,63 @@ async def api_real_trades_analytics(
     completed_cycles: list[dict] = []
     open_positions:   list[dict] = []
 
+    FEE = 0.001  # CoinDCX taker fee per side (0.1%)
+
     for (symbol, trigger_id), group in groups.items():
         buys  = [o for o in group if o["side"] == "buy"]
         sells = [o for o in group if o["side"] == "sell"]
 
-        total_bought_usdt = sum(o["usdt_amount"] for o in buys)
-        total_sold_usdt   = sum(o["usdt_amount"] for o in sells)
+        # Gross order amounts (qty * signal_price, no fee)
         total_bought_qty  = sum(o["quantity"]    for o in buys)
         total_sold_qty    = sum(o["quantity"]    for o in sells)
         remaining_qty     = round(total_bought_qty - total_sold_qty, 8)
 
+        # Fee-adjusted amounts:
+        #   BUY  effective cost    = gross * (1 + FEE)  [we paid extra 0.1%]
+        #   SELL effective proceeds = gross * (1 - FEE)  [we received 0.1% less]
+        total_bought_gross = sum(o["usdt_amount"] for o in buys)
+        total_sold_gross   = sum(o["usdt_amount"] for o in sells)
+        total_bought_usdt  = total_bought_gross * (1 + FEE)   # actual cost incl. fee
+        total_sold_usdt    = total_sold_gross   * (1 - FEE)   # actual proceeds after fee
+
+        # Gross prices (signal prices) for display reference
+        avg_buy_price_gross  = total_bought_gross / total_bought_qty if total_bought_qty else 0
+        avg_sell_price_gross = total_sold_gross   / total_sold_qty   if total_sold_qty   else 0
+        # Effective (fee-adjusted) prices per coin
+        avg_buy_price_eff    = avg_buy_price_gross  * (1 + FEE)   # true cost per coin
+        avg_sell_price_eff   = avg_sell_price_gross * (1 - FEE)   # true proceeds per coin
+        # Break-even sell price: what sell price makes P&L exactly 0
+        breakeven_price      = avg_buy_price_eff / (1 - FEE) if avg_buy_price_eff else 0
+
         if sells:
-            # At least one sell — compute P&L for what's been sold
-            # Proportion of buys that were sold (for partial exits)
-            sell_fraction    = min(total_sold_qty / total_bought_qty, 1.0) if total_bought_qty else 0
-            cost_for_sold    = round(total_bought_usdt * sell_fraction, 4)
-            net_pnl_usdt     = round(total_sold_usdt - cost_for_sold, 4)
-            net_pnl_pct      = round(net_pnl_usdt / cost_for_sold * 100, 4) if cost_for_sold else 0.0
-            avg_buy_price    = total_bought_usdt / total_bought_qty if total_bought_qty else 0
-            avg_sell_price   = total_sold_usdt   / total_sold_qty   if total_sold_qty   else 0
+            # Proportion of buys that were sold (handles partial exits)
+            sell_fraction = min(total_sold_qty / total_bought_qty, 1.0) if total_bought_qty else 0
+            cost_for_sold = round(total_bought_usdt * sell_fraction, 4)
+            net_pnl_usdt  = round(total_sold_usdt - cost_for_sold, 4)
+            net_pnl_pct   = round(net_pnl_usdt / cost_for_sold * 100, 4) if cost_for_sold else 0.0
+            fee_cost_usdt = round(
+                total_bought_gross * FEE * sell_fraction + total_sold_gross * FEE, 4
+            )
 
             completed_cycles.append({
-                "symbol":             symbol,
+                "symbol":              symbol,
                 "trigger_id":         trigger_id,
                 "buy_count":          len(buys),
                 "sell_count":         len(sells),
+                # Gross (signal price × qty) — what you see on the order form
+                "total_bought_gross": round(total_bought_gross, 4),
+                "total_sold_gross":   round(total_sold_gross, 4),
+                # Fee-adjusted — actual money in/out of your account
                 "total_bought_usdt":  round(total_bought_usdt, 4),
                 "total_sold_usdt":    round(total_sold_usdt, 4),
-                "avg_buy_price":      round(avg_buy_price, 4),
-                "avg_sell_price":     round(avg_sell_price, 4),
+                "fee_cost_usdt":      fee_cost_usdt,
+                # Prices
+                "avg_buy_price":      round(avg_buy_price_gross, 4),
+                "avg_buy_eff":        round(avg_buy_price_eff, 4),   # true cost/coin with fee
+                "avg_sell_price":     round(avg_sell_price_gross, 4),
+                "avg_sell_eff":       round(avg_sell_price_eff, 4),  # true proceeds/coin after fee
+                "breakeven_price":    round(breakeven_price, 4),
+                # P&L (fee-adjusted)
                 "net_pnl_usdt":       net_pnl_usdt,
                 "net_pnl_pct":        net_pnl_pct,
                 "remaining_qty":      max(remaining_qty, 0.0),
@@ -1432,20 +1461,22 @@ async def api_real_trades_analytics(
                         "price":      round(o["price"], 4),
                         "usdt":       round(o["usdt_amount"], 4),
                         "time":       o["created_at"],
+                        "pnl_pct":    o.get("pnl_pct"),
                     }
                     for o in sorted(group, key=lambda x: x["created_at"])
                 ],
             })
         elif buys:
             # Only buys so far — open position
-            avg_buy_price = total_bought_usdt / total_bought_qty if total_bought_qty else 0
             open_positions.append({
                 "symbol":            symbol,
                 "trigger_id":        trigger_id,
                 "buy_count":         len(buys),
                 "total_bought_usdt": round(total_bought_usdt, 4),
                 "qty_held":          round(total_bought_qty, 8),
-                "avg_buy_price":     round(avg_buy_price, 4),
+                "avg_buy_price":     round(avg_buy_price_gross, 4),
+                "avg_buy_eff":       round(avg_buy_price_eff, 4),
+                "breakeven_price":   round(breakeven_price, 4),
                 "since":             buys[0]["created_at"],
             })
 
@@ -1457,16 +1488,18 @@ async def api_real_trades_analytics(
     net_pnl_pct    = round(net_pnl_usdt / total_invested * 100, 4) if total_invested else None
     wins           = [c for c in completed_cycles if c["net_pnl_usdt"] > 0]
     win_rate       = round(len(wins) / len(completed_cycles) * 100, 1) if completed_cycles else None
+    total_fees     = round(sum(c["fee_cost_usdt"] for c in completed_cycles), 4)
 
     return {
         "total_cycles":        len(completed_cycles) + len(open_positions),
         "completed_cycles":    len(completed_cycles),
         "total_invested_usdt": round(total_invested, 4),
         "total_returned_usdt": round(total_returned, 4),
+        "total_fees_usdt":     total_fees,
         "net_pnl_usdt":        net_pnl_usdt,
         "net_pnl_pct":         net_pnl_pct,
         "win_rate":            win_rate,
-        "cycles":              completed_cycles[:50],   # most recent 50
+        "cycles":              completed_cycles[:50],
         "open_positions":      open_positions,
     }
 
@@ -1628,7 +1661,8 @@ async def _on_startup():
     Auto-init DB if not already injected by orchestrator (covers run_ui.py standalone mode).
     Then restore adaptive engine state and start the background monitor.
     """
-    import asyncio, os
+    import asyncio
+    import os
     # Record when this server process started — used to invalidate pre-restart tokens
     app.state.startup_time = int(_time.time())
     # Standalone mode: no orchestrator set app.state.db — initialise it now
@@ -1698,57 +1732,141 @@ async def _inr_rate_refresh_loop() -> None:
 
 
 
-async def _daily_pnl_scheduler() -> None:
-    """
-    Fire a daily P&L report to every active user's Telegram at 10:00 AM IST (04:30 UTC).
-    Uses asyncio.sleep() to wake precisely at the next 04:30 UTC.
-    """
-    import asyncio
-    import datetime as _dt
-    import logging
+async def _send_pnl_report_to_all_users(db, date_iso: str, log) -> None:
+    """Send the daily P&L report for `date_iso` to every user with Telegram configured."""
+    import traceback as _tb
     from telegram_bot.alerts import send_daily_pnl_report
     from auth.encryption import safe_decrypt
     from telegram import Bot
 
+    users = await queries.get_all_users(db)
+    if not users:
+        log.info("Daily P&L: no users found")
+        return
+
+    for user in users:
+        user_id = user["id"]
+        try:
+            settings   = await queries.get_user_settings(db, user_id)
+            tg_token   = safe_decrypt((settings or {}).get("telegram_token"))
+            tg_chat_id = safe_decrypt((settings or {}).get("telegram_chat_id"))
+            if not tg_token or not tg_chat_id:
+                log.debug("Daily P&L: user %d has no Telegram configured — skipping", user_id)
+                continue
+
+            rows = await queries.get_daily_pnl_by_trigger(db, user_id, date_iso)
+            bot  = Bot(token=tg_token)
+
+            # Retry once on Telegram error (transient network issues)
+            for attempt in (1, 2):
+                try:
+                    await send_daily_pnl_report(bot, tg_chat_id, rows, date_iso)
+                    log.info(
+                        "Daily P&L report sent to user %d for %s  "
+                        "(%d trigger rows, net P&L %.4f USDT)",
+                        user_id, date_iso,
+                        sum(1 for r in rows if r["trigger_id"] is not None),
+                        (rows[-1]["net_pnl_usdt"] if rows else 0.0),
+                    )
+                    break
+                except Exception as tg_exc:
+                    if attempt == 1:
+                        log.warning(
+                            "Daily P&L: Telegram send failed for user %d (attempt 1), retrying in 30s: %s",
+                            user_id, tg_exc,
+                        )
+                        import asyncio as _aio
+                        await _aio.sleep(30)
+                    else:
+                        log.error(
+                            "Daily P&L: Telegram send failed for user %d after retry: %s\n%s",
+                            user_id, tg_exc, _tb.format_exc(),
+                        )
+
+        except Exception as exc:
+            log.error(
+                "Daily P&L: error building report for user %d: %s\n%s",
+                user_id, exc, _tb.format_exc(),
+            )
+
+
+async def _daily_pnl_scheduler() -> None:
+    """
+    Fire a daily P&L report to every active user's Telegram at 10:00 AM IST (04:30 UTC).
+
+    Startup catch-up: if the service starts after 04:30 UTC today and today's report
+    hasn't been sent yet, it fires immediately for today's date, then schedules normally.
+    """
+    import asyncio
+    import datetime as _dt
+    import logging
+
     log = logging.getLogger("daily_pnl")
 
+    # Brief startup delay so DB is ready
+    await asyncio.sleep(5)
+
+    REPORT_HOUR_UTC   = 4
+    REPORT_MINUTE_UTC = 30
+
+    # ── Startup catch-up ──────────────────────────────────────────────────────
+    # If today's 04:30 UTC has already passed, send now for today and mark as done.
+    now_utc   = _dt.datetime.utcnow()
+    today_target = now_utc.replace(
+        hour=REPORT_HOUR_UTC, minute=REPORT_MINUTE_UTC, second=0, microsecond=0
+    )
+    last_sent_date: str = ""   # tracks which IST date was last reported
+
+    if now_utc > today_target:
+        ist_now  = now_utc + _dt.timedelta(seconds=19800)
+        date_iso = ist_now.strftime("%Y-%m-%d")
+        db       = getattr(app.state, "db", None)
+        if db is not None:
+            log.info(
+                "Daily P&L: service started after 04:30 UTC — sending catch-up report for %s",
+                date_iso,
+            )
+            try:
+                await _send_pnl_report_to_all_users(db, date_iso, log)
+                last_sent_date = date_iso
+            except Exception as exc:
+                import traceback as _tb
+                log.error("Daily P&L catch-up failed: %s\n%s", exc, _tb.format_exc())
+
+    # ── Normal nightly loop ───────────────────────────────────────────────────
     while True:
-        # Calculate seconds until next 04:30 UTC (= 10:00 IST)
-        now_utc  = _dt.datetime.utcnow()
-        target   = now_utc.replace(hour=4, minute=30, second=0, microsecond=0)
+        now_utc = _dt.datetime.utcnow()
+        target  = now_utc.replace(
+            hour=REPORT_HOUR_UTC, minute=REPORT_MINUTE_UTC, second=0, microsecond=0
+        )
         if now_utc >= target:
             target += _dt.timedelta(days=1)
         wait_sec = (target - now_utc).total_seconds()
-        log.info("Daily P&L report scheduled in %.0f s (at %s UTC)", wait_sec, target.strftime("%H:%M"))
+        log.info(
+            "Daily P&L: next report in %.0f s  (at %s UTC / 10:00 IST)",
+            wait_sec, target.strftime("%Y-%m-%d %H:%M"),
+        )
         await asyncio.sleep(wait_sec)
 
         db = getattr(app.state, "db", None)
         if db is None:
+            log.warning("Daily P&L: DB not available at report time — skipping")
             continue
 
-        # IST date string for "today" at report time
         ist_now  = _dt.datetime.utcnow() + _dt.timedelta(seconds=19800)
         date_iso = ist_now.strftime("%Y-%m-%d")
 
+        # Guard against double-send on very fast restarts
+        if date_iso == last_sent_date:
+            log.info("Daily P&L: report for %s already sent — skipping duplicate", date_iso)
+            continue
+
         try:
-            # Send report to every user who has Telegram configured
-            users = await queries.get_all_users(db)
-            for user in users:
-                user_id = user["id"]
-                try:
-                    settings = await queries.get_user_settings(db, user_id)
-                    tg_token   = safe_decrypt((settings or {}).get("telegram_token"))
-                    tg_chat_id = safe_decrypt((settings or {}).get("telegram_chat_id"))
-                    if not tg_token or not tg_chat_id:
-                        continue
-                    rows = await queries.get_daily_pnl_by_trigger(db, user_id, date_iso)
-                    bot  = Bot(token=tg_token)
-                    await send_daily_pnl_report(bot, tg_chat_id, rows, date_iso)
-                    log.info("Daily P&L report sent to user %d for %s", user_id, date_iso)
-                except Exception as exc:
-                    log.error("Daily P&L report failed for user %d: %s", user_id, exc)
+            await _send_pnl_report_to_all_users(db, date_iso, log)
+            last_sent_date = date_iso
         except Exception as exc:
-            log.error("Daily P&L scheduler error: %s", exc)
+            import traceback as _tb
+            log.error("Daily P&L scheduler error: %s\n%s", exc, _tb.format_exc())
 
 
 async def _adaptive_monitor_loop() -> None:
@@ -1799,9 +1917,9 @@ async def _adaptive_monitor_loop() -> None:
             dd     = _adaptive_engine.current_drawdown_pct
             # Describe what the adaptive filter will enforce next trade
             if losses >= 5:
-                adapt_note = f"STRICT (≥5 losses) — HIGH + ADX≥30 required"
+                adapt_note = "STRICT (≥5 losses) — HIGH + ADX≥30 required"
             elif losses >= 3:
-                adapt_note = f"SELECTIVE (≥3 losses) — HIGH confidence required"
+                adapt_note = "SELECTIVE (≥3 losses) — HIGH confidence required"
             else:
                 adapt_note = "NORMAL"
             log.info(

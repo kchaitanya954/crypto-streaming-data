@@ -937,6 +937,11 @@
     <!-- ── Real Trade P&L ─────────────────────────────────────────────────── -->
     <div class="an-section" style="border-top:2px solid #26A69A">
       <div class="an-section-title" style="color:#26A69A">Real Trade P&amp;L (Executed Orders)</div>
+      <div style="font-size:10px;color:#787B86;margin-bottom:8px;line-height:1.5">
+        P&amp;L is <strong style="color:#D1D4DC">fee-adjusted</strong>: buy cost includes +0.1% fee, sell proceeds subtract 0.1% fee.
+        Round-trip break-even requires sell price &gt; buy price by <strong style="color:#F59E0B">&gt;0.2%</strong>.
+        "Cost/Coin w/fee" = true cost per coin. "Break-even" = minimum sell price to profit.
+      </div>
       <div id="rt-no-data" style="color:#4C525E;font-size:12px;padding:8px 0;display:none">
         No completed trades yet — trades appear here after at least one BUY and one SELL have executed via a trigger.
       </div>
@@ -945,8 +950,9 @@
       <div class="an-cards" id="rt-summary" style="display:none;border:1px solid #2A2E39;border-radius:6px;overflow:hidden;margin-bottom:10px">
         <div class="an-card"><div class="an-card-val" id="rt-v-cycles">—</div><div class="an-card-lbl">Completed Cycles</div></div>
         <div class="an-card"><div class="an-card-val" id="rt-v-winrate">—</div><div class="an-card-lbl">Win Rate</div></div>
-        <div class="an-card"><div class="an-card-val" id="rt-v-invested">—</div><div class="an-card-lbl">Total Invested (USDT)</div></div>
-        <div class="an-card"><div class="an-card-val" id="rt-v-returned">—</div><div class="an-card-lbl">Total Returned (USDT)</div></div>
+        <div class="an-card"><div class="an-card-val" id="rt-v-invested">—</div><div class="an-card-lbl">Cost incl. Fees</div></div>
+        <div class="an-card"><div class="an-card-val" id="rt-v-returned">—</div><div class="an-card-lbl">Returned after Fees</div></div>
+        <div class="an-card"><div class="an-card-val" id="rt-v-fees">—</div><div class="an-card-lbl">Total Fees Paid</div></div>
         <div class="an-card"><div class="an-card-val" id="rt-v-pnl-usdt">—</div><div class="an-card-lbl">Net P&amp;L (USDT)</div></div>
         <div class="an-card"><div class="an-card-val" id="rt-v-pnl-pct">—</div><div class="an-card-lbl">Net P&amp;L %</div></div>
       </div>
@@ -963,8 +969,13 @@
           <thead>
             <tr>
               <th>Symbol</th><th>Buys</th><th>Sells</th>
-              <th>Avg Buy</th><th>Avg Sell</th>
-              <th>Invested (USDT)</th><th>Returned (USDT)</th>
+              <th title="Signal price at buy — actual cost/coin is this + 0.1% fee">Buy Price</th>
+              <th title="Effective cost per coin including 0.1% buy fee">Cost/Coin (w/ fee)</th>
+              <th title="Signal price at sell — actual proceeds/coin is this − 0.1% fee">Sell Price</th>
+              <th title="Break-even: sell must exceed this to profit after round-trip 0.2% fee">Break-even</th>
+              <th title="Actual money spent including buy fee">Cost (USDT)</th>
+              <th title="Actual proceeds after sell fee">Returned (USDT)</th>
+              <th title="Fees paid on buy + sell sides">Fees</th>
               <th>P&amp;L (USDT)</th><th>P&amp;L %</th>
               <th>Status</th><th>Time</th>
             </tr>
@@ -1068,9 +1079,11 @@
         <thead>
           <tr>
             <th>Trigger</th><th>Symbol</th><th>Interval</th>
-            <th>Buys</th><th>Buy USDT</th>
-            <th>Sells</th><th>Sell USDT</th>
-            <th>Avg P&amp;L %</th><th>Net P&amp;L (USDT)</th>
+            <th>Buys</th><th title="Gross buy amount (before fee)">Buy USDT</th>
+            <th>Sells</th><th title="Gross sell amount (before fee)">Sell USDT</th>
+            <th title="Total fees paid on buy + sell sides (0.1% each)">Fees Paid</th>
+            <th title="Fee-adjusted average P&L per sell trade">Avg P&amp;L %</th>
+            <th title="Fee-adjusted net: (sell × 0.999) − (buy × 1.001)">Net P&amp;L (USDT)</th>
           </tr>
         </thead>
         <tbody id="daily-pnl-body"></tbody>

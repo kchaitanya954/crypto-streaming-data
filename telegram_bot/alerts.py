@@ -142,7 +142,7 @@ async def send_trade_notification(
     """
     if side.upper() == "BUY":
         icon = "✅"
-        action_line = f"*BUY Executed*"
+        action_line = "*BUY Executed*"
     else:
         icon = "🔴"
         action_line = "*SELL Executed*"
@@ -207,46 +207,49 @@ async def send_daily_pnl_report(
     """
     Send a daily P&L summary grouped by trigger.
     `rows` is the output of get_daily_pnl_by_trigger() — last row is the grand total (trigger_id=None).
+    Raises on Telegram error so the caller can log it properly.
     """
     if not rows:
         text = f"📊 *Daily P&L Report — {date_iso}*\n\nNo trades executed today."
-        try:
-            await bot.send_message(chat_id=chat_id, text=text, parse_mode=ParseMode.MARKDOWN)
-        except Exception:
-            pass
+        await bot.send_message(chat_id=chat_id, text=text, parse_mode=ParseMode.MARKDOWN)
         return
 
     lines = [f"📊 *Daily P&L Report — {date_iso}*\n"]
 
-    for r in rows:
-        is_total = r["trigger_id"] is None
+    data_rows  = [r for r in rows if r["trigger_id"] is not None]
+    total_row  = next((r for r in rows if r["trigger_id"] is None), None)
+
+    for r in data_rows:
         pnl      = r["net_pnl_usdt"] or 0.0
         pnl_icon = "🟢" if pnl >= 0 else "🔴"
-        pnl_str  = f"{pnl:+.4f} USDT"
-
-        if is_total:
-            lines.append("─────────────────────")
-            header = "📋 *ALL TRIGGERS*"
-        else:
-            header = (
-                f"*Trigger #{r['trigger_id']}*  `{r['symbol']}` | `{r['interval']}`"
-            )
-
-        avg_pct = r.get("avg_pnl_pct")
-        pct_str = f"  _{avg_pct:+.2f}% avg_" if avg_pct is not None else ""
-
+        avg_pct  = r.get("avg_pnl_pct")
+        fee      = r.get("fee_usdt", 0.0) or 0.0
+        avg_str  = f" | avg {avg_pct:+.2f}%" if avg_pct is not None else ""
         lines.append(
-            f"{header}\n"
-            f"  Buys:  {r['buy_count']}  (${r['buy_usdt']:.4f})\n"
-            f"  Sells: {r['sell_count']}  (${r['sell_usdt']:.4f})\n"
-            f"  Net P&L: {pnl_icon} `{pnl_str}`{pct_str}"
+            f"*#{r['trigger_id']}* `{r['symbol']}` `{r['interval']}`\n"
+            f"  Buys: {r['buy_count']} (${r['buy_usdt']:.4f})  "
+            f"Sells: {r['sell_count']} (${r['sell_usdt']:.4f})\n"
+            f"  Fees: -${fee:.4f}{avg_str}\n"
+            f"  Net P&L: {pnl_icon} *{pnl:+.4f} USDT*"
         )
 
+    if total_row:
+        total_pnl  = total_row["net_pnl_usdt"] or 0.0
+        total_icon = "🟢" if total_pnl >= 0 else "🔴"
+        total_fee  = total_row.get("fee_usdt", 0.0) or 0.0
+        lines.append(
+            f"{'─' * 22}\n"
+            f"📋 *TOTAL*  "
+            f"Buys: {total_row['buy_count']} (${total_row['buy_usdt']:.4f})  "
+            f"Sells: {total_row['sell_count']} (${total_row['sell_usdt']:.4f})\n"
+            f"  Total Fees: -${total_fee:.4f}\n"
+            f"  Net P&L: {total_icon} *{total_pnl:+.4f} USDT*"
+        )
+
+    lines.append("\n_P&L includes 0.1% CoinDCX fee per side_")
     text = "\n".join(lines)
-    try:
-        await bot.send_message(chat_id=chat_id, text=text, parse_mode=ParseMode.MARKDOWN)
-    except Exception:
-        pass
+    # Use plain MARKDOWN (V1) — simpler and handles most formatting without escaping
+    await bot.send_message(chat_id=chat_id, text=text, parse_mode=ParseMode.MARKDOWN)
 
 
 async def send_trigger_alert(

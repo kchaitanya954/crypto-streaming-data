@@ -404,19 +404,22 @@ async def get_daily_pnl_by_trigger(
 
     Each row:
         trigger_id, symbol, interval,
-        buy_count, buy_usdt,
-        sell_count, sell_usdt, sell_pnl_pct_avg,
-        net_pnl_usdt
+        buy_count,  buy_usdt  (gross),  buy_cost_eff  (incl. 0.1% fee),
+        sell_count, sell_usdt (gross),  sell_net_eff  (after 0.1% fee),
+        avg_pnl_pct (fee-adjusted, from trade_history),
+        fee_usdt, net_pnl_usdt (fee-adjusted)
     Plus a final synthetic row with trigger_id=None for the grand total.
     """
     import datetime as _dt
 
-    IST_OFFSET = 19800  # +5:30 in seconds
+    FEE = 0.001          # CoinDCX taker fee per side (0.1%)
+    IST_OFFSET = 19800   # UTC+5:30 in seconds
+
     if date_iso is None:
         ist_now  = _dt.datetime.utcnow() + _dt.timedelta(seconds=IST_OFFSET)
         date_iso = ist_now.strftime("%Y-%m-%d")
 
-    # SQLite: shift epoch to IST before extracting date
+    # Gross amounts from orders table; fee-adjusted pnl from trade_history
     cursor = await db.execute(
         """
         SELECT
@@ -424,9 +427,9 @@ async def get_daily_pnl_by_trigger(
             t.symbol,
             t.interval,
             SUM(CASE WHEN o.side = 'buy'  THEN 1   ELSE 0 END) AS buy_count,
-            SUM(CASE WHEN o.side = 'buy'  THEN COALESCE(o.quantity * o.price, 0) ELSE 0 END) AS buy_usdt,
+            SUM(CASE WHEN o.side = 'buy'  THEN COALESCE(o.quantity * o.price, 0) ELSE 0 END) AS buy_usdt_gross,
             SUM(CASE WHEN o.side = 'sell' THEN 1   ELSE 0 END) AS sell_count,
-            SUM(CASE WHEN o.side = 'sell' THEN COALESCE(th.filled_qty * th.filled_price, 0) ELSE 0 END) AS sell_usdt,
+            SUM(CASE WHEN o.side = 'sell' THEN COALESCE(th.filled_qty * th.filled_price, 0) ELSE 0 END) AS sell_usdt_gross,
             AVG(CASE WHEN o.side = 'sell' THEN th.pnl ELSE NULL END) AS avg_pnl_pct
         FROM orders o
         JOIN triggers t ON t.id = o.trigger_id
@@ -441,9 +444,19 @@ async def get_daily_pnl_by_trigger(
     )
     rows = [dict(r) for r in await cursor.fetchall()]
 
-    # Compute net_pnl_usdt per row (sell_usdt - buy_usdt for the day)
     for r in rows:
-        r["net_pnl_usdt"] = round((r["sell_usdt"] or 0) - (r["buy_usdt"] or 0), 4)
+        buy_gross  = r.get("buy_usdt_gross")  or 0.0
+        sell_gross = r.get("sell_usdt_gross") or 0.0
+        # Fee-adjusted effective amounts
+        buy_eff  = round(buy_gross  * (1 + FEE), 4)   # actual money paid
+        sell_eff = round(sell_gross * (1 - FEE), 4)   # actual money received
+        fee_paid = round(buy_gross * FEE + sell_gross * FEE, 4)
+        r["buy_usdt"]     = round(buy_gross, 4)
+        r["sell_usdt"]    = round(sell_gross, 4)
+        r["buy_cost_eff"] = buy_eff
+        r["sell_net_eff"] = sell_eff
+        r["fee_usdt"]     = fee_paid
+        r["net_pnl_usdt"] = round(sell_eff - buy_eff, 4)
         r["avg_pnl_pct"]  = round(r["avg_pnl_pct"], 4) if r["avg_pnl_pct"] is not None else None
 
     # Grand-total row
@@ -453,9 +466,12 @@ async def get_daily_pnl_by_trigger(
             "symbol":       "ALL",
             "interval":     "—",
             "buy_count":    sum(r["buy_count"]  for r in rows),
-            "buy_usdt":     round(sum(r["buy_usdt"]  or 0 for r in rows), 4),
+            "buy_usdt":     round(sum(r["buy_usdt"]    for r in rows), 4),
             "sell_count":   sum(r["sell_count"] for r in rows),
-            "sell_usdt":    round(sum(r["sell_usdt"] or 0 for r in rows), 4),
+            "sell_usdt":    round(sum(r["sell_usdt"]   for r in rows), 4),
+            "buy_cost_eff": round(sum(r["buy_cost_eff"] for r in rows), 4),
+            "sell_net_eff": round(sum(r["sell_net_eff"] for r in rows), 4),
+            "fee_usdt":     round(sum(r["fee_usdt"]    for r in rows), 4),
             "avg_pnl_pct":  None,
             "net_pnl_usdt": round(sum(r["net_pnl_usdt"] for r in rows), 4),
         }
