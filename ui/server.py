@@ -1709,8 +1709,9 @@ async def api_close_futures_position(
             cdx_close_order_id=close_order_id,
         )
         return {"ok": True, "order_id": close_order_id}
-    except Exception as exc:
-        return JSONResponse({"error": str(exc)}, status_code=500)
+    except Exception:
+        _log.exception("Failed to close futures position", extra={"position_id": position_id, "user_id": user_id})
+        return JSONResponse({"error": "Internal server error"}, status_code=500)
 
 
 @app.get("/api/currency/inr-rate")
