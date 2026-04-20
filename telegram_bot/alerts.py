@@ -278,3 +278,72 @@ async def send_trigger_alert(
         await bot.send_message(chat_id=chat_id, text=text, parse_mode=ParseMode.MARKDOWN)
     except Exception:
         pass
+
+
+async def send_futures_trade_notification(
+    bot: Bot,
+    chat_id: str,
+    side: str,
+    symbol: str,
+    quantity: float,
+    entry_price: float,
+    leverage: int,
+    margin_usdt: float,
+    sl_price: float,
+    tp_price: float,
+    liq_price: float,
+    trigger_id: int,
+    reason: str = "signal",
+) -> None:
+    """Send a Telegram notification for a futures position opened/closed."""
+    icon   = "🟢📈" if side == "long" else "🔴📉"
+    sl_pct = abs(sl_price - entry_price) / entry_price * 100 * leverage
+    tp_pct = abs(tp_price - entry_price) / entry_price * 100 * leverage
+    notional = round(margin_usdt * leverage, 2)
+    text = (
+        f"{icon} *FUTURES {side.upper()}* — Trigger #{trigger_id}\n"
+        f"Pair: `{symbol}` | `{leverage}x` leverage\n"
+        f"Entry: `${entry_price:,.4f}`\n"
+        f"Margin: `${margin_usdt:.2f}` → Notional: `${notional:.2f}`\n"
+        f"SL: `${sl_price:,.4f}` _(−{sl_pct:.1f}% on margin)_\n"
+        f"TP: `${tp_price:,.4f}` _(+{tp_pct:.1f}% on margin)_\n"
+        f"Liq: `${liq_price:,.4f}`\n"
+        f"Reason: _{reason}_"
+    )
+    try:
+        await bot.send_message(chat_id=chat_id, text=text, parse_mode=ParseMode.MARKDOWN)
+    except Exception as exc:
+        import logging
+        logging.getLogger("futures_alert").warning("Futures Telegram alert failed: %s", exc)
+
+
+async def send_futures_close_notification(
+    bot: Bot,
+    chat_id: str,
+    side: str,
+    symbol: str,
+    quantity: float,
+    entry_price: float,
+    close_price: float,
+    leverage: int,
+    margin_usdt: float,
+    pnl_pct: float,
+    pnl_usdt: float,
+    trigger_id: int,
+    reason: str = "signal",
+) -> None:
+    icon = "✅" if pnl_usdt >= 0 else "❌"
+    pnl_sign = "+" if pnl_usdt >= 0 else ""
+    text = (
+        f"{icon} *FUTURES CLOSED* ({side.upper()}) — Trigger #{trigger_id}\n"
+        f"Pair: `{symbol}` | `{leverage}x`\n"
+        f"Entry: `${entry_price:,.4f}` → Exit: `${close_price:,.4f}`\n"
+        f"Margin: `${margin_usdt:.2f}`\n"
+        f"P&L: *{pnl_sign}{pnl_pct:.2f}% on margin* (`{pnl_sign}${abs(pnl_usdt):.4f} USDT`)\n"
+        f"Reason: _{reason}_"
+    )
+    try:
+        await bot.send_message(chat_id=chat_id, text=text, parse_mode=ParseMode.MARKDOWN)
+    except Exception as exc:
+        import logging
+        logging.getLogger("futures_alert").warning("Futures close Telegram alert failed: %s", exc)

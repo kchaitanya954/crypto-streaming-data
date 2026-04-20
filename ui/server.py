@@ -132,7 +132,9 @@ class TriggerCreate(BaseModel):
     min_confidence:     str            = "MEDIUM"
     adx_threshold:      Optional[float] = None
     cooldown_bars:      Optional[int]   = None
-    trade_amount_usdt:  float           = 10.0   # USDT to allocate per trade
+    trade_amount_usdt:  float           = 10.0
+    market_type:        str            = "spot"     # "spot" | "futures"
+    leverage:           int            = 1          # 1–20 (futures only)
 
 class TriggerBulkDelete(BaseModel):
     ids: list[int]
@@ -146,6 +148,8 @@ class TriggerUpdate(BaseModel):
     adx_threshold:     Optional[float] = None
     cooldown_bars:     Optional[int]   = None
     trade_amount_usdt: Optional[float] = None
+    market_type:       Optional[str]   = None
+    leverage:          Optional[int]   = None
 
 app = FastAPI()
 app.mount("/static", StaticFiles(directory=static_dir), name="static")
@@ -899,6 +903,7 @@ async def api_create_trigger(
         # No CoinDCX configured yet — allow trigger creation without balance check
         pass
 
+    leverage = max(1, min(int(body.leverage or 1), 20))
     tid = await queries.create_trigger(
         db, sym, iv, conf,
         adx_threshold=body.adx_threshold,
@@ -906,6 +911,8 @@ async def api_create_trigger(
         name=body.name,
         trade_amount_usdt=body.trade_amount_usdt,
         user_id=user_id,
+        market_type=body.market_type or "spot",
+        leverage=leverage,
     )
     if tg_bot and settings:
         from telegram_bot.alerts import send_trigger_alert
@@ -941,6 +948,8 @@ async def api_update_trigger(
         cooldown_bars=body.cooldown_bars,
         name=body.name,
         trade_amount_usdt=body.trade_amount_usdt,
+        market_type=body.market_type,
+        leverage=body.leverage,
     )
     if tg_bot and settings and trig:
         from telegram_bot.alerts import send_trigger_alert
@@ -1625,6 +1634,83 @@ async def api_adaptive_state(request: Request, user: dict = Depends(_current_use
     """Return current adaptive engine state and position-size recommendations."""
     from signals.adaptive_strategy import engine as _adaptive_engine
     return _adaptive_engine.summary()
+
+
+# ── Futures API ────────────────────────────────────────────────────────────────
+
+@app.get("/api/futures/positions")
+async def api_futures_positions(
+    request: Request,
+    user: dict = Depends(_current_user),
+):
+    """All open futures positions for the authenticated user."""
+    db = getattr(request.app.state, "db", None)
+    if db is None:
+        return JSONResponse({"error": "DB not configured"}, status_code=503)
+    user_id   = int(user["sub"])
+    positions = await queries.get_all_open_futures_positions(db, user_id=user_id)
+    return {"positions": positions}
+
+
+@app.get("/api/futures/history")
+async def api_futures_history(
+    request: Request,
+    limit: int = Query(default=50, ge=1, le=200),
+    user: dict = Depends(_current_user),
+):
+    """Closed futures position history for the authenticated user."""
+    db = getattr(request.app.state, "db", None)
+    if db is None:
+        return JSONResponse({"error": "DB not configured"}, status_code=503)
+    user_id = int(user["sub"])
+    history = await queries.get_futures_history(db, user_id, limit=limit)
+    return {"history": history}
+
+
+@app.post("/api/futures/positions/{position_id}/close")
+async def api_close_futures_position(
+    request: Request,
+    position_id: int,
+    user: dict = Depends(_current_user),
+):
+    """Manually close an open futures position at current market price."""
+    db = getattr(request.app.state, "db", None)
+    if db is None:
+        return JSONResponse({"error": "DB not configured"}, status_code=503)
+    user_id = int(user["sub"])
+
+    cursor = await db.execute(
+        "SELECT * FROM futures_positions WHERE id = ? AND user_id = ? AND status = 'open'",
+        (position_id, user_id),
+    )
+    row = await cursor.fetchone()
+    if not row:
+        return JSONResponse({"error": "Position not found or already closed"}, status_code=404)
+    fpos = dict(row)
+
+    try:
+        exchange, session = await _get_user_exchange(db, user_id, request)
+        async with session:
+            close_side = "sell" if fpos["side"] == "long" else "buy"
+            result = await exchange.close_futures_position(
+                side=close_side,
+                pair=fpos["symbol"],
+                quantity=fpos["quantity"],
+                leverage=fpos["leverage"],
+            )
+        close_order_id = str(result.get("id") or result.get("order_id") or "")
+        # Use entry price as approximate close price (real fill unknown synchronously)
+        close_price = fpos["entry_price"]
+        await queries.close_futures_position(
+            db, position_id,
+            close_price=close_price,
+            pnl_pct=0.0,
+            pnl_usdt=0.0,
+            cdx_close_order_id=close_order_id,
+        )
+        return {"ok": True, "order_id": close_order_id}
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
 
 
 @app.get("/api/currency/inr-rate")

@@ -36,14 +36,15 @@ log = logging.getLogger("orchestrator")
 
 async def _check_sl_tp(symbol: str, current_price: float, db, settings) -> None:
     """
-    After every closed candle, check all open positions on this symbol against
-    their stop-loss / take-profit prices and auto-sell when triggered.
+    After every closed candle, check all open spot and futures positions on this
+    symbol against their stop-loss / take-profit prices and auto-close when triggered.
     """
     from database import queries
     from exchange.auto_trade import execute_trigger_trade
     from signals.detector import Signal
     import time as _time
 
+    # ── Spot SL/TP ────────────────────────────────────────────────────────────
     positions = await queries.get_positions_for_sl_tp_check(db, symbol)
     for pos in positions:
         trigger_id = pos["trigger_id"]
@@ -60,12 +61,10 @@ async def _check_sl_tp(symbol: str, current_price: float, db, settings) -> None:
             continue
 
         log.info(
-            "SL/TP triggered: trigger=%d symbol=%s price=%.4f reason=%s (SL=%.4f TP=%.4f)",
+            "Spot SL/TP triggered: trigger=%d %s price=%.4f reason=%s",
             trigger_id, symbol.upper(), current_price, reason,
-            sl_price or 0, tp_price or 0,
         )
 
-        # Build a minimal synthetic signal for the SELL executor
         trigger = await queries.get_trigger(db, trigger_id)
         if not trigger or not trigger.get("active"):
             continue
@@ -79,10 +78,112 @@ async def _check_sl_tp(symbol: str, current_price: float, db, settings) -> None:
             adx_val=0.0, trend_note=reason,
             reasons=[reason],
         )
-
         asyncio.create_task(
             execute_trigger_trade(db, trigger, fake_signal, symbol.upper(),
                                   trigger["interval"], signal_id=None, reason=reason)
+        )
+
+    # ── Futures SL/TP ─────────────────────────────────────────────────────────
+    futures_positions = await queries.get_open_futures_positions_for_sl_tp(db, symbol)
+    for fpos in futures_positions:
+        sl_price = fpos["sl_price"]
+        tp_price = fpos["tp_price"]
+        side     = fpos["side"]   # 'long' or 'short'
+
+        reason = None
+        if side == "long":
+            if current_price <= sl_price:
+                reason = "stop_loss"
+            elif current_price >= tp_price:
+                reason = "take_profit"
+        else:  # short
+            if current_price >= sl_price:
+                reason = "stop_loss"
+            elif current_price <= tp_price:
+                reason = "take_profit"
+
+        if not reason:
+            continue
+
+        log.info(
+            "Futures SL/TP triggered: pos=%d %s %s price=%.4f reason=%s (SL=%.4f TP=%.4f)",
+            fpos["id"], side.upper(), symbol.upper(), current_price, reason,
+            sl_price, tp_price,
+        )
+
+        asyncio.create_task(
+            _close_futures_position_sltp(db, fpos, current_price, reason)
+        )
+
+
+async def _close_futures_position_sltp(db, fpos: dict, close_price: float, reason: str) -> None:
+    """Close a futures position due to SL/TP trigger."""
+    import aiohttp
+    from database import queries
+    from auth.encryption import safe_decrypt
+    from exchange.coindcx_client import CoinDCXClient
+    from exchange.futures_trade import FUTURES_FEE_RATE
+    from telegram_bot.alerts import send_futures_close_notification
+
+    trigger_id = fpos["trigger_id"]
+    user_id    = fpos["user_id"]
+    side       = fpos["side"]
+    close_side = "sell" if side == "long" else "buy"
+
+    try:
+        user_settings = await queries.get_user_settings(db, user_id)
+        key    = safe_decrypt((user_settings or {}).get("coindcx_api_key_enc"))
+        secret = safe_decrypt((user_settings or {}).get("coindcx_api_secret_enc"))
+        if not key or not secret:
+            return
+
+        async with aiohttp.ClientSession() as session:
+            exchange = CoinDCXClient(api_key=key, api_secret=secret, session=session)
+            result   = await exchange.close_futures_position(
+                side=close_side,
+                pair=fpos["symbol"],
+                quantity=fpos["quantity"],
+                leverage=fpos["leverage"],
+            )
+            close_order_id = str(result.get("id") or result.get("order_id") or "")
+
+        ep = fpos["entry_price"]
+        if side == "long":
+            raw_pnl_pct = (close_price - ep) / ep * 100 * fpos["leverage"]
+        else:
+            raw_pnl_pct = (ep - close_price) / ep * 100 * fpos["leverage"]
+        # Deduct round-trip fee on notional (expressed as % of margin)
+        fee_margin_pct = FUTURES_FEE_RATE * 2 * fpos["leverage"] * 100
+        pnl_pct  = round(raw_pnl_pct - fee_margin_pct, 4)
+        pnl_usdt = round(fpos["margin_usdt"] * pnl_pct / 100, 4)
+
+        await queries.close_futures_position(
+            db, fpos["id"], close_price, pnl_pct, pnl_usdt, close_order_id
+        )
+        log.info(
+            "Futures position %d closed (%s): price=%.4f P&L=%.2f%% ($%.4f)",
+            fpos["id"], reason, close_price, pnl_pct, pnl_usdt,
+        )
+
+        # Telegram
+        from exchange.auto_trade import _get_user_telegram  # noqa: PLC0415
+        tg_bot, tg_chat_id = await _get_user_telegram(user_settings)
+        if tg_bot and tg_chat_id:
+            await send_futures_close_notification(
+                tg_bot, tg_chat_id,
+                side=side, symbol=fpos["symbol"],
+                quantity=fpos["quantity"],
+                entry_price=ep, close_price=close_price,
+                leverage=fpos["leverage"],
+                margin_usdt=fpos["margin_usdt"],
+                pnl_pct=pnl_pct, pnl_usdt=pnl_usdt,
+                trigger_id=trigger_id, reason=reason,
+            )
+    except Exception as exc:
+        import traceback
+        log.error(
+            "Failed to close futures position %d: %s\n%s",
+            fpos["id"], exc, traceback.format_exc(),
         )
 
 
@@ -198,14 +299,25 @@ async def _stream_pair(symbol: str, interval: str, db, tg_bot, exchange, setting
                         # execute_trigger_trade — no pre-filtering here so that manual
                         # holdings (bought outside the bot) can also be sold.
                         for trig in matched_triggers:
-                            asyncio.create_task(
-                                execute_trigger_trade(
-                                    db, trig, signal, symbol.upper(), interval, signal_id
+                            mtype = (trig.get("market_type") or "spot").lower()
+                            if mtype == "futures":
+                                from exchange.futures_trade import execute_futures_trigger_trade
+                                asyncio.create_task(
+                                    execute_futures_trigger_trade(
+                                        db, trig, signal, symbol.upper(), interval, signal_id
+                                    )
                                 )
+                            else:
+                                asyncio.create_task(
+                                    execute_trigger_trade(
+                                        db, trig, signal, symbol.upper(), interval, signal_id
+                                    )
+                                )
+                            log.info(
+                                "BG auto-trade queued  trigger=%d  %s %s %s %s [%s]",
+                                trig["id"], signal.direction, signal.confidence,
+                                symbol.upper(), interval, mtype,
                             )
-                            log.info("BG auto-trade queued  trigger=%d  %s %s %s %s",
-                                     trig["id"], signal.direction, signal.confidence,
-                                     symbol.upper(), interval)
                 except Exception as exc:
                     log.error("BG trigger check error: %s", exc)
 
