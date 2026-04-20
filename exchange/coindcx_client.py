@@ -18,7 +18,7 @@ from typing import Optional
 
 import aiohttp
 
-BASE_URL      = "https://api.coindcx.com"      # balances, markets, non-spot
+BASE_URL      = "https://api.coindcx.com"      # balances, markets, futures
 SPOT_BASE_URL = "https://apigw.coindcx.com"   # spot order execution (mandatory from CoinDCX update)
 
 
@@ -222,3 +222,93 @@ class CoinDCXClient:
         if market:
             body["market"] = market.upper()
         return await self._post("/exchange/v1/orders", body, spot=True)
+
+    # ── Futures endpoints ─────────────────────────────────────────────────────
+
+    async def create_futures_order(
+        self,
+        side: str,
+        pair: str,
+        order_type: str,
+        quantity: float,
+        leverage: int,
+        price: Optional[float] = None,
+        sl_price: Optional[float] = None,
+        tp_price: Optional[float] = None,
+    ) -> dict:
+        """
+        POST /exchange/v1/derivatives/futures/orders/create
+
+        side:       "buy"  (open/add long)  | "sell" (open/add short)
+        pair:       e.g. "BTCUSDT"
+        order_type: "market_order" | "limit_order" | "stop_market" | "take_profit_market"
+        quantity:   base asset amount
+        leverage:   1 – 20
+        """
+        body: dict = {
+            "side":           side,
+            "pair":           pair.upper(),
+            "order_type":     order_type,
+            "total_quantity": quantity,
+            "leverage":       leverage,
+            "timestamp":      int(time.time() * 1000),
+        }
+        if price is not None:
+            body["price"] = price
+        if sl_price is not None:
+            body["stop_price"] = sl_price
+        if tp_price is not None:
+            body["take_profit_price"] = tp_price
+        return await self._post("/exchange/v1/derivatives/futures/orders/create", body)
+
+    async def close_futures_position(
+        self,
+        side: str,
+        pair: str,
+        quantity: float,
+        leverage: int,
+    ) -> dict:
+        """
+        Close a futures position by placing the opposite-side market order.
+        Long → side="sell", Short → side="buy"
+        """
+        body = {
+            "side":           side,
+            "pair":           pair.upper(),
+            "order_type":     "market_order",
+            "total_quantity": quantity,
+            "leverage":       leverage,
+            "timestamp":      int(time.time() * 1000),
+        }
+        return await self._post("/exchange/v1/derivatives/futures/orders/create", body)
+
+    async def get_futures_positions(self, pair: Optional[str] = None) -> list[dict]:
+        """
+        POST /exchange/v1/derivatives/futures/positions
+        Returns all open futures positions for the account.
+        """
+        body: dict = {"timestamp": int(time.time() * 1000)}
+        if pair:
+            body["pair"] = pair.upper()
+        result = await self._post("/exchange/v1/derivatives/futures/positions", body)
+        return result if isinstance(result, list) else result.get("positions", [])
+
+    async def cancel_futures_order(self, order_id: str) -> dict:
+        """POST /exchange/v1/derivatives/futures/orders/cancel"""
+        body = {"id": order_id, "timestamp": int(time.time() * 1000)}
+        return await self._post("/exchange/v1/derivatives/futures/orders/cancel", body)
+
+    async def get_futures_funding_rate(self, pair: str) -> Optional[float]:
+        """
+        GET funding rate for a futures pair.
+        Returns the current 8-hour funding rate as a float (e.g. 0.0001 = 0.01%).
+        Returns None if unavailable.
+        """
+        try:
+            result = await self._get(
+                "/exchange/v1/derivatives/futures/funding_rate",
+                params={"pair": pair.upper()},
+            )
+            return float(result.get("funding_rate", 0))
+        except Exception:
+            return None

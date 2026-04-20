@@ -1013,6 +1013,10 @@ function renderTriggers(list) {
     const adxHint  = t.adx_threshold != null ? ` adx≥${t.adx_threshold}` : '';
     const cdHint   = t.cooldown_bars  != null ? ` cd${t.cooldown_bars}`   : '';
     const nameLabel = t.name ? `<span style="font-size:10px;color:#D1D4DC;font-weight:600;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${t.name}">${t.name}</span>` : '';
+    const isFutures = (t.market_type || 'spot').toLowerCase() === 'futures';
+    const futuresBadge = isFutures
+      ? `<span style="font-size:7px;color:#FF9800;background:rgba(255,152,0,0.15);border:1px solid rgba(255,152,0,0.4);border-radius:3px;padding:1px 3px;font-weight:700" title="Futures ${t.leverage || 1}×">F${t.leverage || 1}×</span>`
+      : '';
     let amtLabel = '';
     if (t.trade_amount_usdt) {
       const amtDisp = displayCurrency === 'INR'
@@ -1033,6 +1037,7 @@ function renderTriggers(list) {
       `<span class="trig-sym">${t.symbol}</span>` +
       `<span class="trig-iv">${t.interval}</span>` +
       `<span class="trig-conf trig-conf-${t.min_confidence}">${t.min_confidence}</span>` +
+      futuresBadge +
       amtLabel +
       posLabel +
       (adxHint || cdHint ? `<span style="font-size:8px;color:#4C525E">${adxHint}${cdHint}</span>` : '') +
@@ -1082,6 +1087,16 @@ document.getElementById('trig-iv').addEventListener('change', e => {
   applyTierToTriggerForm(e.target.value);
 });
 
+// Market type toggle — show/hide leverage input
+(function initMarketTypeToggle() {
+  const wrap = document.getElementById('trig-leverage-wrap');
+  document.querySelectorAll('input[name="trig-market"]').forEach(radio => {
+    radio.addEventListener('change', () => {
+      wrap.style.display = radio.value === 'futures' && radio.checked ? 'flex' : 'none';
+    });
+  });
+}());
+
 function openEditForm(t) {
   currentEditId = t.id;
   document.getElementById('trig-name').value = t.name || '';
@@ -1090,11 +1105,16 @@ function openEditForm(t) {
     opt.selected = opt.value === t.interval;
   for (const opt of document.getElementById('trig-conf').options)
     opt.selected = opt.value === t.min_confidence;
-  // Populate ADX / cooldown (show stored value or blank for "tier default")
   document.getElementById('trig-adx').value    = t.adx_threshold    != null ? t.adx_threshold    : '';
   document.getElementById('trig-cd').value      = t.cooldown_bars    != null ? t.cooldown_bars    : '';
-  // Show stored USDT amount (always USDT)
   document.getElementById('trig-amount').value = t.trade_amount_usdt != null ? t.trade_amount_usdt : '';
+  // Market type + leverage
+  const mtype = (t.market_type || 'spot').toLowerCase();
+  document.getElementById('trig-market-spot').checked    = mtype === 'spot';
+  document.getElementById('trig-market-futures').checked = mtype === 'futures';
+  const leverageWrap = document.getElementById('trig-leverage-wrap');
+  leverageWrap.style.display = mtype === 'futures' ? 'flex' : 'none';
+  document.getElementById('trig-leverage').value = t.leverage || 5;
   updateTrigAmountConversion();
   applyTierToTriggerForm(t.interval);
   document.getElementById('trig-save-btn').textContent = 'Update Trigger';
@@ -1114,6 +1134,10 @@ document.getElementById('trig-add-btn').addEventListener('click', () => {
     document.getElementById('trig-sym').value  = currentSymbol;
     document.getElementById('trig-adx').value  = '';
     document.getElementById('trig-cd').value   = '';
+    document.getElementById('trig-market-spot').checked    = true;
+    document.getElementById('trig-market-futures').checked = false;
+    document.getElementById('trig-leverage-wrap').style.display = 'none';
+    document.getElementById('trig-leverage').value = 5;
     for (const opt of document.getElementById('trig-iv').options)
       opt.selected = opt.value === currentInterval;
     applyTierToTriggerForm(currentInterval);
@@ -1187,11 +1211,15 @@ document.getElementById('trig-save-btn').addEventListener('click', () => {
   const errEl = document.getElementById('trig-form-error');
   errEl.style.display = 'none';
 
+  const marketType = document.querySelector('input[name="trig-market"]:checked')?.value || 'spot';
+  const leverageVal = parseInt(document.getElementById('trig-leverage').value || '1', 10);
   const payload = {
     name, symbol: sym, interval: iv, min_confidence: conf,
     adx_threshold:    adxRaw !== '' ? parseFloat(adxRaw)  : null,
     cooldown_bars:    cdRaw  !== '' ? parseInt(cdRaw, 10)  : null,
     trade_amount_usdt: parseFloat(amountUsdt.toFixed(4)),
+    market_type: marketType,
+    leverage: marketType === 'futures' ? Math.min(Math.max(leverageVal, 1), 20) : 1,
   };
 
   apiFetch(url, {
@@ -1253,6 +1281,8 @@ document.getElementById('analytics-btn').addEventListener('click', () => {
   analyticsOpen = true;
   loadAnalytics();
   loadDailyPnl();
+  loadFuturesPositions();
+  loadFuturesHistory();
   apiFetch('/api/adaptive').then(r => r.json()).then(renderAdaptiveState).catch(() => {});
 });
 
@@ -1817,6 +1847,88 @@ function renderDcxTrades(data) {
 }
 
 document.getElementById('dcx-trades-refresh').addEventListener('click', loadDcxTrades);
+
+// ── Futures positions + history ───────────────────────────────────────────────
+
+function loadFuturesPositions() {
+  const loadEl  = document.getElementById('futures-pos-loading');
+  const emptyEl = document.getElementById('futures-pos-empty');
+  const tableEl = document.getElementById('futures-pos-table');
+  const bodyEl  = document.getElementById('futures-pos-body');
+  loadEl.style.display  = 'block';
+  emptyEl.style.display = 'none';
+  tableEl.style.display = 'none';
+  apiFetch('/api/futures/positions')
+    .then(r => r.json())
+    .then(data => {
+      loadEl.style.display = 'none';
+      const rows = Array.isArray(data) ? data : [];
+      if (!rows.length) { emptyEl.style.display = 'block'; return; }
+      tableEl.style.display = 'table';
+      bodyEl.innerHTML = rows.map(p => {
+        const sideColor = p.side === 'long' ? '#26A69A' : '#EF5350';
+        const sideIcon  = p.side === 'long' ? '▲' : '▼';
+        const opened    = new Date(p.created_at * 1000).toLocaleString();
+        return `<tr>
+          <td>${p.trigger_id}</td>
+          <td><code>${p.symbol}</code></td>
+          <td style="color:${sideColor};font-weight:700">${sideIcon} ${p.side.toUpperCase()}</td>
+          <td>${p.leverage}×</td>
+          <td>${p.quantity.toFixed(5)}</td>
+          <td>$${p.entry_price.toLocaleString(undefined,{minimumFractionDigits:2})}</td>
+          <td>$${p.margin_usdt.toFixed(2)}</td>
+          <td style="color:#EF5350">$${p.sl_price.toFixed(4)}</td>
+          <td style="color:#26A69A">$${p.tp_price.toFixed(4)}</td>
+          <td style="color:#FF9800">$${p.liquidation_price.toFixed(4)}</td>
+          <td style="font-size:10px;color:#4C525E">${opened}</td>
+        </tr>`;
+      }).join('');
+    })
+    .catch(() => { loadEl.style.display = 'none'; emptyEl.style.display = 'block'; });
+}
+
+function loadFuturesHistory() {
+  const loadEl  = document.getElementById('futures-hist-loading');
+  const emptyEl = document.getElementById('futures-hist-empty');
+  const tableEl = document.getElementById('futures-hist-table');
+  const bodyEl  = document.getElementById('futures-hist-body');
+  loadEl.style.display  = 'block';
+  emptyEl.style.display = 'none';
+  tableEl.style.display = 'none';
+  apiFetch('/api/futures/history')
+    .then(r => r.json())
+    .then(data => {
+      loadEl.style.display = 'none';
+      const rows = Array.isArray(data) ? data : [];
+      if (!rows.length) { emptyEl.style.display = 'block'; return; }
+      tableEl.style.display = 'table';
+      bodyEl.innerHTML = rows.map(p => {
+        const sideColor  = p.side === 'long' ? '#26A69A' : '#EF5350';
+        const pnlColor   = (p.pnl_usdt || 0) >= 0 ? '#26A69A' : '#EF5350';
+        const pnlSign    = (p.pnl_usdt || 0) >= 0 ? '+' : '';
+        const pnlPctSign = (p.pnl_pct  || 0) >= 0 ? '+' : '';
+        const closed     = p.closed_at ? new Date(p.closed_at * 1000).toLocaleString() : '—';
+        return `<tr>
+          <td>${p.trigger_id}</td>
+          <td><code>${p.symbol}</code></td>
+          <td style="color:${sideColor};font-weight:700">${p.side.toUpperCase()}</td>
+          <td>${p.leverage}×</td>
+          <td>${p.quantity.toFixed(5)}</td>
+          <td>$${p.entry_price.toFixed(4)}</td>
+          <td>${p.close_price ? '$'+p.close_price.toFixed(4) : '—'}</td>
+          <td>$${p.margin_usdt.toFixed(2)}</td>
+          <td style="color:${pnlColor};font-weight:700">${pnlPctSign}${(p.pnl_pct||0).toFixed(2)}%</td>
+          <td style="color:${pnlColor};font-weight:700">${pnlSign}$${Math.abs(p.pnl_usdt||0).toFixed(4)}</td>
+          <td style="font-size:10px;color:#787B86">${p.status || '—'}</td>
+          <td style="font-size:10px;color:#4C525E">${closed}</td>
+        </tr>`;
+      }).join('');
+    })
+    .catch(() => { loadEl.style.display = 'none'; emptyEl.style.display = 'block'; });
+}
+
+document.getElementById('futures-pos-refresh').addEventListener('click', loadFuturesPositions);
+document.getElementById('futures-hist-refresh').addEventListener('click', loadFuturesHistory);
 
 // ── Start ─────────────────────────────────────────────────────────────────────
 

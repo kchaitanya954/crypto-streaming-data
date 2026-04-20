@@ -814,6 +814,21 @@
           <span id="trig-amount-conv" style="font-size:9px;color:#FF9800"></span>
           <span id="trig-balance-hint" style="font-size:9px;color:#4C525E;margin-left:auto"></span>
         </div>
+        <div class="trig-form-row" style="gap:6px;align-items:center">
+          <span style="font-size:9px;color:#787B86">Market</span>
+          <label style="display:flex;align-items:center;gap:3px;cursor:pointer;font-size:9px;color:#D1D4DC">
+            <input type="radio" name="trig-market" id="trig-market-spot" value="spot" checked style="accent-color:#2196F3" /> Spot
+          </label>
+          <label style="display:flex;align-items:center;gap:3px;cursor:pointer;font-size:9px;color:#FF9800">
+            <input type="radio" name="trig-market" id="trig-market-futures" value="futures" style="accent-color:#FF9800" /> Futures
+          </label>
+          <span id="trig-leverage-wrap" style="display:none;align-items:center;gap:3px;margin-left:4px">
+            <span style="font-size:9px;color:#FF9800">Leverage</span>
+            <input id="trig-leverage" class="trig-inp" type="number" min="1" max="20" step="1"
+              style="width:42px" value="5" title="Futures leverage (1–20×)" />
+            <span style="font-size:9px;color:#FF9800">×</span>
+          </span>
+        </div>
         <div id="trig-form-error" style="font-size:11px;color:#EF5350;padding:2px 0;display:none"></div>
         <button class="trig-save-btn" id="trig-save-btn">Save Trigger</button>
       </div>
@@ -1126,6 +1141,51 @@
         </table>
         <div class="an-no-data" id="dcx-no-trades" style="display:none">No trades found — make sure your CoinDCX API keys are configured in Account Settings.</div>
         <div id="dcx-trades-loading" style="text-align:center;padding:20px;color:#787B86;font-size:12px;display:none">Loading…</div>
+      </div>
+    </div>
+
+    <!-- ── Futures Positions ─────────────────────────────────────────────────── -->
+    <div class="an-section" style="border-top:2px solid #FF6D00">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+        <div class="an-section-title" style="color:#FF9800">Futures Positions</div>
+        <div style="display:flex;gap:6px">
+          <button id="futures-pos-refresh" class="an-refresh-btn" style="font-size:10px">⟳ Open</button>
+          <button id="futures-hist-refresh" class="an-refresh-btn" style="font-size:10px;background:#2A2E39">⟳ History</button>
+        </div>
+      </div>
+
+      <!-- Open positions -->
+      <div style="font-size:10px;color:#FF9800;font-weight:600;margin-bottom:4px;letter-spacing:0.5px">OPEN POSITIONS</div>
+      <div class="an-trades-wrap" style="max-height:200px;margin-bottom:10px">
+        <table class="an-table" id="futures-pos-table" style="width:100%;display:none">
+          <thead>
+            <tr>
+              <th>#</th><th>Symbol</th><th>Side</th><th>Lev</th>
+              <th>Qty</th><th>Entry</th><th>Margin</th>
+              <th>SL</th><th>TP</th><th>Liq</th><th>Opened</th>
+            </tr>
+          </thead>
+          <tbody id="futures-pos-body"></tbody>
+        </table>
+        <div class="an-no-data" id="futures-pos-empty" style="display:none">No open futures positions.</div>
+        <div id="futures-pos-loading" style="text-align:center;padding:12px;color:#787B86;font-size:12px;display:none">Loading…</div>
+      </div>
+
+      <!-- History -->
+      <div style="font-size:10px;color:#787B86;font-weight:600;margin-bottom:4px;letter-spacing:0.5px">CLOSED HISTORY</div>
+      <div class="an-trades-wrap" style="max-height:220px">
+        <table class="an-table" id="futures-hist-table" style="width:100%;display:none">
+          <thead>
+            <tr>
+              <th>#</th><th>Symbol</th><th>Side</th><th>Lev</th>
+              <th>Qty</th><th>Entry</th><th>Exit</th><th>Margin</th>
+              <th>P&amp;L %</th><th>P&amp;L USDT</th><th>Reason</th><th>Closed</th>
+            </tr>
+          </thead>
+          <tbody id="futures-hist-body"></tbody>
+        </table>
+        <div class="an-no-data" id="futures-hist-empty" style="display:none">No closed futures positions yet.</div>
+        <div id="futures-hist-loading" style="text-align:center;padding:12px;color:#787B86;font-size:12px;display:none">Loading…</div>
       </div>
     </div>
   </div>

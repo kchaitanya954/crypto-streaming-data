@@ -146,24 +146,14 @@ async def execute_trigger_trade(
                 losses = _adaptive_engine.consecutive_losses
                 dd     = _adaptive_engine.current_drawdown_pct
 
-                # ── Extreme drawdown: only hard stop (genuine emergency) ──────
-                if dd >= 20.0:
-                    _log.warning("Trigger %d: HARD STOP — portfolio down %.1f%% — skipping BUY",
-                                 trigger_id, dd)
-                    if tg_bot:
-                        await send_trade_error(
-                            tg_bot, tg_chat_id, trigger_id, symbol, "BUY",
-                            f"Hard stop: portfolio drawdown {dd:.1f}% (>20%) — resume manually after review",
-                        )
-                    return
-
-                # No confidence-based blocking — the adaptive engine already handles
-                # loss streaks by reducing BUY size via Kelly + drawdown multipliers.
-                # Blocking signals entirely prevents recovery; smaller size does not.
-                if losses > 0:
+                # Adaptive engine already handles drawdown via Kelly reduction
+                # and drawdown multipliers (30% of normal size at DD≥20%).
+                # Blocking trades entirely prevents recovery — size reduction is
+                # always better than a hard stop.
+                if losses > 0 or dd > 0:
                     _log.info(
-                        "Trigger %d: %d consecutive losses — Kelly-reduced sizing, still trading",
-                        trigger_id, losses,
+                        "Trigger %d: DD=%.1f%%  losses=%d — Kelly-reduced sizing (adaptive)",
+                        trigger_id, dd, losses,
                     )
 
                 # ── Max concurrent open positions check ──────────────────────

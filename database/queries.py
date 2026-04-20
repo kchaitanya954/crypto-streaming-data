@@ -290,16 +290,20 @@ async def create_trigger(
     name: Optional[str] = None,
     trade_amount_usdt: Optional[float] = None,
     user_id: Optional[int] = None,
+    market_type: str = "spot",
+    leverage: int = 1,
 ) -> int:
     """Insert a new trigger. Returns the new row id."""
     cursor = await db.execute(
         """INSERT INTO triggers
                (symbol, interval, min_confidence, adx_threshold, cooldown_bars,
-                name, trade_amount_usdt, user_id, active, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)""",
+                name, trade_amount_usdt, user_id, market_type, leverage, active, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)""",
         (symbol.upper(), interval, min_confidence.upper(),
          adx_threshold, cooldown_bars, name,
-         trade_amount_usdt, user_id, int(time.time())),
+         trade_amount_usdt, user_id,
+         market_type.lower(), max(1, min(leverage, 20)),
+         int(time.time())),
     )
     await db.commit()
     return cursor.lastrowid
@@ -319,6 +323,8 @@ async def update_trigger(
     cooldown_bars  = _SENTINEL,
     name: Optional[str] = None,
     trade_amount_usdt: Optional[float] = None,
+    market_type: Optional[str] = None,
+    leverage: Optional[int] = None,
 ) -> None:
     """Update any subset of trigger fields."""
     fields, params = [], []
@@ -330,6 +336,8 @@ async def update_trigger(
     if cooldown_bars      is not _SENTINEL: fields.append("cooldown_bars = ?");      params.append(cooldown_bars)
     if name               is not None:      fields.append("name = ?");               params.append(name)
     if trade_amount_usdt  is not None:      fields.append("trade_amount_usdt = ?");  params.append(trade_amount_usdt)
+    if market_type        is not None:      fields.append("market_type = ?");        params.append(market_type.lower())
+    if leverage           is not None:      fields.append("leverage = ?");           params.append(leverage)
     if not fields:
         return
     params.append(trigger_id)
@@ -436,7 +444,7 @@ async def get_daily_pnl_by_trigger(
         LEFT JOIN trade_history th ON th.order_id = o.id
         WHERE o.user_id    = ?
           AND o.status     = 'filled'
-          AND DATE((o.created_at / 1000) + ?, 'unixepoch') = ?
+          AND DATE(o.created_at + ?, 'unixepoch') = ?
         GROUP BY o.trigger_id
         ORDER BY o.trigger_id
         """,
@@ -797,3 +805,137 @@ async def clear_all_data(db: aiosqlite.Connection) -> dict:
         counts[table] = cursor.rowcount
     await db.commit()
     return counts
+
+
+# ── Futures positions ──────────────────────────────────────────────────────────
+
+async def insert_futures_position(
+    db: aiosqlite.Connection,
+    trigger_id: int,
+    user_id: int,
+    symbol: str,
+    side: str,
+    quantity: float,
+    entry_price: float,
+    leverage: int,
+    margin_usdt: float,
+    liquidation_price: float,
+    sl_price: float,
+    tp_price: float,
+    cdx_order_id: Optional[str] = None,
+) -> int:
+    notional = round(quantity * entry_price, 4)
+    cursor = await db.execute(
+        """
+        INSERT INTO futures_positions
+            (trigger_id, user_id, symbol, side, quantity, entry_price, leverage,
+             margin_usdt, notional_usdt, liquidation_price, sl_price, tp_price,
+             cdx_order_id, status, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)
+        """,
+        (trigger_id, user_id, symbol.upper(), side, quantity, entry_price, leverage,
+         margin_usdt, notional, liquidation_price, sl_price, tp_price,
+         cdx_order_id, int(time.time())),
+    )
+    await db.commit()
+    return cursor.lastrowid
+
+
+async def get_open_futures_position(
+    db: aiosqlite.Connection,
+    trigger_id: int,
+) -> Optional[dict]:
+    """Return the single open futures position for a trigger (None if none)."""
+    cursor = await db.execute(
+        "SELECT * FROM futures_positions WHERE trigger_id = ? AND status = 'open' LIMIT 1",
+        (trigger_id,),
+    )
+    row = await cursor.fetchone()
+    return dict(row) if row else None
+
+
+async def get_all_open_futures_positions(
+    db: aiosqlite.Connection,
+    user_id: Optional[int] = None,
+) -> list[dict]:
+    """All open futures positions, optionally filtered by user."""
+    if user_id is not None:
+        cursor = await db.execute(
+            "SELECT * FROM futures_positions WHERE status = 'open' AND user_id = ? ORDER BY created_at DESC",
+            (user_id,),
+        )
+    else:
+        cursor = await db.execute(
+            "SELECT * FROM futures_positions WHERE status = 'open' ORDER BY created_at DESC"
+        )
+    return [dict(r) for r in await cursor.fetchall()]
+
+
+async def get_open_futures_positions_for_sl_tp(
+    db: aiosqlite.Connection,
+    symbol: str,
+) -> list[dict]:
+    """All open futures positions for a symbol (for SL/TP monitoring)."""
+    cursor = await db.execute(
+        "SELECT * FROM futures_positions WHERE symbol = ? AND status = 'open'",
+        (symbol.upper(),),
+    )
+    return [dict(r) for r in await cursor.fetchall()]
+
+
+async def close_futures_position(
+    db: aiosqlite.Connection,
+    position_id: int,
+    close_price: float,
+    pnl_pct: float,
+    pnl_usdt: float,
+    cdx_close_order_id: Optional[str] = None,
+) -> None:
+    await db.execute(
+        """
+        UPDATE futures_positions
+        SET status = 'closed', close_price = ?, pnl_pct = ?, pnl_usdt = ?,
+            cdx_order_id = COALESCE(?, cdx_order_id), closed_at = ?
+        WHERE id = ?
+        """,
+        (close_price, pnl_pct, pnl_usdt, cdx_close_order_id, int(time.time()), position_id),
+    )
+    await db.commit()
+
+
+async def get_futures_history(
+    db: aiosqlite.Connection,
+    user_id: int,
+    limit: int = 50,
+) -> list[dict]:
+    cursor = await db.execute(
+        """
+        SELECT fp.*, t.name AS trigger_name, t.interval
+        FROM futures_positions fp
+        LEFT JOIN triggers t ON t.id = fp.trigger_id
+        WHERE fp.user_id = ?
+        ORDER BY fp.created_at DESC
+        LIMIT ?
+        """,
+        (user_id, limit),
+    )
+    return [dict(r) for r in await cursor.fetchall()]
+
+
+async def get_candles_for_atr(
+    db: aiosqlite.Connection,
+    symbol: str,
+    interval: str,
+    limit: int = 30,
+) -> list[dict]:
+    """Fetch recent candles for ATR calculation."""
+    cursor = await db.execute(
+        """
+        SELECT high, low, close FROM candles
+        WHERE symbol = ? AND interval = ?
+        ORDER BY open_time DESC LIMIT ?
+        """,
+        (symbol.upper(), interval, limit),
+    )
+    rows = [dict(r) for r in await cursor.fetchall()]
+    return list(reversed(rows))  # oldest first

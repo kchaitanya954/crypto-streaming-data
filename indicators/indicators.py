@@ -384,3 +384,41 @@ def adx(
         adx_out[i + period] = adx_val
 
     return ADXResult(adx=adx_out, plus_di=plus_di_out, minus_di=minus_di_out)
+
+
+def atr(
+    highs:  Sequence[float],
+    lows:   Sequence[float],
+    closes: Sequence[float],
+    period: int = 14,
+) -> List[Optional[float]]:
+    """
+    Average True Range (Wilder smoothing).
+
+    TR = max(high - low, |high - prev_close|, |low - prev_close|)
+    ATR = Wilder EMA(14) of TR values.
+
+    Returns list aligned with input; first `period` values are None.
+    """
+    n = len(closes)
+    out: List[Optional[float]] = [None] * n
+    if n < period + 1:
+        return out
+
+    tr_vals: List[float] = []
+    for i in range(1, n):
+        tr = max(
+            highs[i]  - lows[i],
+            abs(highs[i]  - closes[i - 1]),
+            abs(lows[i]   - closes[i - 1]),
+        )
+        tr_vals.append(tr)
+
+    # Seed with SMA of first `period` TR values
+    atr_val = sum(tr_vals[:period]) / period
+    out[period] = atr_val
+    for i in range(period, len(tr_vals)):
+        atr_val = (atr_val * (period - 1) + tr_vals[i]) / period
+        out[i + 1] = atr_val
+
+    return out

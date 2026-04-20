@@ -114,6 +114,30 @@ CREATE TABLE IF NOT EXISTS trigger_positions (
     usdt_spent  REAL    NOT NULL DEFAULT 0,
     updated_at  INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS futures_positions (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    trigger_id        INTEGER NOT NULL REFERENCES triggers(id),
+    user_id           INTEGER NOT NULL,
+    symbol            TEXT    NOT NULL,
+    side              TEXT    NOT NULL,     -- 'long' or 'short'
+    quantity          REAL    NOT NULL,     -- base asset quantity
+    entry_price       REAL    NOT NULL,
+    leverage          INTEGER NOT NULL DEFAULT 1,
+    margin_usdt       REAL    NOT NULL,     -- initial margin deployed
+    notional_usdt     REAL    NOT NULL,     -- position_value = qty × price
+    liquidation_price REAL    NOT NULL,
+    sl_price          REAL    NOT NULL,
+    tp_price          REAL    NOT NULL,
+    cdx_order_id      TEXT,
+    status            TEXT    NOT NULL DEFAULT 'open',  -- 'open' | 'closed' | 'liquidated'
+    close_price       REAL,
+    pnl_pct           REAL,                -- % on margin (filled when closed)
+    pnl_usdt          REAL,
+    created_at        INTEGER NOT NULL,
+    closed_at         INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_futures_pos ON futures_positions(trigger_id, status);
 """
 
 
@@ -138,6 +162,8 @@ async def init_db(db_path: str) -> aiosqlite.Connection:
         ("trigger_positions",  "take_profit_price",    "REAL"),
         ("users",              "password_reset_token", "TEXT"),
         ("users",              "password_reset_expiry","INTEGER"),
+        ("triggers",           "market_type",          "TEXT NOT NULL DEFAULT 'spot'"),
+        ("triggers",           "leverage",             "INTEGER NOT NULL DEFAULT 1"),
     ]:
         try:
             await db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {defn}")
