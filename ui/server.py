@@ -1347,13 +1347,29 @@ async def api_daily_pnl(
     user:    dict = Depends(_current_user),
 ):
     """
-    Daily P&L summary grouped by trigger for a given IST date (YYYY-MM-DD).
-    Defaults to today IST if no date provided.
+    Daily P&L summary grouped by trigger for a 10am IST → 10am IST window.
+    If `date` (YYYY-MM-DD) is given, returns window ending at 10am IST on that date.
+    Defaults to the most recently completed 10am-to-10am window.
     """
+    import datetime as _dt
+    from database.queries import _ist_10am_window
+
     db      = request.app.state.db
     user_id = int(user["sub"])
-    rows    = await queries.get_daily_pnl_by_trigger(db, user_id, date or None)
-    return {"date": date or None, "rows": rows}
+
+    if date:
+        # Window ending at 10am IST on the given date
+        IST_OFFSET = 19800
+        end_ist    = _dt.datetime.strptime(date, "%Y-%m-%d").replace(hour=10, minute=0, second=0)
+        to_ts      = int((end_ist - _dt.timedelta(seconds=IST_OFFSET) - _dt.datetime(1970, 1, 1)).total_seconds())
+        from_ts    = to_ts - 86400
+        start_ist  = end_ist - _dt.timedelta(days=1)
+        label      = f"{start_ist.strftime('%b %d %H:%M')} → {end_ist.strftime('%b %d %H:%M')} IST"
+    else:
+        from_ts, to_ts, label = _ist_10am_window()
+
+    rows = await queries.get_daily_pnl_by_trigger(db, user_id, from_ts, to_ts, label)
+    return {"window": label, "rows": rows}
 
 
 @app.get("/api/analytics/real-trades")
@@ -1819,8 +1835,8 @@ async def _inr_rate_refresh_loop() -> None:
 
 
 
-async def _send_pnl_report_to_all_users(db, date_iso: str, log) -> None:
-    """Send the daily P&L report for `date_iso` to every user with Telegram configured."""
+async def _send_pnl_report_to_all_users(db, from_ts: int, to_ts: int, window_label: str, log) -> None:
+    """Send the daily P&L report for the given 10am→10am IST window to every user with Telegram configured."""
     import traceback as _tb
     from telegram_bot.alerts import send_daily_pnl_report
     from auth.encryption import safe_decrypt
@@ -1841,17 +1857,17 @@ async def _send_pnl_report_to_all_users(db, date_iso: str, log) -> None:
                 log.debug("Daily P&L: user %d has no Telegram configured — skipping", user_id)
                 continue
 
-            rows = await queries.get_daily_pnl_by_trigger(db, user_id, date_iso)
+            rows = await queries.get_daily_pnl_by_trigger(db, user_id, from_ts, to_ts, window_label)
             bot  = Bot(token=tg_token)
 
             # Retry once on Telegram error (transient network issues)
             for attempt in (1, 2):
                 try:
-                    await send_daily_pnl_report(bot, tg_chat_id, rows, date_iso)
+                    await send_daily_pnl_report(bot, tg_chat_id, rows, window_label)
                     log.info(
                         "Daily P&L report sent to user %d for %s  "
                         "(%d trigger rows, net P&L %.4f USDT)",
-                        user_id, date_iso,
+                        user_id, window_label,
                         sum(1 for r in rows if r["trigger_id"] is not None),
                         (rows[-1]["net_pnl_usdt"] if rows else 0.0),
                     )
@@ -1897,25 +1913,22 @@ async def _daily_pnl_scheduler() -> None:
     REPORT_MINUTE_UTC = 30
 
     # ── Startup catch-up ──────────────────────────────────────────────────────
-    # If today's 04:30 UTC has already passed, send now for today and mark as done.
-    now_utc   = _dt.datetime.utcnow()
+    # If today's 04:30 UTC has already passed, send now for the just-completed window.
+    now_utc      = _dt.datetime.utcnow()
     today_target = now_utc.replace(
         hour=REPORT_HOUR_UTC, minute=REPORT_MINUTE_UTC, second=0, microsecond=0
     )
-    last_sent_date: str = ""   # tracks which IST date was last reported
+    last_sent_label: str = ""   # tracks which window was last reported
 
     if now_utc > today_target:
-        ist_now  = now_utc + _dt.timedelta(seconds=19800)
-        date_iso = ist_now.strftime("%Y-%m-%d")
-        db       = getattr(app.state, "db", None)
+        from database.queries import _ist_10am_window
+        from_ts, to_ts, window_label = _ist_10am_window(now_utc)
+        db = getattr(app.state, "db", None)
         if db is not None:
-            log.info(
-                "Daily P&L: service started after 04:30 UTC — sending catch-up report for %s",
-                date_iso,
-            )
+            log.info("Daily P&L: service started after 04:30 UTC — sending catch-up report for %s", window_label)
             try:
-                await _send_pnl_report_to_all_users(db, date_iso, log)
-                last_sent_date = date_iso
+                await _send_pnl_report_to_all_users(db, from_ts, to_ts, window_label, log)
+                last_sent_label = window_label
             except Exception as exc:
                 import traceback as _tb
                 log.error("Daily P&L catch-up failed: %s\n%s", exc, _tb.format_exc())
@@ -1940,17 +1953,17 @@ async def _daily_pnl_scheduler() -> None:
             log.warning("Daily P&L: DB not available at report time — skipping")
             continue
 
-        ist_now  = _dt.datetime.utcnow() + _dt.timedelta(seconds=19800)
-        date_iso = ist_now.strftime("%Y-%m-%d")
+        from database.queries import _ist_10am_window
+        from_ts, to_ts, window_label = _ist_10am_window(_dt.datetime.utcnow())
 
         # Guard against double-send on very fast restarts
-        if date_iso == last_sent_date:
-            log.info("Daily P&L: report for %s already sent — skipping duplicate", date_iso)
+        if window_label == last_sent_label:
+            log.info("Daily P&L: report for %s already sent — skipping duplicate", window_label)
             continue
 
         try:
-            await _send_pnl_report_to_all_users(db, date_iso, log)
-            last_sent_date = date_iso
+            await _send_pnl_report_to_all_users(db, from_ts, to_ts, window_label, log)
+            last_sent_label = window_label
         except Exception as exc:
             import traceback as _tb
             log.error("Daily P&L scheduler error: %s\n%s", exc, _tb.format_exc())

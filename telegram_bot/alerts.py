@@ -202,53 +202,64 @@ async def send_daily_pnl_report(
     bot: Bot,
     chat_id: str,
     rows: list[dict],
-    date_iso: str,
+    window_label: str,
 ) -> None:
     """
-    Send a daily P&L summary grouped by trigger.
+    Send a daily P&L summary grouped by trigger for a 10am→10am IST window.
     `rows` is the output of get_daily_pnl_by_trigger() — last row is the grand total (trigger_id=None).
     Raises on Telegram error so the caller can log it properly.
     """
     if not rows:
-        text = f"📊 *Daily P&L Report — {date_iso}*\n\nNo trades executed today."
+        text = f"📊 *Daily P&L Report*\n_{window_label}_\n\nNo trades executed in this window."
         await bot.send_message(chat_id=chat_id, text=text, parse_mode=ParseMode.MARKDOWN)
         return
 
-    lines = [f"📊 *Daily P&L Report — {date_iso}*\n"]
+    lines = [f"📊 *Daily P&L Report*\n_{window_label}_\n"]
 
-    data_rows  = [r for r in rows if r["trigger_id"] is not None]
-    total_row  = next((r for r in rows if r["trigger_id"] is None), None)
+    data_rows = [r for r in rows if r["trigger_id"] is not None]
+    total_row = next((r for r in rows if r["trigger_id"] is None), None)
 
     for r in data_rows:
-        pnl      = r["net_pnl_usdt"] or 0.0
-        pnl_icon = "🟢" if pnl >= 0 else "🔴"
-        avg_pct  = r.get("avg_pnl_pct")
-        fee      = r.get("fee_usdt", 0.0) or 0.0
-        avg_str  = f" | avg {avg_pct:+.2f}%" if avg_pct is not None else ""
+        true_pnl  = r.get("true_pnl_usdt") or 0.0
+        avg_pct   = r.get("avg_pnl_pct")
+        fee       = r.get("fee_usdt", 0.0) or 0.0
+        cash_flow = r.get("net_pnl_usdt") or 0.0
+
+        # Primary: realised P&L from completed sell trades
+        if avg_pct is not None:
+            pnl_icon = "🟢" if avg_pct >= 0 else "🔴"
+            pnl_line = f"  Realised: {pnl_icon} *{avg_pct:+.2f}%* (≈${true_pnl:+.4f})"
+        else:
+            pnl_line = "  Realised: — (no completed sells yet)"
+
+        # Cash flow note — only shown when buys and sells are unequal (open positions)
+        cash_note = ""
+        if r["buy_count"] != r["sell_count"]:
+            cf_icon   = "🟢" if cash_flow >= 0 else "🔴"
+            cash_note = f"\n  Cash flow: {cf_icon} ${cash_flow:+.4f} ({r['buy_count']}B/{r['sell_count']}S)"
+
         lines.append(
             f"*#{r['trigger_id']}* `{r['symbol']}` `{r['interval']}`\n"
-            f"  Buys: {r['buy_count']} (${r['buy_usdt']:.4f})  "
-            f"Sells: {r['sell_count']} (${r['sell_usdt']:.4f})\n"
-            f"  Fees: -${fee:.4f}{avg_str}\n"
-            f"  Net P&L: {pnl_icon} *{pnl:+.4f} USDT*"
+            f"  {r['buy_count']} buys · {r['sell_count']} sells  Fees: -${fee:.4f}\n"
+            f"{pnl_line}{cash_note}"
         )
 
     if total_row:
-        total_pnl  = total_row["net_pnl_usdt"] or 0.0
-        total_icon = "🟢" if total_pnl >= 0 else "🔴"
+        total_true = total_row.get("true_pnl_usdt") or 0.0
+        total_cf   = total_row.get("net_pnl_usdt")  or 0.0
         total_fee  = total_row.get("fee_usdt", 0.0) or 0.0
+        true_icon  = "🟢" if total_true >= 0 else "🔴"
+        cf_icon    = "🟢" if total_cf   >= 0 else "🔴"
         lines.append(
             f"{'─' * 22}\n"
-            f"📋 *TOTAL*  "
-            f"Buys: {total_row['buy_count']} (${total_row['buy_usdt']:.4f})  "
-            f"Sells: {total_row['sell_count']} (${total_row['sell_usdt']:.4f})\n"
-            f"  Total Fees: -${total_fee:.4f}\n"
-            f"  Net P&L: {total_icon} *{total_pnl:+.4f} USDT*"
+            f"📋 *TOTAL*  {total_row['buy_count']} buys · {total_row['sell_count']} sells  "
+            f"Fees: -${total_fee:.4f}\n"
+            f"  Realised P&L: {true_icon} *${total_true:+.4f}*\n"
+            f"  Cash flow: {cf_icon} ${total_cf:+.4f}"
         )
 
-    lines.append("\n_P&L includes 0.1% CoinDCX fee per side_")
+    lines.append("\n_Realised = per-sell P&L · Cash flow = sells received − buys paid_")
     text = "\n".join(lines)
-    # Use plain MARKDOWN (V1) — simpler and handles most formatting without escaping
     await bot.send_message(chat_id=chat_id, text=text, parse_mode=ParseMode.MARKDOWN)
 
 

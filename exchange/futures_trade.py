@@ -262,17 +262,37 @@ async def execute_futures_trigger_trade(
             except Exception:
                 pass  # funding rate is optional
 
-            if margin_usdt < 0.50:
-                _log.info("Trigger %d (futures): margin slice too small ($%.4f)", trigger_id, margin_usdt)
+            MIN_ORDER_USDT = 10.0  # CoinDCX minimum notional
+            if margin_usdt < MIN_ORDER_USDT:
+                _log.warning(
+                    "Trigger %d (futures): margin slice $%.2f is below CoinDCX minimum $%.2f "
+                    "— increase trigger budget or leverage",
+                    trigger_id, margin_usdt, MIN_ORDER_USDT,
+                )
+                if tg_bot and tg_chat_id:
+                    from telegram_bot.alerts import send_trade_error
+                    try:
+                        await send_trade_error(
+                            tg_bot, tg_chat_id, trigger_id, symbol, "FUTURES",
+                            f"Margin slice ${margin_usdt:.2f} < minimum ${MIN_ORDER_USDT:.0f} "
+                            f"(budget=${amount:.0f}, leverage={leverage}×). "
+                            f"Increase trigger budget.",
+                        )
+                    except Exception:
+                        pass
                 return
 
             # Notional = margin × leverage; quantity = notional / price
             notional = round(margin_usdt * leverage, 4)
             qty_raw  = notional / signal.entry_price
-            # Floor to 4 significant decimal places (futures are usually less strict)
-            qty = math.floor(qty_raw * 10000) / 10000
+            # Floor to 6 decimal places (handles small BTC positions like 0.000039)
+            qty = math.floor(qty_raw * 1_000_000) / 1_000_000
             if qty <= 0:
-                _log.warning("Trigger %d (futures): quantity rounds to 0", trigger_id)
+                _log.warning(
+                    "Trigger %d (futures): quantity rounds to 0 "
+                    "(margin=$%.4f leverage=%dx notional=$%.4f price=$%.2f) — increase budget or leverage",
+                    trigger_id, margin_usdt, leverage, notional, signal.entry_price,
+                )
                 return
 
             # ── ATR-based SL/TP ───────────────────────────────────────────────

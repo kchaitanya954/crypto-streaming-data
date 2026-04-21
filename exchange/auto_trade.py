@@ -28,7 +28,8 @@ TAKE_PROFIT_PCT  = 4.0   # sell if price rises 4% above avg entry
 
 # CoinDCX taker fee (market orders). Round-trip cost = 2x this.
 # TP must exceed 2x fee to be profitable; SL is tightened by the sell-side fee.
-COINDCX_FEE_RATE = 0.001  # 0.1%
+COINDCX_FEE_RATE  = 0.001   # 0.1%
+MIN_ORDER_USDT    = 10.0   # CoinDCX minimum notional per order (~$10 for most pairs)
 
 # Market constraints cache.
 # Keys: base currency ("BTC", "ETH"); values: {"min_qty": float, "step": float}
@@ -193,6 +194,21 @@ async def execute_trigger_trade(
 
                 _log.info("Trigger %d BUY sizing: budget=$%.2f  adaptive=%.1f%%  order=$%.2f",
                           trigger_id, amount, adaptive_pct, adaptive_usdt)
+
+                if adaptive_usdt < MIN_ORDER_USDT:
+                    _log.warning(
+                        "Trigger %d: order slice $%.2f is below CoinDCX minimum $%.2f "
+                        "— increase trigger budget or confidence threshold to get a larger slice",
+                        trigger_id, adaptive_usdt, MIN_ORDER_USDT,
+                    )
+                    if tg_bot:
+                        await send_trade_error(
+                            tg_bot, tg_chat_id, trigger_id, symbol, "BUY",
+                            f"Order slice ${adaptive_usdt:.2f} < minimum ${MIN_ORDER_USDT:.0f} "
+                            f"(budget=${amount:.0f}, {adaptive_pct:.0f}% slice). "
+                            f"Increase trigger budget.",
+                        )
+                    return
 
                 balances = await exchange.get_balances()
                 usdt_row = next((b for b in balances if b.get("currency") == "USDT"), None)
