@@ -1680,21 +1680,25 @@ function loadDailyPnl() {
 
   tableEl.style.display = 'none';
   noEl.style.display    = 'none';
-  bodyEl.innerHTML      = '<tr><td colspan="9" style="color:#4C525E">Loading…</td></tr>';
+  bodyEl.innerHTML      = '<tr><td colspan="10" style="color:#4C525E">Loading…</td></tr>';
   tableEl.style.display = 'table';
 
   apiFetch(`/api/analytics/daily?date=${date}`)
-    .then(d => renderDailyPnl(d))
+    .then(r => r.json())
+    .then(data => renderDailyPnl(data))
     .catch(() => {
-      bodyEl.innerHTML = '<tr><td colspan="9" style="color:#F23645">Failed to load</td></tr>';
+      bodyEl.innerHTML = '<tr><td colspan="10" style="color:#F23645">Failed to load</td></tr>';
     });
 }
 
 function renderDailyPnl(data) {
-  const tableEl = document.getElementById('daily-pnl-table');
-  const noEl    = document.getElementById('daily-pnl-no-data');
-  const bodyEl  = document.getElementById('daily-pnl-body');
-  const rows    = (data && data.rows) || [];
+  const tableEl  = document.getElementById('daily-pnl-table');
+  const noEl     = document.getElementById('daily-pnl-no-data');
+  const bodyEl   = document.getElementById('daily-pnl-body');
+  const labelEl  = document.getElementById('daily-pnl-window-label');
+  const rows     = (data && data.rows) || [];
+
+  if (labelEl && data && data.window) labelEl.textContent = data.window;
 
   if (!rows.length) {
     tableEl.style.display = 'none';
@@ -1706,12 +1710,13 @@ function renderDailyPnl(data) {
   noEl.style.display    = 'none';
 
   bodyEl.innerHTML = rows.map((r, i) => {
-    const isTotal  = r.trigger_id === null;
-    const pnl      = r.net_pnl_usdt || 0;
-    const pnlColor = pnl >= 0 ? '#26A69A' : '#F23645';
-    const pnlSign  = pnl >= 0 ? '+' : '';
-    const fee      = r.fee_usdt || 0;
-    const avgPct   = r.avg_pnl_pct != null
+    const isTotal    = r.trigger_id === null;
+    const truePnl    = r.true_pnl_usdt || 0;
+    const cashFlow   = r.net_pnl_usdt  || 0;
+    const truePnlClr = truePnl  >= 0 ? '#26A69A' : '#F23645';
+    const cfClr      = cashFlow >= 0 ? '#26A69A' : '#F23645';
+    const fee        = r.fee_usdt || 0;
+    const avgPct     = r.avg_pnl_pct != null
       ? `<span style="color:${r.avg_pnl_pct >= 0 ? '#26A69A' : '#F23645'}">${r.avg_pnl_pct >= 0 ? '+' : ''}${r.avg_pnl_pct.toFixed(2)}%</span>`
       : '<span style="color:#4C525E">—</span>';
     const rowStyle = isTotal
@@ -1728,7 +1733,8 @@ function renderDailyPnl(data) {
       <td style="color:#787B86">$${(r.sell_usdt || 0).toFixed(4)}</td>
       <td style="color:#FF9800;font-size:10px">-$${fee.toFixed(4)}</td>
       <td>${avgPct}</td>
-      <td style="color:${pnlColor};font-weight:${isTotal ? 800 : 600}">${pnlSign}$${Math.abs(pnl).toFixed(4)}</td>
+      <td style="color:${truePnlClr};font-weight:${isTotal ? 800 : 600}" title="Realised P&L from completed sells">${truePnl >= 0 ? '+' : ''}$${Math.abs(truePnl).toFixed(4)}</td>
+      <td style="color:${cfClr};font-size:10px;opacity:0.7" title="Cash flow: sells received − buys paid">${cashFlow >= 0 ? '+' : ''}$${Math.abs(cashFlow).toFixed(4)}</td>
     </tr>`;
   }).join('');
 }
