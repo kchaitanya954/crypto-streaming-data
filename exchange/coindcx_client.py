@@ -225,6 +225,21 @@ class CoinDCXClient:
 
     # ── Futures endpoints ─────────────────────────────────────────────────────
 
+    @staticmethod
+    def _futures_pair(symbol: str) -> str:
+        """
+        Convert a spot symbol to CoinDCX futures pair format.
+        CoinDCX perpetual futures use "B-BASE_QUOTE" naming, e.g.:
+          BTCUSDT  →  B-BTC_USDT
+          ETHUSDT  →  B-ETH_USDT
+        """
+        sym = symbol.upper()
+        if sym.endswith("USDT"):
+            return f"B-{sym[:-4]}_USDT"
+        if sym.endswith("INR"):
+            return f"B-{sym[:-3]}_INR"
+        return sym  # unknown quote: pass through unchanged
+
     async def create_futures_order(
         self,
         side: str,
@@ -240,15 +255,18 @@ class CoinDCXClient:
         POST /exchange/v1/derivatives/futures/orders/create
 
         side:       "buy"  (open/add long)  | "sell" (open/add short)
-        pair:       e.g. "BTCUSDT"
-        order_type: "market_order" | "limit_order" | "stop_market" | "take_profit_market"
+        pair:       spot symbol e.g. "BTCUSDT" — auto-converted to futures format B-BTC_USDT
+        order_type: "market" | "limit"  (futures uses short form, NOT "market_order")
         quantity:   base asset amount
         leverage:   1 – 20
         """
+        # Normalise caller-supplied order_type: strip "_order" suffix if present
+        # (callers may pass "market_order" / "limit_order" as used on spot)
+        ot = order_type.replace("_order", "")
         body: dict = {
             "side":           side,
-            "pair":           pair.upper(),
-            "order_type":     order_type,
+            "pair":           self._futures_pair(pair),
+            "order_type":     ot,
             "total_quantity": quantity,
             "leverage":       leverage,
             "timestamp":      int(time.time() * 1000),
@@ -274,8 +292,8 @@ class CoinDCXClient:
         """
         body = {
             "side":           side,
-            "pair":           pair.upper(),
-            "order_type":     "market_order",
+            "pair":           self._futures_pair(pair),
+            "order_type":     "market",
             "total_quantity": quantity,
             "leverage":       leverage,
             "timestamp":      int(time.time() * 1000),
@@ -289,7 +307,7 @@ class CoinDCXClient:
         """
         body: dict = {"timestamp": int(time.time() * 1000)}
         if pair:
-            body["pair"] = pair.upper()
+            body["pair"] = self._futures_pair(pair)
         result = await self._post("/exchange/v1/derivatives/futures/positions", body)
         return result if isinstance(result, list) else result.get("positions", [])
 
@@ -307,7 +325,7 @@ class CoinDCXClient:
         try:
             result = await self._get(
                 "/exchange/v1/derivatives/futures/funding_rate",
-                params={"pair": pair.upper()},
+                params={"pair": self._futures_pair(pair)},
             )
             return float(result.get("funding_rate", 0))
         except Exception:
