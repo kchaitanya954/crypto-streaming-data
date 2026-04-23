@@ -301,10 +301,12 @@ async def execute_futures_trigger_trade(
                 new_side, signal.entry_price, leverage, atr_pct
             )
 
+            from exchange.coindcx_client import CoinDCXClient as _C
+            futures_pair = _C._futures_pair(symbol)
             _log.info(
-                "Trigger %d FUTURES %s %s: qty=%.5f leverage=%dx margin=$%.2f "
+                "Trigger %d FUTURES %s %s (pair=%s): qty=%.6f leverage=%dx margin=$%.2f "
                 "ATR=%.2f%% SL=%.4f TP=%.4f LIQ=%.4f",
-                trigger_id, new_side.upper(), symbol,
+                trigger_id, new_side.upper(), symbol, futures_pair,
                 qty, leverage, margin_usdt,
                 atr_pct, sl_price, tp_price, liq_price,
             )
