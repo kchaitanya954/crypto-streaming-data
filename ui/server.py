@@ -1372,6 +1372,55 @@ async def api_daily_pnl(
     return {"window": label, "rows": rows}
 
 
+@app.post("/api/analytics/daily/send-report")
+async def api_send_daily_pnl_report(
+    request: Request,
+    date:    str  = Query(default=""),
+    user:    dict = Depends(_current_user),
+):
+    """
+    Manually send the daily P&L Telegram report for the selected window to the
+    current user. Uses the same 10am→10am IST window logic as the GET endpoint.
+    """
+    import datetime as _dt
+    import traceback as _tb
+    from database.queries import _ist_10am_window
+    from telegram_bot.alerts import send_daily_pnl_report
+    from auth.encryption import safe_decrypt
+    from telegram import Bot
+
+    db      = request.app.state.db
+    user_id = int(user["sub"])
+
+    if date:
+        IST_OFFSET = 19800
+        end_ist    = _dt.datetime.strptime(date, "%Y-%m-%d").replace(hour=10, minute=0, second=0)
+        to_ts      = int((end_ist - _dt.timedelta(seconds=IST_OFFSET) - _dt.datetime(1970, 1, 1)).total_seconds())
+        from_ts    = to_ts - 86400
+        start_ist  = end_ist - _dt.timedelta(days=1)
+        label      = f"{start_ist.strftime('%b %d %H:%M')} → {end_ist.strftime('%b %d %H:%M')} IST"
+    else:
+        from_ts, to_ts, label = _ist_10am_window()
+
+    settings   = await queries.get_user_settings(db, user_id)
+    tg_token   = safe_decrypt((settings or {}).get("telegram_token"))
+    tg_chat_id = safe_decrypt((settings or {}).get("telegram_chat_id"))
+    if not tg_token or not tg_chat_id:
+        return JSONResponse(
+            {"error": "Telegram not configured — add your bot token and chat ID in Account Settings."},
+            status_code=400,
+        )
+
+    rows = await queries.get_daily_pnl_by_trigger(db, user_id, from_ts, to_ts, label)
+    try:
+        bot = Bot(token=tg_token)
+        await send_daily_pnl_report(bot, tg_chat_id, rows, label)
+        return {"ok": True, "window": label, "triggers": sum(1 for r in rows if r["trigger_id"] is not None)}
+    except Exception as exc:
+        _log.error("Manual P&L report send failed for user %d: %s\n%s", user_id, exc, _tb.format_exc())
+        return JSONResponse({"error": f"Telegram send failed: {exc}"}, status_code=500)
+
+
 @app.get("/api/analytics/real-trades")
 async def api_real_trades_analytics(
     request: Request,

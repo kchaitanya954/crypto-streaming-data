@@ -1671,6 +1671,35 @@ function renderAdaptiveState(eng) {
 
 document.getElementById('daily-pnl-refresh').addEventListener('click', loadDailyPnl);
 
+document.getElementById('daily-pnl-send-tg').addEventListener('click', async () => {
+  const btn    = document.getElementById('daily-pnl-send-tg');
+  const date   = document.getElementById('daily-pnl-date')?.value || '';
+  const orig   = btn.textContent;
+  btn.textContent = 'Sending…';
+  btn.disabled    = true;
+  try {
+    const r    = await apiFetch(`/api/analytics/daily/send-report?date=${date}`, { method: 'POST' });
+    const data = await r.json();
+    if (data.error) {
+      alert('Failed: ' + data.error);
+    } else {
+      btn.textContent = '✓ Sent!';
+      btn.style.background = '#26A69A';
+      btn.style.borderColor = '#26A69A';
+      setTimeout(() => {
+        btn.textContent = orig;
+        btn.style.background = '';
+        btn.style.borderColor = '';
+      }, 3000);
+    }
+  } catch (e) {
+    alert('Request failed: ' + e);
+  } finally {
+    btn.disabled = false;
+    if (btn.textContent === 'Sending…') btn.textContent = orig;
+  }
+});
+
 function loadDailyPnl() {
   const dateEl  = document.getElementById('daily-pnl-date');
   const date    = (dateEl && dateEl.value) ? dateEl.value : '';
