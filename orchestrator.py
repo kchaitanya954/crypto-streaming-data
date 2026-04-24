@@ -29,6 +29,7 @@ logging.basicConfig(
     format="%(asctime)s  %(levelname)-7s  %(name)s  %(message)s",
 )
 logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("coindcx_client").setLevel(logging.ERROR)  # always show request/response on API failure
 log = logging.getLogger("orchestrator")
 
 

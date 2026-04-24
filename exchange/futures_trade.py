@@ -183,6 +183,28 @@ async def execute_futures_trigger_trade(
         async with aiohttp.ClientSession() as session:
             exchange = CoinDCXClient(api_key=key, api_secret=secret, session=session)
 
+            # ── Verify futures API access ─────────────────────────────────────
+            try:
+                await exchange.get_futures_positions()
+                _log.info("Trigger %d: futures API reachable", trigger_id)
+            except Exception as _fp_exc:
+                _log.error(
+                    "Trigger %d: futures API pre-flight FAILED — account may not have "
+                    "futures enabled or API key lacks futures permission: %s",
+                    trigger_id, _fp_exc,
+                )
+                if tg_bot and tg_chat_id:
+                    from telegram_bot.alerts import send_trade_error
+                    try:
+                        await send_trade_error(
+                            tg_bot, tg_chat_id, trigger_id, symbol, "FUTURES",
+                            f"Futures API access failed: {_fp_exc}. "
+                            "Enable futures on CoinDCX and check API key permissions.",
+                        )
+                    except Exception:
+                        pass
+                return
+
             # ── Check existing open position for this trigger ─────────────────
             existing = await queries.get_open_futures_position(db, trigger_id)
 
