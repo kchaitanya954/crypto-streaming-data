@@ -54,20 +54,25 @@ class CoinDCXClient:
 
     async def _post(self, path: str, body: dict, spot: bool = False) -> dict:
         """POST to an authenticated endpoint, return parsed JSON."""
+        import logging as _log_mod
+        _cl = _log_mod.getLogger("coindcx_client")
         body_str, headers = self._sign(body)
         base = SPOT_BASE_URL if spot else BASE_URL
+        _cl.debug("POST %s%s  body=%s", base, path, body_str)
         async with self._session.post(
             base + path,
             data=body_str,
             headers=headers,
         ) as resp:
             if not resp.ok:
-                # Capture the response body so the actual CoinDCX error message
-                # appears in logs instead of just "400 Bad Request".
                 try:
                     err_body = await resp.text()
                 except Exception:
                     err_body = "<unreadable>"
+                _cl.error(
+                    "POST %s%s  status=%d  request_body=%s  response=%s",
+                    base, path, resp.status, body_str, err_body,
+                )
                 from aiohttp import ClientResponseError
                 raise ClientResponseError(
                     resp.request_info, resp.history,
