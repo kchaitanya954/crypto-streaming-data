@@ -282,7 +282,7 @@ class CoinDCXClient:
             body["stop_price"] = sl_price
         if tp_price is not None:
             body["take_profit_price"] = tp_price
-        return await self._post("/exchange/v1/derivatives/futures/orders/create", body, spot=True)
+        return await self._post("/exchange/v1/derivatives/futures/orders/create", body)
 
     async def close_futures_position(
         self,
@@ -303,7 +303,7 @@ class CoinDCXClient:
             "leverage":       leverage,
             "timestamp":      int(time.time() * 1000),
         }
-        return await self._post("/exchange/v1/derivatives/futures/orders/create", body, spot=True)
+        return await self._post("/exchange/v1/derivatives/futures/orders/create", body)
 
     async def get_futures_positions(self, pair: Optional[str] = None) -> list[dict]:
         """
@@ -313,13 +313,13 @@ class CoinDCXClient:
         body: dict = {"timestamp": int(time.time() * 1000)}
         if pair:
             body["pair"] = self._futures_pair(pair)
-        result = await self._post("/exchange/v1/derivatives/futures/positions", body, spot=True)
+        result = await self._post("/exchange/v1/derivatives/futures/positions", body)
         return result if isinstance(result, list) else result.get("positions", [])
 
     async def cancel_futures_order(self, order_id: str) -> dict:
         """POST /exchange/v1/derivatives/futures/orders/cancel"""
         body = {"id": order_id, "timestamp": int(time.time() * 1000)}
-        return await self._post("/exchange/v1/derivatives/futures/orders/cancel", body, spot=True)
+        return await self._post("/exchange/v1/derivatives/futures/orders/cancel", body)
 
     async def get_futures_funding_rate(self, pair: str) -> Optional[float]:
         """
