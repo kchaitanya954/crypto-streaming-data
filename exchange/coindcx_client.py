@@ -259,30 +259,32 @@ class CoinDCXClient:
         """
         POST /exchange/v1/derivatives/futures/orders/create
 
-        side:       "buy"  (open/add long)  | "sell" (open/add short)
-        pair:       spot symbol e.g. "BTCUSDT" — auto-converted to futures format B-BTC_USDT
-        order_type: "market" | "limit"  (futures uses short form, NOT "market_order")
+        side:       "buy"  (open long)  | "sell" (open short)
+        pair:       spot symbol e.g. "BTCUSDT" — auto-converted to B-BTC_USDT
+        order_type: "market_order" | "limit_order"
         quantity:   base asset amount
         leverage:   1 – 20
+
+        Body structure per CoinDCX docs:
+          { "timestamp": ..., "order": { "side": ..., "pair": ..., ... } }
         """
-        # Normalise caller-supplied order_type: strip "_order" suffix if present
-        # (callers may pass "market_order" / "limit_order" as used on spot)
-        ot = order_type.replace("_order", "")
-        body: dict = {
+        order: dict = {
             "side":           side,
             "pair":           self._futures_pair(pair),
-            "order_type":     ot,
+            "order_type":     order_type,
             "total_quantity": quantity,
             "leverage":       leverage,
-            "timestamp":      int(time.time() * 1000),
+            "time_in_force":  "good_till_cancel",
+            "notification":   "no_notification",
         }
         if price is not None:
-            body["price"] = price
+            order["price"] = price
         if sl_price is not None:
-            body["stop_price"] = sl_price
+            order["stop_loss_price"] = sl_price
         if tp_price is not None:
-            body["take_profit_price"] = tp_price
-        return await self._post("/exchange/v1/derivatives/futures/orders/create", body, spot=True)
+            order["take_profit_price"] = tp_price
+        body = {"timestamp": int(time.time() * 1000), "order": order}
+        return await self._post("/exchange/v1/derivatives/futures/orders/create", body)
 
     async def close_futures_position(
         self,
@@ -295,15 +297,17 @@ class CoinDCXClient:
         Close a futures position by placing the opposite-side market order.
         Long → side="sell", Short → side="buy"
         """
-        body = {
+        order = {
             "side":           side,
             "pair":           self._futures_pair(pair),
-            "order_type":     "market",
+            "order_type":     "market_order",
             "total_quantity": quantity,
             "leverage":       leverage,
-            "timestamp":      int(time.time() * 1000),
+            "time_in_force":  "good_till_cancel",
+            "notification":   "no_notification",
         }
-        return await self._post("/exchange/v1/derivatives/futures/orders/create", body, spot=True)
+        body = {"timestamp": int(time.time() * 1000), "order": order}
+        return await self._post("/exchange/v1/derivatives/futures/orders/create", body)
 
     async def get_futures_positions(self, pair: Optional[str] = None) -> list[dict]:
         """
@@ -313,13 +317,13 @@ class CoinDCXClient:
         body: dict = {"timestamp": int(time.time() * 1000)}
         if pair:
             body["pair"] = self._futures_pair(pair)
-        result = await self._post("/exchange/v1/derivatives/futures/positions", body, spot=True)
+        result = await self._post("/exchange/v1/derivatives/futures/positions", body)
         return result if isinstance(result, list) else result.get("positions", [])
 
     async def cancel_futures_order(self, order_id: str) -> dict:
         """POST /exchange/v1/derivatives/futures/orders/cancel"""
         body = {"id": order_id, "timestamp": int(time.time() * 1000)}
-        return await self._post("/exchange/v1/derivatives/futures/orders/cancel", body, spot=True)
+        return await self._post("/exchange/v1/derivatives/futures/orders/cancel", body)
 
     async def get_futures_funding_rate(self, pair: str) -> Optional[float]:
         """

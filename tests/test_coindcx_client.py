@@ -31,22 +31,22 @@ def test_futures_pair_unknown_quote_passthrough():
     assert result == "BTCBUSD"
 
 
-# ── order_type normalisation ──────────────────────────────────────────────────
+# ── order_type (futures uses "market_order" / "limit_order" as-is) ───────────
 
-def test_order_type_strips_suffix():
-    """'market_order' → 'market' for futures."""
+def test_order_type_market_order_passed_through():
+    """Futures API expects 'market_order' — no stripping."""
     raw = "market_order"
-    assert raw.replace("_order", "") == "market"
+    assert raw == "market_order"
 
 
-def test_order_type_limit_strips_suffix():
+def test_order_type_limit_order_passed_through():
     raw = "limit_order"
-    assert raw.replace("_order", "") == "limit"
+    assert raw == "limit_order"
 
 
-def test_order_type_already_short():
-    raw = "market"
-    assert raw.replace("_order", "") == "market"
+def test_futures_pair_used_in_order_body():
+    """Pair is converted to B-BASE_QUOTE before being placed in the 'order' sub-dict."""
+    assert CoinDCXClient._futures_pair("BTCUSDT") == "B-BTC_USDT"
 
 
 # ── _sign / HMAC signature ────────────────────────────────────────────────────
