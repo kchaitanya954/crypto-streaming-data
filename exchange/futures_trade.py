@@ -52,6 +52,12 @@ def _learn_futures_min_qty(base: str, message: str) -> None:
     if m:
         _FUTURES_STEP_QTY[base.upper()] = float(m.group(1))
 
+
+def _order_id_from_result(result) -> str:
+    """Extract order id from a futures API response (dict or list)."""
+    obj = result[0] if isinstance(result, list) and result else result
+    return str(obj.get("id") or obj.get("order_id") or "") if isinstance(obj, dict) else ""
+
 # Maintenance margin rate (approximate; varies by exchange/pair)
 MAINTENANCE_MARGIN = 0.005   # 0.5%
 
@@ -243,9 +249,7 @@ async def execute_futures_trigger_trade(
                         quantity=existing["quantity"],
                         leverage=leverage,
                     )
-                    close_order_id = str(
-                        close_result.get("id") or close_result.get("order_id") or ""
-                    )
+                    close_order_id = _order_id_from_result(close_result)
                     # Compute rough P&L for the closed position
                     ep    = existing["entry_price"]
                     pnl_pct = (
@@ -382,7 +386,7 @@ async def execute_futures_trigger_trade(
                 quantity=qty,
                 leverage=leverage,
             )
-            cdx_order_id = str(result.get("id") or result.get("order_id") or "")
+            cdx_order_id = _order_id_from_result(result)
 
             # ── Record in DB ──────────────────────────────────────────────────
             pos_id = await queries.insert_futures_position(
