@@ -7,6 +7,9 @@ import pytest
 from exchange.futures_trade import (
     compute_liquidation_price,
     compute_futures_sl_tp,
+    _order_id_from_result,
+    _FUTURES_STEP_QTY,
+    _learn_futures_min_qty,
     MAINTENANCE_MARGIN,
     MAX_SL_MARGIN_LOSS,
     MIN_SL_PCT,
@@ -117,21 +120,58 @@ def test_tp_min_margin_gain():
     assert tp_pct >= MIN_TP_MARGIN_GAIN / lev - 1e-9
 
 
-# ── quantity precision ────────────────────────────────────────────────────────
+# ── quantity step flooring ────────────────────────────────────────────────────
 
-def test_qty_6dp_precision():
-    """Verify that 6-decimal floor works for small BTC positions."""
-    margin_usdt, leverage, price = 12.0, 5, 78000.0
-    notional = margin_usdt * leverage
-    qty_raw  = notional / price                   # ~0.000769...
-    qty = math.floor(qty_raw * 1_000_000) / 1_000_000
-    assert qty > 0
-    assert len(str(qty).split(".")[-1]) <= 6
+def test_qty_floored_to_btc_step():
+    """BTC step=0.001: 0.001029 should floor to 0.001, not 0.001029."""
+    step = _FUTURES_STEP_QTY["BTC"]
+    qty_raw = 0.001029
+    qty = math.floor(qty_raw / step) * step
+    assert abs(qty - 0.001) < 1e-9
 
 
-def test_qty_rounds_to_zero_detected():
-    """Very small budget should floor to 0 — real code returns early."""
-    margin_usdt, leverage, price = 0.001, 1, 78000.0
-    qty_raw = (margin_usdt * leverage) / price
-    qty = math.floor(qty_raw * 1_000_000) / 1_000_000
+def test_qty_floored_below_step_is_zero():
+    """0.000859 with step=0.001 floors to 0."""
+    step = _FUTURES_STEP_QTY["BTC"]
+    qty_raw = 0.000859
+    qty = math.floor(qty_raw / step) * step
     assert qty == 0.0
+
+
+def test_qty_exact_multiple_unchanged():
+    """0.003 with step=0.001 stays 0.003."""
+    step = _FUTURES_STEP_QTY["BTC"]
+    qty_raw = 0.003
+    qty = math.floor(qty_raw / step) * step
+    assert abs(qty - 0.003) < 1e-9
+
+
+# ── _order_id_from_result ─────────────────────────────────────────────────────
+
+def test_order_id_from_dict():
+    assert _order_id_from_result({"id": "abc123"}) == "abc123"
+
+
+def test_order_id_from_list():
+    """Futures API returns a list — must unwrap first element."""
+    assert _order_id_from_result([{"id": "xyz789"}]) == "xyz789"
+
+
+def test_order_id_from_empty_list():
+    assert _order_id_from_result([]) == ""
+
+
+def test_order_id_prefers_id_over_order_id():
+    assert _order_id_from_result([{"id": "a", "order_id": "b"}]) == "a"
+
+
+# ── _learn_futures_min_qty ────────────────────────────────────────────────────
+
+def test_learn_from_divisible_by_error():
+    _learn_futures_min_qty("SOL", "Quantity should be divisible by 0.1")
+    assert _FUTURES_STEP_QTY["SOL"] == pytest.approx(0.1)
+
+
+def test_learn_from_greater_than_error():
+    _learn_futures_min_qty("DOGE", "Quantity should be greater than 10")
+    assert _FUTURES_STEP_QTY["DOGE"] == pytest.approx(10.0)
