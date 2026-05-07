@@ -36,6 +36,21 @@ MIN_SL_PCT        = 0.003    # never tighter than 0.3% price move
 LIQ_BUFFER_RATIO  = 0.70     # SL must stay within 70% of liq distance from entry
 FUNDING_SKEW_PCT  = 0.001    # 0.1% funding rate → apply sizing skew
 
+# CoinDCX futures minimum order quantities (base asset)
+# Populated from exchange rejections via _learn_futures_min_qty
+_FUTURES_MIN_QTY: dict[str, float] = {
+    "BTC": 0.001,
+    "ETH": 0.001,
+}
+
+
+def _learn_futures_min_qty(base: str, message: str) -> None:
+    """Parse '…greater than X' errors and cache the min qty for future orders."""
+    import re
+    m = re.search(r"greater than ([0-9.]+)", message, re.IGNORECASE)
+    if m:
+        _FUTURES_MIN_QTY[base.upper()] = float(m.group(1))
+
 # Maintenance margin rate (approximate; varies by exchange/pair)
 MAINTENANCE_MARGIN = 0.005   # 0.5%
 
@@ -317,6 +332,27 @@ async def execute_futures_trigger_trade(
                 )
                 return
 
+            base = symbol.upper().replace("USDT", "").replace("INR", "")
+            min_qty = _FUTURES_MIN_QTY.get(base, 0.001)
+            if qty < min_qty:
+                needed_budget = math.ceil(min_qty * signal.entry_price / leverage * 1.05)
+                _log.warning(
+                    "Trigger %d (futures): qty %.6f %s below exchange min %.3f — "
+                    "need at least $%d budget (currently $%.0f)",
+                    trigger_id, qty, base, min_qty, needed_budget, amount,
+                )
+                if tg_bot:
+                    from telegram_bot.alerts import send_trade_error
+                    try:
+                        await send_trade_error(
+                            tg_bot, tg_chat_id, trigger_id, symbol, "FUTURES",
+                            f"Qty {qty:.6f} {base} < exchange min {min_qty:.3f}. "
+                            f"Need ≥${needed_budget} budget (now ${amount:.0f}).",
+                        )
+                    except Exception:
+                        pass
+                return
+
             # ── ATR-based SL/TP ───────────────────────────────────────────────
             atr_pct = await _get_atr_pct(db, symbol, interval, signal.entry_price)
             sl_price, tp_price, liq_price = compute_futures_sl_tp(
@@ -388,7 +424,10 @@ async def execute_futures_trigger_trade(
 
     except Exception as exc:
         import traceback
+        err_msg = str(exc)
         _log.error(
             "Futures trade failed for trigger %d: %s\n%s",
             trigger_id, exc, traceback.format_exc(),
         )
+        base = symbol.upper().replace("USDT", "").replace("INR", "")
+        _learn_futures_min_qty(base, err_msg)

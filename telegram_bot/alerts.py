@@ -227,7 +227,7 @@ async def send_daily_pnl_report(
 
         # Primary: realised P&L from completed sell trades
         if avg_pct is not None:
-            pnl_icon = "🟢" if avg_pct >= 0 else "🔴"
+            pnl_icon = "🟢" if true_pnl >= 0 else "🔴"
             pnl_line = f"  Realised: {pnl_icon} *{avg_pct:+.2f}%* (≈${true_pnl:+.4f})"
         else:
             pnl_line = "  Realised: — (no completed sells yet)"
