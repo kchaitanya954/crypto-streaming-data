@@ -36,20 +36,21 @@ MIN_SL_PCT        = 0.003    # never tighter than 0.3% price move
 LIQ_BUFFER_RATIO  = 0.70     # SL must stay within 70% of liq distance from entry
 FUNDING_SKEW_PCT  = 0.001    # 0.1% funding rate → apply sizing skew
 
-# CoinDCX futures minimum order quantities (base asset)
-# Populated from exchange rejections via _learn_futures_min_qty
-_FUTURES_MIN_QTY: dict[str, float] = {
+# CoinDCX futures minimum order quantities and step sizes (base asset).
+# Step size IS the minimum for BTC/ETH futures (must be a whole multiple of step).
+# Populated from exchange rejections via _learn_futures_min_qty.
+_FUTURES_STEP_QTY: dict[str, float] = {
     "BTC": 0.001,
     "ETH": 0.001,
 }
 
 
 def _learn_futures_min_qty(base: str, message: str) -> None:
-    """Parse '…greater than X' errors and cache the min qty for future orders."""
+    """Parse 'greater than X' or 'divisible by X' errors and update step size."""
     import re
-    m = re.search(r"greater than ([0-9.]+)", message, re.IGNORECASE)
+    m = re.search(r"(?:greater than|divisible by)\s+([0-9.]+)", message, re.IGNORECASE)
     if m:
-        _FUTURES_MIN_QTY[base.upper()] = float(m.group(1))
+        _FUTURES_STEP_QTY[base.upper()] = float(m.group(1))
 
 # Maintenance margin rate (approximate; varies by exchange/pair)
 MAINTENANCE_MARGIN = 0.005   # 0.5%
@@ -322,8 +323,12 @@ async def execute_futures_trigger_trade(
             # Notional = margin × leverage; quantity = notional / price
             notional = round(margin_usdt * leverage, 4)
             qty_raw  = notional / signal.entry_price
-            # Floor to 6 decimal places (handles small BTC positions like 0.000039)
-            qty = math.floor(qty_raw * 1_000_000) / 1_000_000
+
+            # Floor to exchange step size (BTC/ETH futures step = 0.001, not 0.000001)
+            base = symbol.upper().replace("USDT", "").replace("INR", "")
+            step = _FUTURES_STEP_QTY.get(base, 0.001)
+            qty  = math.floor(qty_raw / step) * step
+
             if qty <= 0:
                 _log.warning(
                     "Trigger %d (futures): quantity rounds to 0 "
@@ -332,22 +337,21 @@ async def execute_futures_trigger_trade(
                 )
                 return
 
-            base = symbol.upper().replace("USDT", "").replace("INR", "")
-            min_qty = _FUTURES_MIN_QTY.get(base, 0.001)
-            if qty < min_qty:
-                needed_budget = math.ceil(min_qty * signal.entry_price / leverage * 1.05)
+            if qty < step:
+                needed_slice = math.ceil(step * signal.entry_price / leverage * 1.05)
                 _log.warning(
-                    "Trigger %d (futures): qty %.6f %s below exchange min %.3f — "
-                    "need at least $%d budget (currently $%.0f)",
-                    trigger_id, qty, base, min_qty, needed_budget, amount,
+                    "Trigger %d (futures): qty %.4f %s below step %.4f — "
+                    "need ≥$%d trade slice (adaptive slice=$%.0f from budget=$%.0f)",
+                    trigger_id, qty, base, step, needed_slice, margin_usdt, amount,
                 )
                 if tg_bot:
                     from telegram_bot.alerts import send_trade_error
                     try:
                         await send_trade_error(
                             tg_bot, tg_chat_id, trigger_id, symbol, "FUTURES",
-                            f"Qty {qty:.6f} {base} < exchange min {min_qty:.3f}. "
-                            f"Need ≥${needed_budget} budget (now ${amount:.0f}).",
+                            f"Trade slice ${margin_usdt:.0f} too small for {base} futures "
+                            f"(min qty {step} needs ≥${needed_slice} margin). "
+                            f"Increase trigger budget or leverage.",
                         )
                     except Exception:
                         pass
