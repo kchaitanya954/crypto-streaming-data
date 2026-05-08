@@ -8,7 +8,9 @@ from indicators.indicators import (
     stochastic,
     obv,
     adx,
+    atr,
     bollinger_bands,
+    supertrend,
     MACDResult,
     StochasticResult,
     ADXResult,
@@ -16,6 +18,7 @@ from indicators.indicators import (
 )
 
 __all__ = [
-    "sma", "ema", "macd", "rsi", "stochastic", "obv", "adx", "bollinger_bands",
+    "sma", "ema", "macd", "rsi", "stochastic", "obv", "adx", "atr",
+    "bollinger_bands", "supertrend",
     "MACDResult", "StochasticResult", "ADXResult", "BollingerResult",
 ]

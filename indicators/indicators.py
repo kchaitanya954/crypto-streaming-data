@@ -422,3 +422,62 @@ def atr(
         out[i + 1] = atr_val
 
     return out
+
+
+def supertrend(
+    highs: Sequence[float],
+    lows: Sequence[float],
+    closes: Sequence[float],
+    period: int = 10,
+    multiplier: float = 3.0,
+) -> List[Optional[int]]:
+    """
+    Supertrend indicator — ATR-based trend-following.
+
+    Returns 1 (bullish) when price rides the lower band (support),
+    -1 (bearish) when price rides the upper band (resistance).
+    None for warm-up bars where ATR is not yet defined.
+
+    Args:
+        highs, lows, closes: OHLC price sequences (oldest first).
+        period:     ATR lookback period (default 10).
+        multiplier: ATR band multiplier (default 3.0).
+    """
+    atr_vals = atr(highs, lows, closes, period)
+    n = len(closes)
+    out:   List[Optional[int]]   = [None] * n
+    upper: List[Optional[float]] = [None] * n
+    lower: List[Optional[float]] = [None] * n
+
+    for i in range(period, n):
+        if atr_vals[i] is None:
+            continue
+        mid = (highs[i] + lows[i]) / 2.0
+        basic_upper = mid + multiplier * atr_vals[i]
+        basic_lower = mid - multiplier * atr_vals[i]
+
+        if upper[i - 1] is None:
+            upper[i] = basic_upper
+            lower[i] = basic_lower
+            out[i] = 1 if closes[i] > basic_lower else -1
+            continue
+
+        # Bands ratchet inward: upper only falls, lower only rises
+        upper[i] = (
+            min(basic_upper, upper[i - 1])
+            if closes[i - 1] <= upper[i - 1]
+            else basic_upper
+        )
+        lower[i] = (
+            max(basic_lower, lower[i - 1])
+            if closes[i - 1] >= lower[i - 1]
+            else basic_lower
+        )
+
+        prev = out[i - 1]
+        if prev == -1:
+            out[i] = 1 if closes[i] > upper[i] else -1
+        else:
+            out[i] = -1 if closes[i] < lower[i] else 1
+
+    return out

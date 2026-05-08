@@ -13,6 +13,7 @@ from exchange.futures_trade import (
     MAINTENANCE_MARGIN,
     MAX_SL_MARGIN_LOSS,
     MIN_SL_PCT,
+    MIN_RR_RATIO,
     LIQ_BUFFER_RATIO,
     MIN_TP_MARGIN_GAIN,
 )
@@ -103,13 +104,13 @@ def test_sl_margin_loss_cap():
 
 
 def test_tp_min_risk_reward():
-    """TP distance ≥ 2.5× SL distance (minimum RR)."""
+    """TP distance ≥ MIN_RR_RATIO × SL distance."""
     entry = 50000.0
     for lev in (1, 5, 10, 20):
         sl, tp, _ = compute_futures_sl_tp("long", entry, lev, atr_pct=0.8)
         sl_dist = entry - sl
         tp_dist = tp - entry
-        assert tp_dist >= sl_dist * 2.5 - 1e-4, f"leverage={lev}"
+        assert tp_dist >= sl_dist * MIN_RR_RATIO - 1e-4, f"leverage={lev}"
 
 
 def test_tp_min_margin_gain():
