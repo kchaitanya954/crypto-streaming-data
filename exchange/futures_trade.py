@@ -148,11 +148,11 @@ def compute_futures_sl_tp(
     liq_price = compute_liquidation_price(side, entry_price, leverage)
 
     if side == "long":
-        sl_price = round(entry_price * (1.0 - sl_pct), 8)
-        tp_price = round(entry_price * (1.0 + tp_pct), 8)
+        sl_price = round(entry_price * (1.0 - sl_pct), 2)
+        tp_price = round(entry_price * (1.0 + tp_pct), 2)
     else:  # short
-        sl_price = round(entry_price * (1.0 + sl_pct), 8)
-        tp_price = round(entry_price * (1.0 - tp_pct), 8)
+        sl_price = round(entry_price * (1.0 + sl_pct), 2)
+        tp_price = round(entry_price * (1.0 - tp_pct), 2)
 
     return sl_price, tp_price, liq_price
 

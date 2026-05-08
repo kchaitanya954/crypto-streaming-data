@@ -74,10 +74,12 @@ def _learn_min_qty_from_error(base: str, error_msg: str) -> None:
 
 
 def _apply_constraints(raw: float, constraints: dict) -> float:
-    """Floor quantity to the market's step size."""
-    step   = constraints["step"]
-    factor = 1.0 / step
-    return math.floor(raw * factor) / factor
+    """Floor quantity to the market's step size, eliminating float artifacts."""
+    step = constraints["step"]
+    # Compute decimal places from step to round away float arithmetic noise
+    import math as _math
+    dp = max(0, -int(_math.floor(_math.log10(step)))) if step < 1 else 0
+    return round(_math.floor(raw / step) * step, dp)
 
 
 async def _get_user_telegram(user_settings: dict):
