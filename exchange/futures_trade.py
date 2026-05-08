@@ -26,12 +26,51 @@ Funding rate filter (soft):
 import asyncio
 import logging
 import math
+import time
 
 _log = logging.getLogger("futures_trade")
 
+FUTURES_MIN_INTERVAL_MINUTES = 5  # only trade futures on 5m+ intervals
+
+
+def _interval_minutes(interval: str) -> float:
+    """Convert a Binance interval string (e.g. '5m', '1h') to minutes."""
+    unit = interval[-1]
+    try:
+        n = int(interval[:-1])
+    except ValueError:
+        n = 1
+    return n * {"s": 1 / 60, "m": 1, "h": 60, "d": 1440}.get(unit, 1)
+
+
+async def _check_mtf_alignment(symbol: str, side: str) -> bool:
+    """
+    Fetch 60 1h candles and verify the 1h Supertrend aligns with the trade direction.
+    Returns True (proceed) on data/error fallback so the trade is never silently blocked.
+    """
+    try:
+        from streaming.stream import fetch_historical_klines
+        from indicators.indicators import supertrend as calc_supertrend
+
+        klines = await fetch_historical_klines(symbol, "1h", limit=60)
+        if len(klines) < 12:
+            return True
+        highs  = [k.high  for k in klines]
+        lows   = [k.low   for k in klines]
+        closes = [k.close for k in klines]
+        st = calc_supertrend(highs, lows, closes, period=10, multiplier=3.0)
+        last_st = next((v for v in reversed(st) if v is not None), None)
+        if last_st is None:
+            return True
+        return (last_st == 1) if side == "long" else (last_st == -1)
+    except Exception:
+        return True  # never block on MTF failure
+
+
 FUTURES_FEE_RATE  = 0.0005   # 0.05% per side (taker, futures)
 MAX_SL_MARGIN_LOSS = 0.15    # 15% margin loss triggers SL
-MIN_TP_MARGIN_GAIN = 0.25    # 25% margin gain triggers TP
+MIN_TP_MARGIN_GAIN = 0.06    # 6% margin gain minimum TP (÷ leverage = price distance)
+MIN_RR_RATIO      = 2.0      # minimum risk-reward ratio
 MIN_SL_PCT        = 0.003    # never tighter than 0.3% price move
 LIQ_BUFFER_RATIO  = 0.70     # SL must stay within 70% of liq distance from entry
 FUNDING_SKEW_PCT  = 0.001    # 0.1% funding rate → apply sizing skew
@@ -102,9 +141,9 @@ def compute_futures_sl_tp(
     liq_distance_pct = (1.0 - MAINTENANCE_MARGIN) / leverage
     sl_pct = min(sl_pct, liq_distance_pct * LIQ_BUFFER_RATIO)
 
-    # Step 4: TP — minimum 2.5:1 risk-reward, minimum margin gain
+    # Step 4: TP — minimum RR ratio, minimum margin gain floor
     min_tp_pct = MIN_TP_MARGIN_GAIN / leverage
-    tp_pct = max(sl_pct * 2.5, min_tp_pct)
+    tp_pct = max(sl_pct * MIN_RR_RATIO, min_tp_pct)
 
     liq_price = compute_liquidation_price(side, entry_price, leverage)
 
@@ -181,6 +220,14 @@ async def execute_futures_trigger_trade(
     leverage   = int(trigger.get("leverage") or 1)
     amount     = trigger.get("trade_amount_usdt") or 0.0
 
+    # Min interval guard — reject futures signals on scalping intervals
+    if _interval_minutes(interval) < FUTURES_MIN_INTERVAL_MINUTES:
+        _log.info(
+            "Trigger %d: interval %s too short for futures (min %dm) — skip",
+            trigger_id, interval, FUTURES_MIN_INTERVAL_MINUTES,
+        )
+        return
+
     if not user_id or not amount:
         return
 
@@ -230,6 +277,8 @@ async def execute_futures_trigger_trade(
             # ── Check existing open position for this trigger ─────────────────
             existing = await queries.get_open_futures_position(db, trigger_id)
 
+            MIN_HOLD_SECONDS = 120  # never reverse a position within 2 minutes
+
             if existing:
                 if existing["side"] == new_side:
                     _log.info(
@@ -237,10 +286,18 @@ async def execute_futures_trigger_trade(
                         trigger_id, new_side.upper(),
                     )
                     return
+                # Enforce minimum hold time before reversing
+                held_seconds = int(time.time()) - existing["created_at"]
+                if held_seconds < MIN_HOLD_SECONDS:
+                    _log.info(
+                        "Trigger %d: %s position only held %ds (min %ds) — skip reversal to avoid fee bleed",
+                        trigger_id, existing["side"].upper(), held_seconds, MIN_HOLD_SECONDS,
+                    )
+                    return
                 # Opposite side open → close it first
                 _log.info(
-                    "Trigger %d: closing existing %s before opening %s",
-                    trigger_id, existing["side"].upper(), new_side.upper(),
+                    "Trigger %d: closing existing %s (held %ds) before opening %s",
+                    trigger_id, existing["side"].upper(), held_seconds, new_side.upper(),
                 )
                 try:
                     close_result = await exchange.close_futures_position(
@@ -377,6 +434,16 @@ async def execute_futures_trigger_trade(
                 atr_pct, sl_price, tp_price, liq_price,
             )
 
+            # ── MTF alignment check (1h Supertrend) for sub-hourly intervals ──
+            if _interval_minutes(interval) < 60:
+                mtf_ok = await _check_mtf_alignment(symbol, new_side)
+                if not mtf_ok:
+                    _log.info(
+                        "Trigger %d: 1h Supertrend not aligned with %s — skip futures entry",
+                        trigger_id, new_side.upper(),
+                    )
+                    return
+
             # ── Place order ───────────────────────────────────────────────────
             cdx_side = "buy" if new_side == "long" else "sell"
             result   = await exchange.create_futures_order(
@@ -385,6 +452,8 @@ async def execute_futures_trigger_trade(
                 order_type="market_order",
                 quantity=qty,
                 leverage=leverage,
+                sl_price=sl_price,
+                tp_price=tp_price,
             )
             cdx_order_id = _order_id_from_result(result)
 

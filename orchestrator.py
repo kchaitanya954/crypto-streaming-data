@@ -146,7 +146,8 @@ async def _close_futures_position_sltp(db, fpos: dict, close_price: float, reaso
                 quantity=fpos["quantity"],
                 leverage=fpos["leverage"],
             )
-            close_order_id = str(result.get("id") or result.get("order_id") or "")
+            from exchange.futures_trade import _order_id_from_result
+            close_order_id = _order_id_from_result(result)
 
         ep = fpos["entry_price"]
         if side == "long":
@@ -233,6 +234,13 @@ async def _stream_pair(symbol: str, interval: str, db, tg_bot, exchange, setting
                     await _check_sl_tp(symbol, kline.close, db, settings)
                 except Exception as exc:
                     log.error("SL/TP check error %s: %s", symbol.upper(), exc)
+
+                # ── Futures trailing stop / breakeven (every candle) ──────────
+                try:
+                    from exchange.futures_monitor import monitor_futures_positions
+                    await monitor_futures_positions(db, symbol, kline.close)
+                except Exception as exc:
+                    log.error("Futures monitor error %s: %s", symbol.upper(), exc)
 
                 if signal is None:
                     continue

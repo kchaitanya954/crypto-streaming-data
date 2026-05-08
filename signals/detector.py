@@ -16,7 +16,7 @@ Signal flow:
 from dataclasses import dataclass, field
 from typing import Optional
 
-from indicators import macd, rsi, stochastic, obv, ema, adx, bollinger_bands
+from indicators import macd, rsi, stochastic, obv, ema, adx, bollinger_bands, supertrend
 from streaming.stream import Kline
 
 
@@ -458,6 +458,9 @@ class SignalDetector:
         obv_line   = obv(closes, volumes)
         obv_rising = obv_line[n - 1] > obv_line[n - 2]
 
+        st_line    = supertrend(highs, lows, closes)
+        st_curr    = st_line[n - 1]
+
         # Trend summary line
         ema_desc = (
             "above both" if above_ema50 and above_ema200 else
@@ -488,6 +491,7 @@ class SignalDetector:
                      f"Stoch %K crossed above %D from low zone ({stoch_k_curr:.1f}/{stoch_d_curr:.1f})"
                      if stoch_k_curr is not None and stoch_d_curr is not None else ""),
                     (obv_rising, "OBV rising"),
+                    (st_curr == 1, "Supertrend bullish"),
                 ],
             )
         else:
@@ -507,6 +511,7 @@ class SignalDetector:
                      f"Stoch %K crossed below %D from high zone ({stoch_k_curr:.1f}/{stoch_d_curr:.1f})"
                      if stoch_k_curr is not None and stoch_d_curr is not None else ""),
                     (not obv_rising, "OBV falling"),
+                    (st_curr == -1, "Supertrend bearish"),
                 ],
             )
 
@@ -558,7 +563,7 @@ def _stoch_cross_down(k_prev, d_prev, k_curr, d_curr) -> bool:
 
 
 def _confidence(count: int) -> str:
-    if count == 3:
+    if count >= 3:
         return "HIGH"
     if count == 2:
         return "MEDIUM"

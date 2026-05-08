@@ -938,6 +938,19 @@ async def close_futures_position(
     await db.commit()
 
 
+async def update_futures_sl_price(
+    db: aiosqlite.Connection,
+    position_id: int,
+    new_sl: float,
+) -> None:
+    """Update the stop-loss price of an open futures position (used by trailing stop)."""
+    await db.execute(
+        "UPDATE futures_positions SET sl_price = ? WHERE id = ? AND status = 'open'",
+        (new_sl, position_id),
+    )
+    await db.commit()
+
+
 async def get_futures_history(
     db: aiosqlite.Connection,
     user_id: int,
