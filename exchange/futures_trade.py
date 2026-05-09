@@ -85,11 +85,32 @@ _FUTURES_STEP_QTY: dict[str, float] = {
 
 
 def _learn_futures_min_qty(base: str, message: str) -> None:
-    """Parse 'greater than X' or 'divisible by X' errors and update step size."""
+    """
+    Parse exchange quantity errors and update the step size dict.
+
+    Only matches when the word 'quantity' precedes the numeric constraint so
+    that price-related errors (e.g. "TP must be greater than 79000") don't
+    accidentally overwrite the step size with a BTC-level price value.
+    """
     import re
-    m = re.search(r"(?:greater than|divisible by)\s+([0-9.]+)", message, re.IGNORECASE)
-    if m:
-        _FUTURES_STEP_QTY[base.upper()] = float(m.group(1))
+    m = re.search(
+        r"(?:quantity|total.quantity|qty)\b.*?(?:greater than|divisible by)\s+([0-9.]+)",
+        message,
+        re.IGNORECASE,
+    )
+    if not m:
+        return
+    val = float(m.group(1))
+    # Sanity cap: step sizes are always tiny fractions of 1 coin (never > 1000)
+    if val > 1000:
+        _log.warning(
+            "Ignored suspiciously large step update for %s: %.2f (message: %.80s…)",
+            base.upper(), val, message,
+        )
+        return
+    old = _FUTURES_STEP_QTY.get(base.upper())
+    _FUTURES_STEP_QTY[base.upper()] = val
+    _log.info("Learned futures step for %s: %s → %s", base.upper(), old, val)
 
 
 def _order_id_from_result(result) -> str:
@@ -388,13 +409,26 @@ async def execute_futures_trigger_trade(
             # Floor to exchange step size (BTC/ETH futures step = 0.001, not 0.000001)
             base = symbol.upper().replace("USDT", "").replace("INR", "")
             step = _FUTURES_STEP_QTY.get(base, 0.001)
-            qty  = math.floor(qty_raw / step) * step
+            # Self-heal: if a previous error corrupted the step (e.g. a price value
+            # like 79000 was accidentally parsed as a step), reset to safe default.
+            if step >= qty_raw:
+                _log.warning(
+                    "Trigger %d: step %.6f ≥ qty_raw %.8f for %s — step looks corrupted, "
+                    "resetting to 0.001",
+                    trigger_id, step, qty_raw, base,
+                )
+                step = 0.001
+                _FUTURES_STEP_QTY[base] = step
+            # Derive decimal places from step to eliminate float arithmetic noise
+            _step_dp = max(0, -int(math.floor(math.log10(step)))) if step < 1 else 0
+            qty = round(math.floor(qty_raw / step) * step, _step_dp)
 
             if qty <= 0:
                 _log.warning(
                     "Trigger %d (futures): quantity rounds to 0 "
-                    "(margin=$%.4f leverage=%dx notional=$%.4f price=$%.2f) — increase budget or leverage",
-                    trigger_id, margin_usdt, leverage, notional, signal.entry_price,
+                    "(margin=$%.4f leverage=%dx notional=$%.4f price=$%.2f step=%s) "
+                    "— increase budget or leverage",
+                    trigger_id, margin_usdt, leverage, notional, signal.entry_price, step,
                 )
                 return
 
