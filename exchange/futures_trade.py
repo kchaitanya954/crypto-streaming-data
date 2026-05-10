@@ -280,13 +280,12 @@ async def execute_futures_trigger_trade(
     leverage   = int(trigger.get("leverage") or 1)
     amount     = trigger.get("trade_amount_usdt") or 0.0
 
-    # Min interval guard — reject futures signals on scalping intervals
+    # Min interval advisory — warn but don't block (user may intentionally use short intervals)
     if _interval_minutes(interval) < FUTURES_MIN_INTERVAL_MINUTES:
-        _log.info(
-            "Trigger %d: interval %s too short for futures (min %dm) — skip",
+        _log.warning(
+            "Trigger %d: interval %s is below recommended %dm for futures — proceeding anyway",
             trigger_id, interval, FUTURES_MIN_INTERVAL_MINUTES,
         )
-        return
 
     if not user_id or not amount:
         return
@@ -508,15 +507,14 @@ async def execute_futures_trigger_trade(
                 atr_pct, sl_price, tp_price, liq_price,
             )
 
-            # ── MTF alignment check (1h Supertrend) for sub-hourly intervals ──
+            # ── MTF alignment check (1h Supertrend) — advisory, does not block ──
             if _interval_minutes(interval) < 60:
                 mtf_ok = await _check_mtf_alignment(symbol, new_side)
                 if not mtf_ok:
-                    _log.info(
-                        "Trigger %d: 1h Supertrend not aligned with %s — skip futures entry",
+                    _log.warning(
+                        "Trigger %d: 1h Supertrend not aligned with %s — proceeding (counter-trend)",
                         trigger_id, new_side.upper(),
                     )
-                    return
 
             # ── Place order ───────────────────────────────────────────────────
             cdx_side = "buy" if new_side == "long" else "sell"
