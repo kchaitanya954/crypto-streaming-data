@@ -113,6 +113,37 @@ def _learn_futures_min_qty(base: str, message: str) -> None:
     _log.info("Learned futures step for %s: %s → %s", base.upper(), old, val)
 
 
+# CoinDCX futures price tick sizes — SL/TP must be exact multiples of this value.
+# BTC futures require 0.1 tick ("Stop loss price should be divisible by 0.1").
+# Populated/updated from exchange error messages via _learn_futures_price_tick.
+_FUTURES_PRICE_TICK: dict[str, float] = {
+    "BTC": 0.1,
+    "ETH": 0.1,
+}
+
+
+def _learn_futures_price_tick(base: str, message: str) -> None:
+    """
+    Parse 'price should be divisible by X' errors and update the price tick dict.
+    Only matches price-related constraint phrases, not quantity ones.
+    """
+    import re
+    m = re.search(
+        r"(?:price|stop.loss|take.profit|sl|tp)\b.*?divisible by\s+([0-9.]+)",
+        message,
+        re.IGNORECASE,
+    )
+    if not m:
+        return
+    val = float(m.group(1))
+    if val <= 0 or val > 1000:
+        return
+    old = _FUTURES_PRICE_TICK.get(base.upper())
+    _FUTURES_PRICE_TICK[base.upper()] = val
+    if old != val:
+        _log.info("Learned futures price tick for %s: %s → %s", base.upper(), old, val)
+
+
 def _order_id_from_result(result) -> str:
     """Extract order id from a futures API response (dict or list)."""
     obj = result[0] if isinstance(result, list) and result else result
@@ -135,11 +166,18 @@ def compute_liquidation_price(side: str, entry_price: float, leverage: int) -> f
         return round(entry_price * (1.0 + factor), 8)
 
 
+def _round_to_tick(price: float, tick: float) -> float:
+    """Round a price to the nearest exchange tick size, eliminating float artifacts."""
+    dp = max(0, -int(math.floor(math.log10(tick)))) if tick < 1 else 0
+    return round(round(price / tick) * tick, dp)
+
+
 def compute_futures_sl_tp(
     side: str,
     entry_price: float,
     leverage: int,
     atr_pct: float,           # ATR as % of entry_price (e.g. 0.8 means 0.8%)
+    price_tick: float = 0.1,  # exchange price tick size (default 0.1 for BTC/ETH)
 ) -> tuple[float, float, float]:
     """
     Returns (sl_price, tp_price, liquidation_price).
@@ -149,7 +187,8 @@ def compute_futures_sl_tp(
       sl_pct = min(sl_pct, MAX_SL_MARGIN_LOSS / leverage)  — margin-loss cap
       sl_pct = min(sl_pct, LIQ_BUFFER_RATIO / leverage)    — liquidation buffer
     TP algorithm:
-      tp_pct = max(sl_pct × 2.5, MIN_TP_MARGIN_GAIN / leverage)   — min 2.5:1 RR
+      tp_pct = max(sl_pct × MIN_RR_RATIO, MIN_TP_MARGIN_GAIN / leverage)
+    Prices are rounded to price_tick (e.g. 0.1) to satisfy exchange requirements.
     """
     # Step 1: ATR-based SL distance (% of entry price)
     sl_pct_raw = max(1.5 * atr_pct / 100.0, MIN_SL_PCT)
@@ -169,11 +208,11 @@ def compute_futures_sl_tp(
     liq_price = compute_liquidation_price(side, entry_price, leverage)
 
     if side == "long":
-        sl_price = round(entry_price * (1.0 - sl_pct), 2)
-        tp_price = round(entry_price * (1.0 + tp_pct), 2)
+        sl_price = _round_to_tick(entry_price * (1.0 - sl_pct), price_tick)
+        tp_price = _round_to_tick(entry_price * (1.0 + tp_pct), price_tick)
     else:  # short
-        sl_price = round(entry_price * (1.0 + sl_pct), 2)
-        tp_price = round(entry_price * (1.0 - tp_pct), 2)
+        sl_price = _round_to_tick(entry_price * (1.0 + sl_pct), price_tick)
+        tp_price = _round_to_tick(entry_price * (1.0 - tp_pct), price_tick)
 
     return sl_price, tp_price, liq_price
 
@@ -453,9 +492,10 @@ async def execute_futures_trigger_trade(
                 return
 
             # ── ATR-based SL/TP ───────────────────────────────────────────────
-            atr_pct = await _get_atr_pct(db, symbol, interval, signal.entry_price)
+            atr_pct    = await _get_atr_pct(db, symbol, interval, signal.entry_price)
+            price_tick = _FUTURES_PRICE_TICK.get(base, 0.1)
             sl_price, tp_price, liq_price = compute_futures_sl_tp(
-                new_side, signal.entry_price, leverage, atr_pct
+                new_side, signal.entry_price, leverage, atr_pct, price_tick=price_tick
             )
 
             from exchange.coindcx_client import CoinDCXClient as _C
@@ -542,3 +582,4 @@ async def execute_futures_trigger_trade(
         )
         base = symbol.upper().replace("USDT", "").replace("INR", "")
         _learn_futures_min_qty(base, err_msg)
+        _learn_futures_price_tick(base, err_msg)
