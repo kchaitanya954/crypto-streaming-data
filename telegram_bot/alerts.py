@@ -225,6 +225,21 @@ async def send_daily_pnl_report(
         fee       = r.get("fee_usdt", 0.0) or 0.0
         cash_flow = r.get("net_pnl_usdt") or 0.0
 
+        if r.get("market") == "futures":
+            if avg_pct is not None:
+                pnl_icon = "🟢" if true_pnl >= 0 else "🔴"
+                pnl_line = (f"  Realised: {pnl_icon} *${true_pnl:+.4f}* "
+                            f"({avg_pct:+.2f}% on margin, {r['wins']}W/{r['losses']}L)")
+            else:
+                pnl_line = "  Realised: — (no positions closed yet)"
+            open_note = f"\n  Still open: {r['open_now']}" if r.get("open_now") else ""
+            lines.append(
+                f"*#{r['trigger_id']}* `{r['symbol']}` `{r['interval']}` · Futures {r.get('leverage') or 1}×\n"
+                f"  {r['buy_count']} opened · {r['sell_count']} closed  Fees: -${fee:.4f}\n"
+                f"{pnl_line}{open_note}"
+            )
+            continue
+
         # Primary: realised P&L from completed sell trades
         if avg_pct is not None:
             pnl_icon = "🟢" if true_pnl >= 0 else "🔴"
@@ -250,11 +265,15 @@ async def send_daily_pnl_report(
         total_fee  = total_row.get("fee_usdt", 0.0) or 0.0
         true_icon  = "🟢" if total_true >= 0 else "🔴"
         cf_icon    = "🟢" if total_cf   >= 0 else "🔴"
+        spot_pnl = total_row.get("spot_pnl_usdt") or 0.0
+        fut_pnl  = total_row.get("futures_pnl_usdt") or 0.0
+        has_fut  = any(r.get("market") == "futures" for r in data_rows)
+        split    = f"\n  Spot: ${spot_pnl:+.4f} · Futures: ${fut_pnl:+.4f}" if has_fut else ""
         lines.append(
             f"{'─' * 22}\n"
-            f"📋 *TOTAL*  {total_row['buy_count']} buys · {total_row['sell_count']} sells  "
+            f"📋 *TOTAL*  {total_row['buy_count']} entries · {total_row['sell_count']} exits  "
             f"Fees: -${total_fee:.4f}\n"
-            f"  Realised P&L: {true_icon} *${total_true:+.4f}*\n"
+            f"  Realised P&L: {true_icon} *${total_true:+.4f}*{split}\n"
             f"  Cash flow: {cf_icon} ${total_cf:+.4f}"
         )
 

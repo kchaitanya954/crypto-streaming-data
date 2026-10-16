@@ -320,6 +320,29 @@ class CoinDCXClient:
         result = await self._post("/exchange/v1/derivatives/futures/positions", body)
         return result if isinstance(result, list) else result.get("positions", [])
 
+    async def get_active_futures_position(self, symbol: str) -> Optional[dict]:
+        """
+        Return the exchange's live position for this pair, or None if flat.
+        active_pos is signed: > 0 long, < 0 short.
+        """
+        body = {"timestamp": int(time.time() * 1000), "page": "1", "size": "100"}
+        result = await self._post("/exchange/v1/derivatives/futures/positions", body)
+        positions = result if isinstance(result, list) else result.get("positions", [])
+        pair = self._futures_pair(symbol)
+        for p in positions:
+            if p.get("pair") == pair and abs(float(p.get("active_pos") or 0)) > 0:
+                return p
+        return None
+
+    async def exit_futures_position(self, position_id: str) -> dict:
+        """
+        POST /exchange/v1/derivatives/futures/positions/exit
+        Closes an existing position by id. Unlike an opposite-side market
+        order, this can never open a new position in the other direction.
+        """
+        body = {"timestamp": int(time.time() * 1000), "id": position_id}
+        return await self._post("/exchange/v1/derivatives/futures/positions/exit", body)
+
     async def cancel_futures_order(self, order_id: str) -> dict:
         """POST /exchange/v1/derivatives/futures/orders/cancel"""
         body = {"id": order_id, "timestamp": int(time.time() * 1000)}

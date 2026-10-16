@@ -166,6 +166,82 @@ def compute_liquidation_price(side: str, entry_price: float, leverage: int) -> f
         return round(entry_price * (1.0 + factor), 8)
 
 
+def compute_futures_pnl(
+    side: str,
+    entry_price: float,
+    close_price: float,
+    leverage: int,
+    margin_usdt: float,
+) -> tuple[float, float]:
+    """
+    Realised P&L for a closed futures position, net of round-trip taker fees.
+    Returns (pnl_pct_on_margin, pnl_usdt). Used by every close path (SL/TP,
+    reversal, manual) so the reports and the adaptive engine see the same numbers.
+    """
+    if entry_price <= 0:
+        return 0.0, 0.0
+    move = (close_price - entry_price) / entry_price
+    if side != "long":
+        move = -move
+    raw_pct = move * 100 * leverage
+    fee_pct = FUTURES_FEE_RATE * 2 * leverage * 100   # fees on notional, as % of margin
+    pnl_pct = round(raw_pct - fee_pct, 4)
+    return pnl_pct, round(margin_usdt * pnl_pct / 100, 4)
+
+
+async def safe_close_futures(exchange, fpos: dict) -> tuple[str, bool]:
+    """
+    Close a bot-tracked futures position without risking a flip.
+
+    Orders are placed with exchange-side SL/TP, so the exchange may already have
+    closed the position. Sending a blind opposite-side market order in that case
+    opens a new, unprotected position the other way. So: check the exchange
+    first; if it's already flat, report that; otherwise exit by position id.
+
+    Returns (close_order_id, already_closed_on_exchange).
+    """
+    want_long = fpos["side"] == "long"
+    try:
+        live = await exchange.get_active_futures_position(fpos["symbol"])
+    except Exception as exc:
+        # Can't verify — fall back to the legacy opposite-side close.
+        _log.warning("Position check failed (%s) — using opposite-side close for pos %s", exc, fpos["id"])
+        live = "unknown"
+
+    if live is None:
+        return "", True
+
+    qty = fpos["quantity"]
+    if isinstance(live, dict):
+        live_qty = float(live.get("active_pos") or 0)
+        if (live_qty > 0) != want_long:
+            # Exchange holds the opposite side — ours is gone; don't touch theirs.
+            return "", True
+        if abs(live_qty) > fpos["quantity"] * 1.0001:
+            # The exchange nets all triggers on this pair into one position. Ours is
+            # only part of it, so reduce by our quantity (can't overshoot into a flip).
+            res = await exchange.close_futures_position(
+                side="sell" if want_long else "buy", pair=fpos["symbol"],
+                quantity=fpos["quantity"], leverage=fpos["leverage"],
+            )
+            return _order_id_from_result(res), False
+        try:
+            res = await exchange.exit_futures_position(str(live["id"]))
+            data = res.get("data") if isinstance(res, dict) else None
+            return str((data or {}).get("group_id") or live["id"]), False
+        except Exception as exc:
+            _log.warning("positions/exit failed for pos %s (%s) — using opposite-side close", fpos["id"], exc)
+            qty = min(qty, abs(live_qty))  # never close more than is actually open
+
+    res = await exchange.close_futures_position(
+        side="sell" if want_long else "buy",
+        pair=fpos["symbol"],
+        quantity=qty,
+        leverage=fpos["leverage"],
+    )
+    return _order_id_from_result(res), False
+
+
 def _round_to_tick(price: float, tick: float) -> float:
     """Round a price to the nearest exchange tick size, eliminating float artifacts."""
     dp = max(0, -int(math.floor(math.log10(tick)))) if tick < 1 else 0
@@ -305,7 +381,6 @@ async def execute_futures_trigger_trade(
 
     # Signal → position side
     new_side = "long" if signal.direction == "BUY" else "short"
-    close_side = "sell" if new_side == "long" else "buy"  # order to close opposite
 
     try:
         async with aiohttp.ClientSession() as session:
@@ -336,6 +411,31 @@ async def execute_futures_trigger_trade(
             # ── Check existing open position for this trigger ─────────────────
             existing = await queries.get_open_futures_position(db, trigger_id)
 
+            # Reconcile with the exchange: its SL/TP can close the position on an
+            # intrabar wick that our candle-close check never sees. Without this the
+            # DB stays "open" forever, every new signal is skipped as a duplicate,
+            # and the loss never reaches the reports.
+            if existing:
+                try:
+                    live = await exchange.get_active_futures_position(symbol)
+                    if live is None or (float(live.get("active_pos") or 0) > 0) != (existing["side"] == "long"):
+                        pnl_pct, pnl_usdt = compute_futures_pnl(
+                            existing["side"], existing["entry_price"], signal.entry_price,
+                            existing["leverage"], existing["margin_usdt"],
+                        )
+                        await queries.close_futures_position(
+                            db, existing["id"], close_price=signal.entry_price,
+                            pnl_pct=pnl_pct, pnl_usdt=pnl_usdt,
+                        )
+                        _log.warning(
+                            "Trigger %d: DB position %d was already closed on the exchange "
+                            "(exchange SL/TP) — recorded est. P&L %.2f%% ($%.4f)",
+                            trigger_id, existing["id"], pnl_pct, pnl_usdt,
+                        )
+                        existing = None
+                except Exception as exc:
+                    _log.warning("Trigger %d: could not reconcile position with exchange: %s", trigger_id, exc)
+
             MIN_HOLD_SECONDS = 120  # never reverse a position within 2 minutes
 
             if existing:
@@ -359,25 +459,16 @@ async def execute_futures_trigger_trade(
                     trigger_id, existing["side"].upper(), held_seconds, new_side.upper(),
                 )
                 try:
-                    close_result = await exchange.close_futures_position(
-                        side=close_side,
-                        pair=symbol,
-                        quantity=existing["quantity"],
-                        leverage=leverage,
+                    close_order_id, _ = await safe_close_futures(exchange, existing)
+                    # P&L net of round-trip fees (same formula as SL/TP closes)
+                    pnl_pct, pnl_usdt = compute_futures_pnl(
+                        existing["side"], existing["entry_price"], signal.entry_price,
+                        existing["leverage"], existing["margin_usdt"],
                     )
-                    close_order_id = _order_id_from_result(close_result)
-                    # Compute rough P&L for the closed position
-                    ep    = existing["entry_price"]
-                    pnl_pct = (
-                        (signal.entry_price - ep) / ep * 100 * leverage
-                        if existing["side"] == "long"
-                        else (ep - signal.entry_price) / ep * 100 * leverage
-                    )
-                    pnl_usdt = round(existing["margin_usdt"] * pnl_pct / 100, 4)
                     await queries.close_futures_position(
                         db, existing["id"],
                         close_price=signal.entry_price,
-                        pnl_pct=round(pnl_pct, 4),
+                        pnl_pct=pnl_pct,
                         pnl_usdt=pnl_usdt,
                         cdx_close_order_id=close_order_id,
                     )

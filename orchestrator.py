@@ -35,6 +35,21 @@ log = logging.getLogger("orchestrator")
 
 # ── Background signal worker ───────────────────────────────────────────────────
 
+# Positions with a close already in flight. Every (symbol, interval) worker runs
+# the SL/TP check, so e.g. BTC 1m and BTC 5m workers both see the same open
+# position at a 5-minute boundary. Without this guard both send a close order,
+# and the second one opens an unintended position in the opposite direction.
+_closing_spot_triggers: set[int] = set()
+_closing_futures_positions: set[int] = set()
+
+
+async def _run_spot_close(coro, trigger_id: int) -> None:
+    try:
+        await coro
+    finally:
+        _closing_spot_triggers.discard(trigger_id)
+
+
 async def _check_sl_tp(symbol: str, current_price: float, db, settings) -> None:
     """
     After every closed candle, check all open spot and futures positions on this
@@ -58,7 +73,7 @@ async def _check_sl_tp(symbol: str, current_price: float, db, settings) -> None:
         elif tp_price and current_price >= tp_price:
             reason = "take_profit"
 
-        if not reason:
+        if not reason or trigger_id in _closing_spot_triggers:
             continue
 
         log.info(
@@ -79,10 +94,12 @@ async def _check_sl_tp(symbol: str, current_price: float, db, settings) -> None:
             adx_val=0.0, trend_note=reason,
             reasons=[reason],
         )
-        asyncio.create_task(
+        _closing_spot_triggers.add(trigger_id)
+        asyncio.create_task(_run_spot_close(
             execute_trigger_trade(db, trigger, fake_signal, symbol.upper(),
-                                  trigger["interval"], signal_id=None, reason=reason)
-        )
+                                  trigger["interval"], signal_id=None, reason=reason),
+            trigger_id,
+        ))
 
     # ── Futures SL/TP ─────────────────────────────────────────────────────────
     futures_positions = await queries.get_open_futures_positions_for_sl_tp(db, symbol)
@@ -103,9 +120,10 @@ async def _check_sl_tp(symbol: str, current_price: float, db, settings) -> None:
             elif current_price <= tp_price:
                 reason = "take_profit"
 
-        if not reason:
+        if not reason or fpos["id"] in _closing_futures_positions:
             continue
 
+        _closing_futures_positions.add(fpos["id"])
         log.info(
             "Futures SL/TP triggered: pos=%d %s %s price=%.4f reason=%s (SL=%.4f TP=%.4f)",
             fpos["id"], side.upper(), symbol.upper(), current_price, reason,
@@ -123,13 +141,12 @@ async def _close_futures_position_sltp(db, fpos: dict, close_price: float, reaso
     from database import queries
     from auth.encryption import safe_decrypt
     from exchange.coindcx_client import CoinDCXClient
-    from exchange.futures_trade import FUTURES_FEE_RATE
+    from exchange.futures_trade import compute_futures_pnl, safe_close_futures
     from telegram_bot.alerts import send_futures_close_notification
 
     trigger_id = fpos["trigger_id"]
     user_id    = fpos["user_id"]
     side       = fpos["side"]
-    close_side = "sell" if side == "long" else "buy"
 
     try:
         user_settings = await queries.get_user_settings(db, user_id)
@@ -140,24 +157,18 @@ async def _close_futures_position_sltp(db, fpos: dict, close_price: float, reaso
 
         async with aiohttp.ClientSession() as session:
             exchange = CoinDCXClient(api_key=key, api_secret=secret, session=session)
-            result   = await exchange.close_futures_position(
-                side=close_side,
-                pair=fpos["symbol"],
-                quantity=fpos["quantity"],
-                leverage=fpos["leverage"],
-            )
-            from exchange.futures_trade import _order_id_from_result
-            close_order_id = _order_id_from_result(result)
+            close_order_id, already_closed = await safe_close_futures(exchange, fpos)
+
+        if already_closed:
+            # The exchange-side SL/TP placed with the order fired first. Record the
+            # close (price is the candle close — an estimate of the actual fill).
+            reason = f"{reason} (exchange)"
+            log.info("Futures position %d already closed on exchange — recording only", fpos["id"])
 
         ep = fpos["entry_price"]
-        if side == "long":
-            raw_pnl_pct = (close_price - ep) / ep * 100 * fpos["leverage"]
-        else:
-            raw_pnl_pct = (ep - close_price) / ep * 100 * fpos["leverage"]
-        # Deduct round-trip fee on notional (expressed as % of margin)
-        fee_margin_pct = FUTURES_FEE_RATE * 2 * fpos["leverage"] * 100
-        pnl_pct  = round(raw_pnl_pct - fee_margin_pct, 4)
-        pnl_usdt = round(fpos["margin_usdt"] * pnl_pct / 100, 4)
+        pnl_pct, pnl_usdt = compute_futures_pnl(
+            side, ep, close_price, fpos["leverage"], fpos["margin_usdt"]
+        )
 
         await queries.close_futures_position(
             db, fpos["id"], close_price, pnl_pct, pnl_usdt, close_order_id
@@ -187,6 +198,8 @@ async def _close_futures_position_sltp(db, fpos: dict, close_price: float, reaso
             "Failed to close futures position %d: %s\n%s",
             fpos["id"], exc, traceback.format_exc(),
         )
+    finally:
+        _closing_futures_positions.discard(fpos["id"])
 
 
 async def _stream_pair(symbol: str, interval: str, db, tg_bot, exchange, settings) -> None:
@@ -222,6 +235,13 @@ async def _stream_pair(symbol: str, interval: str, db, tg_bot, exchange, setting
 
                 candle_count += 1
                 signal = detector.update(kline)
+
+                # Persist the candle so futures ATR-based SL/TP has fresh data
+                # even when no dashboard tab is open.
+                try:
+                    await queries.insert_candle(db, symbol, interval, kline)
+                except Exception as exc:
+                    log.warning("Candle persist failed %s %s: %s", symbol.upper(), interval, exc)
                 # Log every 30 candles so we can confirm the worker is alive and processing
                 if candle_count % 30 == 0:
                     snap = detector.current_snapshot()

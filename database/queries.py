@@ -500,6 +500,9 @@ async def get_daily_pnl_by_trigger(
         r["true_pnl_usdt"]  = round(r.get("true_pnl_usdt_raw") or 0.0, 4)
         r["avg_pnl_pct"]    = round(r["avg_pnl_pct"], 4) if r["avg_pnl_pct"] is not None else None
         r["window_label"]   = window_label
+        r["market"]         = "spot"
+
+    rows.extend(await _daily_futures_rows(db, user_id, from_ts, to_ts, window_label))
 
     if rows:
         total = {
@@ -516,11 +519,89 @@ async def get_daily_pnl_by_trigger(
             "avg_pnl_pct":   None,
             "true_pnl_usdt": round(sum(r["true_pnl_usdt"] for r in rows), 4),
             "net_pnl_usdt":  round(sum(r["net_pnl_usdt"]  for r in rows), 4),
+            "spot_pnl_usdt":    round(sum(r["true_pnl_usdt"] for r in rows if r["market"] == "spot"), 4),
+            "futures_pnl_usdt": round(sum(r["true_pnl_usdt"] for r in rows if r["market"] == "futures"), 4),
+            "market":        "all",
             "window_label":  window_label,
         }
         rows.append(total)
 
     return rows
+
+
+async def _daily_futures_rows(
+    db: aiosqlite.Connection,
+    user_id: int,
+    from_ts: int,
+    to_ts: int,
+    window_label: str,
+) -> list[dict]:
+    """
+    Per-trigger futures rows for the daily report, shaped like the spot rows.
+
+    Futures trades live in futures_positions, not orders, so they were missing
+    from the report entirely. A position counts as "opened" if created in the
+    window and "closed" (realised) if closed in the window. pnl_usdt stored on
+    close is already net of round-trip fees; liquidations count as -margin.
+    """
+    FUT_FEE = 0.0005  # taker fee per side
+    cursor = await db.execute(
+        """
+        SELECT
+            fp.trigger_id,
+            t.symbol,
+            t.interval,
+            MAX(fp.leverage) AS leverage,
+            SUM(CASE WHEN fp.created_at >= :f AND fp.created_at < :t THEN 1 ELSE 0 END) AS opened_count,
+            SUM(CASE WHEN fp.created_at >= :f AND fp.created_at < :t THEN fp.margin_usdt ELSE 0 END) AS margin_opened,
+            SUM(CASE WHEN fp.status != 'open' AND fp.closed_at >= :f AND fp.closed_at < :t THEN 1 ELSE 0 END) AS closed_count,
+            SUM(CASE WHEN fp.status != 'open' AND fp.closed_at >= :f AND fp.closed_at < :t
+                THEN fp.margin_usdt ELSE 0 END) AS margin_closed,
+            SUM(CASE WHEN fp.status != 'open' AND fp.closed_at >= :f AND fp.closed_at < :t
+                THEN COALESCE(fp.pnl_usdt, CASE WHEN fp.status = 'liquidated' THEN -fp.margin_usdt END, 0)
+                ELSE 0 END) AS pnl_usdt,
+            SUM(CASE WHEN fp.status != 'open' AND fp.closed_at >= :f AND fp.closed_at < :t
+                 AND COALESCE(fp.pnl_usdt, 0) > 0 THEN 1 ELSE 0 END) AS wins,
+            SUM(CASE WHEN fp.status != 'open' AND fp.closed_at >= :f AND fp.closed_at < :t
+                THEN fp.notional_usdt * 2 * :fee ELSE 0 END) AS fee_usdt,
+            SUM(CASE WHEN fp.status = 'open' THEN 1 ELSE 0 END) AS open_now
+        FROM futures_positions fp
+        JOIN triggers t ON t.id = fp.trigger_id
+        WHERE fp.user_id = :u
+          AND ((fp.created_at >= :f AND fp.created_at < :t)
+               OR (fp.closed_at >= :f AND fp.closed_at < :t))
+        GROUP BY fp.trigger_id
+        ORDER BY fp.trigger_id
+        """,
+        {"u": user_id, "f": from_ts, "t": to_ts, "fee": FUT_FEE},
+    )
+    out = []
+    for r in (dict(x) for x in await cursor.fetchall()):
+        closed   = r["closed_count"] or 0
+        pnl      = round(r["pnl_usdt"] or 0.0, 4)
+        m_closed = r["margin_closed"] or 0.0
+        out.append({
+            "market":        "futures",
+            "trigger_id":    r["trigger_id"],
+            "symbol":        r["symbol"],
+            "interval":      r["interval"],
+            "leverage":      r["leverage"],
+            "buy_count":     r["opened_count"] or 0,      # positions opened
+            "sell_count":    closed,                      # positions closed
+            "buy_usdt":      round(r["margin_opened"] or 0.0, 4),
+            "sell_usdt":     round(m_closed + pnl, 4),    # margin returned
+            "buy_cost_eff":  round(r["margin_opened"] or 0.0, 4),
+            "sell_net_eff":  round(m_closed + pnl, 4),
+            "fee_usdt":      round(r["fee_usdt"] or 0.0, 4),
+            "avg_pnl_pct":   round(pnl / m_closed * 100, 4) if m_closed else None,
+            "true_pnl_usdt": pnl,
+            "net_pnl_usdt":  pnl,
+            "wins":          r["wins"] or 0,
+            "losses":        closed - (r["wins"] or 0),
+            "open_now":      r["open_now"] or 0,
+            "window_label":  window_label,
+        })
+    return out
 
 
 async def load_adaptive_state(db: aiosqlite.Connection) -> Optional[dict]:
@@ -968,6 +1049,16 @@ async def get_futures_history(
         (user_id, limit),
     )
     return [dict(r) for r in await cursor.fetchall()]
+
+
+async def get_latest_close(db: aiosqlite.Connection, symbol: str) -> Optional[float]:
+    """Most recent persisted candle close for a symbol (any interval), or None."""
+    cursor = await db.execute(
+        "SELECT close FROM candles WHERE symbol = ? ORDER BY open_time DESC LIMIT 1",
+        (symbol.upper(),),
+    )
+    row = await cursor.fetchone()
+    return float(row["close"]) if row else None
 
 
 async def get_candles_for_atr(

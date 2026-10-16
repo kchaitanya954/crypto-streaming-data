@@ -176,3 +176,90 @@ def test_learn_from_divisible_by_error():
 def test_learn_from_greater_than_error():
     _learn_futures_min_qty("DOGE", "Quantity should be greater than 10")
     assert _FUTURES_STEP_QTY["DOGE"] == pytest.approx(10.0)
+
+
+# ── compute_futures_pnl ───────────────────────────────────────────────────────
+
+from exchange.futures_trade import compute_futures_pnl, safe_close_futures, FUTURES_FEE_RATE
+
+
+def test_pnl_long_win_net_of_fees():
+    # +1% move at 5x = +5% on margin, minus 2 × 0.05% × 5 = 0.5% fees → +4.5%
+    pct, usdt = compute_futures_pnl("long", 100.0, 101.0, 5, 20.0)
+    assert pct == pytest.approx(5.0 - FUTURES_FEE_RATE * 2 * 5 * 100)
+    assert usdt == pytest.approx(20.0 * pct / 100)
+
+
+def test_pnl_short_mirrors_long():
+    long_pct, _ = compute_futures_pnl("long", 100.0, 99.0, 5, 20.0)
+    short_pct, _ = compute_futures_pnl("short", 100.0, 101.0, 5, 20.0)
+    assert long_pct == pytest.approx(short_pct)
+    assert long_pct < 0
+
+
+def test_pnl_flat_trade_loses_fees():
+    pct, usdt = compute_futures_pnl("long", 100.0, 100.0, 5, 20.0)
+    assert pct < 0 and usdt < 0
+
+
+# ── safe_close_futures ────────────────────────────────────────────────────────
+
+class _FakeExchange:
+    def __init__(self, live):
+        self.live = live
+        self.exited = []
+        self.orders = []
+
+    async def get_active_futures_position(self, symbol):
+        if isinstance(self.live, Exception):
+            raise self.live
+        return self.live
+
+    async def exit_futures_position(self, position_id):
+        self.exited.append(position_id)
+        return {"data": {"group_id": "g1"}}
+
+    async def close_futures_position(self, side, pair, quantity, leverage):
+        self.orders.append((side, quantity))
+        return {"id": "o1"}
+
+
+_FPOS = {"id": 7, "symbol": "BTCUSDT", "side": "long", "quantity": 0.002, "leverage": 5}
+
+
+@pytest.mark.asyncio
+async def test_safe_close_skips_when_exchange_already_flat():
+    ex = _FakeExchange(None)
+    oid, already = await safe_close_futures(ex, _FPOS)
+    assert already is True
+    assert ex.orders == [] and ex.exited == []   # no order → no accidental flip
+
+
+@pytest.mark.asyncio
+async def test_safe_close_skips_when_exchange_holds_opposite_side():
+    ex = _FakeExchange({"id": "p1", "pair": "B-BTC_USDT", "active_pos": -0.002})
+    _, already = await safe_close_futures(ex, _FPOS)
+    assert already is True and ex.orders == []
+
+
+@pytest.mark.asyncio
+async def test_safe_close_uses_exit_endpoint_when_position_is_ours():
+    ex = _FakeExchange({"id": "p1", "pair": "B-BTC_USDT", "active_pos": 0.002})
+    oid, already = await safe_close_futures(ex, _FPOS)
+    assert already is False and ex.exited == ["p1"] and ex.orders == []
+    assert oid == "g1"
+
+
+@pytest.mark.asyncio
+async def test_safe_close_partial_when_pair_shared_with_other_triggers():
+    ex = _FakeExchange({"id": "p1", "pair": "B-BTC_USDT", "active_pos": 0.005})
+    _, already = await safe_close_futures(ex, _FPOS)
+    assert already is False and ex.exited == []
+    assert ex.orders == [("sell", 0.002)]        # only our share
+
+
+@pytest.mark.asyncio
+async def test_safe_close_falls_back_when_check_fails():
+    ex = _FakeExchange(RuntimeError("timeout"))
+    _, already = await safe_close_futures(ex, _FPOS)
+    assert already is False and ex.orders == [("sell", 0.002)]

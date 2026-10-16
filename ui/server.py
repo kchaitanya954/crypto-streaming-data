@@ -1754,26 +1754,25 @@ async def api_close_futures_position(
     fpos = dict(row)
 
     try:
+        from exchange.futures_trade import compute_futures_pnl, safe_close_futures
         exchange, session = await _get_user_exchange(db, user_id, request)
         async with session:
-            close_side = "sell" if fpos["side"] == "long" else "buy"
-            result = await exchange.close_futures_position(
-                side=close_side,
-                pair=fpos["symbol"],
-                quantity=fpos["quantity"],
-                leverage=fpos["leverage"],
-            )
-        close_order_id = str(result.get("id") or result.get("order_id") or "")
-        # Use entry price as approximate close price (real fill unknown synchronously)
-        close_price = fpos["entry_price"]
+            close_order_id, _ = await safe_close_futures(exchange, fpos)
+        # Real fill isn't returned synchronously — use the latest candle close.
+        # (Previously this recorded entry price and 0 P&L, hiding real losses.)
+        close_price = await queries.get_latest_close(db, fpos["symbol"]) or fpos["entry_price"]
+        pnl_pct, pnl_usdt = compute_futures_pnl(
+            fpos["side"], fpos["entry_price"], close_price,
+            fpos["leverage"], fpos["margin_usdt"],
+        )
         await queries.close_futures_position(
             db, position_id,
             close_price=close_price,
-            pnl_pct=0.0,
-            pnl_usdt=0.0,
+            pnl_pct=pnl_pct,
+            pnl_usdt=pnl_usdt,
             cdx_close_order_id=close_order_id,
         )
-        return {"ok": True, "order_id": close_order_id}
+        return {"ok": True, "order_id": close_order_id, "pnl_usdt": pnl_usdt}
     except Exception:
         _log.exception("Failed to close futures position", extra={"position_id": position_id, "user_id": user_id})
         return JSONResponse({"error": "Internal server error"}, status_code=500)

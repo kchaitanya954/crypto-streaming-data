@@ -1755,7 +1755,7 @@ function renderDailyPnl(data) {
     return `<tr style="${rowStyle}">
       <td style="color:${isTotal ? '#D1D4DC' : '#787B86'}">${isTotal ? '<b>ALL</b>' : `#${r.trigger_id}`}</td>
       <td style="font-weight:${isTotal ? 700 : 400};color:#D1D4DC">${r.symbol}</td>
-      <td style="color:#787B86">${r.interval}</td>
+      <td style="color:#787B86">${r.interval}${r.market === 'futures' ? ` <span style="color:#FF9800;font-size:10px" title="Futures: entries = positions opened, exits = positions closed, amounts = margin">FUT ${r.leverage || 1}×</span>` : ''}</td>
       <td style="color:#26A69A">${r.buy_count}</td>
       <td style="color:#787B86">$${(r.buy_usdt || 0).toFixed(4)}</td>
       <td style="color:#EF5350">${r.sell_count}</td>
