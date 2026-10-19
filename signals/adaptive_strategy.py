@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 _WINDOW      = 20    # rolling trade window
-_MIN_TRADES  = 5     # min trades before Kelly kicks in
+_MIN_TRADES  = 20    # min completed cycles before Kelly sizing kicks in; use conservative default before this
 
 # BUY: percentage of *remaining* trigger budget to deploy per signal.
 # These are base values by confidence; Kelly/drawdown/ADX scale them.
@@ -70,7 +70,7 @@ class AdaptiveState:
         Falls back to 0.05 when there are no winning trades yet (b=0 guard).
         """
         if self.trades_analyzed < _MIN_TRADES:
-            return 0.05  # conservative 5% default until enough data
+            return 0.03  # conservative 3% default — small fixed size until 20 trades calibrate Kelly
 
         avg_loss = max(self.avg_loss_pct, 0.01)
         if self.avg_win_pct <= 0:

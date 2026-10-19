@@ -198,23 +198,110 @@ async def send_trade_error(
         pass
 
 
+def _pair_label(pair: str) -> str:
+    """B-BTC_USDT → BTC (underscores break Telegram Markdown)."""
+    p = (pair or "?").replace("B-", "")
+    return p.split("_")[0] if "_" in p else p
+
+
+def _money(v: float, cur: str = "USDT") -> str:
+    return f"₹{v:+,.2f}" if cur == "INR" else f"${v:+.4f}"
+
+
+def format_exchange_section(ex: dict) -> list[str]:
+    """Exchange-ledger section of the daily report (see exchange.account_ledger)."""
+    lines = ["🏦 *Exchange (CoinDCX ledger — source of truth)*"]
+    any_activity = False
+    for cur in ("USDT", "INR"):
+        fut = ex.get(f"futures_{cur.lower()}")
+        if not fut or not fut["pairs"]:
+            continue
+        any_activity = True
+        t = fut["total"]
+        icon = "🟢" if t["net"] >= 0 else "🔴"
+        lines.append(f"Futures ({cur}): {icon} *{_money(t['net'], cur)}* net · "
+                     f"{t['closes']} closes ({t['wins']}W/{t['losses']}L)")
+        lines.append(f"  P&L {_money(t['pnl'], cur)} · fees -{abs(t['fees']):.4f} · funding {t['funding']:+.4f}")
+        for pair, p in sorted(ex[f"futures_{cur.lower()}"]["pairs"].items()):
+            liq = f" ⚠️ {p['liquidations']} LIQUIDATED" if p["liquidations"] else ""
+            lines.append(f"  `{_pair_label(pair)}` {_money(p['net'], cur)} ({p['closes']} closes){liq}")
+    spot = ex.get("spot")
+    if spot and spot["markets"]:
+        any_activity = True
+        t = spot["total"]
+        icon = "🟢" if t["net"] >= 0 else "🔴"
+        lines.append(f"Spot: {icon} *≈${t['net']:+.4f}* net · {t['buys']}B/{t['sells']}S · "
+                     f"vol ${t['volume']:.2f} · fees -${t['fees']:.4f}")
+    if not any_activity:
+        lines.append("No fills on the exchange in this window.")
+    for p in ex.get("open_positions", []):
+        guard = f"SL {p['sl']:,.2f}" if p["sl"] else "⚠️ *NO STOP-LOSS*"
+        lines.append(f"Open: `{_pair_label(p['pair'])}` {p['side'].upper()} {p['qty']:g} @ {p['avg']:,.2f} "
+                     f"(mark {p['mark']:,.2f}, uP&L {p['upnl']:+.4f}) · {guard}")
+    w = ex.get("wallets")
+    if w:
+        lines.append("Futures wallet: " + " · ".join(f"{k} {v:,.4f}" for k, v in sorted(w.items())))
+    for err in ex.get("errors", []):
+        lines.append(f"  _(unavailable: {err.replace('_', ' ')})_")
+    return lines
+
+
+def format_strategy_section(rows: list[dict]) -> list[str]:
+    """ICT/SMT strategy trades (paper and live) that closed or are still active in the window."""
+    if not rows:
+        return []
+    lines = ["🗽 *ICT / SMT strategy*"]
+    for mode in ("live", "paper"):
+        rs = [r for r in rows if r["mode"] == mode]
+        if not rs:
+            continue
+        closed = [r for r in rs if r["status"] == "closed"]
+        total_r = sum(r["r_multiple"] or 0 for r in closed)
+        pnl = sum(r["pnl_usdt"] or 0 for r in closed)
+        wins = sum(1 for r in closed if (r["pnl_usdt"] or 0) > 0)
+        tag = "LIVE" if mode == "live" else "PAPER (no real money)"
+        lines.append(f"{tag}: {len(closed)} closed ({wins}W/{len(closed) - wins}L) · "
+                     f"{total_r:+.2f}R · ${pnl:+.4f}")
+        for r in rs:
+            if r["status"] == "closed":
+                lines.append(f"  #{r['trigger_id']} {r['side'].upper()} `{r['symbol']}` "
+                             f"{(r['exit_reason'] or '').replace('_', ' ')} {r['r_multiple']:+.2f}R")
+            else:
+                lines.append(f"  #{r['trigger_id']} {r['side'].upper()} `{r['symbol']}` {r['status']}")
+    return lines
+
+
 async def send_daily_pnl_report(
     bot: Bot,
     chat_id: str,
     rows: list[dict],
     window_label: str,
+    exchange: Optional[dict] = None,
+    strategy_rows: Optional[list[dict]] = None,
 ) -> None:
     """
-    Send a daily P&L summary grouped by trigger for a 10am→10am IST window.
-    `rows` is the output of get_daily_pnl_by_trigger() — last row is the grand total (trigger_id=None).
+    Send a daily P&L summary for a 10am→10am IST window.
+
+    `exchange` (exchange.account_ledger.exchange_window_summary) comes first: it is
+    what CoinDCX actually booked, including exchange-side SL/TP fills, funding,
+    manual trades and liquidations that the bot's own tables never see.
+    `rows` is get_daily_pnl_by_trigger() — the bot's per-trigger view (last row = total).
     Raises on Telegram error so the caller can log it properly.
     """
+    lines = [f"📊 *Daily P&L Report*\n_{window_label}_\n"]
+    if exchange is not None:
+        lines += format_exchange_section(exchange)
+        lines.append("")
+    lines += format_strategy_section(strategy_rows or [])
+    if strategy_rows:
+        lines.append("")
+
     if not rows:
-        text = f"📊 *Daily P&L Report*\n_{window_label}_\n\nNo trades executed in this window."
-        await bot.send_message(chat_id=chat_id, text=text, parse_mode=ParseMode.MARKDOWN)
+        lines.append("🤖 *Bot triggers:* no trades executed in this window.")
+        await bot.send_message(chat_id=chat_id, text="\n".join(lines)[:4000], parse_mode=ParseMode.MARKDOWN)
         return
 
-    lines = [f"📊 *Daily P&L Report*\n_{window_label}_\n"]
+    lines.append("🤖 *Bot triggers (bot's own records)*")
 
     data_rows = [r for r in rows if r["trigger_id"] is not None]
     total_row = next((r for r in rows if r["trigger_id"] is None), None)
@@ -277,9 +364,16 @@ async def send_daily_pnl_report(
             f"  Cash flow: {cf_icon} ${total_cf:+.4f}"
         )
 
+    if exchange is not None and total_row:
+        ex_fut = (exchange.get("futures_usdt") or {}).get("total", {}).get("net")
+        bot_fut = total_row.get("futures_pnl_usdt") or 0.0
+        if ex_fut is not None and abs(ex_fut - bot_fut) > 0.10:
+            lines.append(f"⚠️ Bot records differ from the exchange by ${ex_fut - bot_fut:+.4f} on futures — "
+                         f"exchange SL/TP fills, manual or untracked trades. Trust the exchange figure.")
+
     lines.append("\n_Realised = per-sell P&L · Cash flow = sells received − buys paid_")
     text = "\n".join(lines)
-    await bot.send_message(chat_id=chat_id, text=text, parse_mode=ParseMode.MARKDOWN)
+    await bot.send_message(chat_id=chat_id, text=text[:4000], parse_mode=ParseMode.MARKDOWN)
 
 
 async def send_trigger_alert(
@@ -377,3 +471,97 @@ async def send_futures_close_notification(
     except Exception as exc:
         import logging
         logging.getLogger("futures_alert").warning("Futures close Telegram alert failed: %s", exc)
+
+
+async def send_trade_skipped(bot: Bot, chat_id: str, trigger_id: int, symbol: str, reason: str) -> None:
+    """A signal deliberately not traded (filter/guard) — not an error."""
+    try:
+        await bot.send_message(
+            chat_id=chat_id,
+            text=f"⏭ *Signal skipped* — Trigger `#{trigger_id}` `{symbol.upper()}`\nReason: {reason}",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+    except Exception:
+        pass
+
+
+_LEVEL_NAMES = {
+    "asia_low": "Asia low", "asia_high": "Asia high", "london_low": "London low",
+    "london_high": "London high", "premarket_low": "Pre-market low",
+    "premarket_high": "Pre-market high", "pdl": "Prev-day low", "pdh": "Prev-day high",
+}
+
+
+def _lvl(name: str) -> str:
+    return _LEVEL_NAMES.get(name, name.replace("_", " "))
+
+
+async def send_ict_plan(bot: Bot, chat_id: str, trigger_id: int, symbol: str, reference: str,
+                        info: dict, mode: str) -> None:
+    """09:30 New York session plan: bias + untaken liquidity (the routine's prep step)."""
+    bias = info.get("bias", 0)
+    bias_txt = {1: "🟢 BULLISH", -1: "🔴 BEARISH"}.get(bias, "⚪ NONE")
+    htf = ", ".join(f"{m // 60}h={'+' if v > 0 else '−' if v < 0 else '0'}" for m, v in info.get("htf", {}).items())
+    lv = info.get("levels", {}).get("p", {})
+    want = ("asia_low", "london_low", "premarket_low", "pdl") if bias > 0 else \
+           ("asia_high", "london_high", "premarket_high", "pdh")
+    sweep = [f"{_lvl(k)} {lv[k]['price']:,.2f}" for k in want if k in lv and lv[k]["untaken"]]
+    lines = [f"🗽 *NY session plan* — Trigger #{trigger_id} `{symbol}` (SMT vs `{reference}`) "
+             f"[{mode.upper()}]",
+             f"Bias: *{bias_txt}* ({htf})"]
+    if bias == 0:
+        lines.append(info.get("reason", "No trade today."))
+    else:
+        lines.append("Watching for a sweep of: " + (" · ".join(sweep) if sweep else "—"))
+        lines.append("Then: SMT divergence → displacement FVG → limit at the gap, 09:30–11:00 NY")
+    try:
+        await bot.send_message(chat_id=chat_id, text="\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+    except Exception:
+        pass
+
+
+async def send_ict_setup(bot: Bot, chat_id: str, trigger_id: int, symbol: str, setup, qty: float,
+                         risk_usdt: float, mode: str) -> None:
+    icon = "🟢" if setup.direction == "long" else "🔴"
+    text = (
+        f"🎯 {icon} *ICT setup {setup.direction.upper()}* `{symbol}` — Trigger #{trigger_id} [{mode.upper()}]\n"
+        f"Limit entry: `{setup.entry:,.2f}` (FVG {setup.fvg_low:,.2f}–{setup.fvg_high:,.2f})\n"
+        f"SL: `{setup.sl:,.2f}` ({setup.risk_pct:.2f}%) · TP: `{setup.tp:,.2f}` ({setup.rr:.1f}R, "
+        f"{setup.tp_source.replace('_', ' ')})\n"
+        f"Qty: `{qty:g}` · risk ≈ ${risk_usdt:.2f}\n"
+        f"SMT: {setup.smt_swept_by} swept {_lvl(setup.smt_level)}\n"
+        "Order expires in 30 min if price does not retrace."
+    )
+    try:
+        await bot.send_message(chat_id=chat_id, text=text, parse_mode=ParseMode.MARKDOWN)
+    except Exception:
+        pass
+
+
+async def send_ict_update(bot: Bot, chat_id: str, trigger_id: int, symbol: str, event: str,
+                          mode: str, detail: str = "") -> None:
+    icons = {"filled": "✅", "cancelled": "🚫", "closed": "🏁", "error": "⚠️"}
+    try:
+        await bot.send_message(
+            chat_id=chat_id,
+            text=f"{icons.get(event, '•')} *ICT {event}* `{symbol}` — Trigger #{trigger_id} "
+                 f"[{mode.upper()}]\n{detail}",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+    except Exception:
+        pass
+
+
+async def send_unprotected_position_alert(bot: Bot, chat_id: str, pos: dict) -> None:
+    """A live futures position with no exchange stop-loss — the pattern behind the biggest losses."""
+    try:
+        await bot.send_message(
+            chat_id=chat_id,
+            text=(f"🚨 *Futures position WITHOUT stop-loss*\n"
+                  f"`{_pair_label(pos['pair'])}` {pos['side'].upper()} {pos['qty']:g} @ {pos['avg']:,.2f} "
+                  f"(mark {pos['mark']:,.2f}, uP&L {pos['upnl']:+.4f}, liq {pos['liq']:,.2f})\n"
+                  "Nothing protects this position if price runs. Add a stop in the app, or close it."),
+            parse_mode=ParseMode.MARKDOWN,
+        )
+    except Exception:
+        pass

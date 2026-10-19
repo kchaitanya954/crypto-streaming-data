@@ -13,10 +13,11 @@ Signal flow:
   9. min_confirmations gate — signal suppressed if too few confirmations pass
 """
 
+import datetime
 from dataclasses import dataclass, field
 from typing import Optional
 
-from indicators import macd, rsi, stochastic, obv, ema, adx, bollinger_bands, supertrend
+from indicators import macd, rsi, stochastic, obv, ema, adx, bollinger_bands, supertrend, atr
 from streaming.stream import Kline
 
 
@@ -60,6 +61,12 @@ MIN_CONFIRMATIONS = 2      # require MEDIUM or HIGH — LOW signals always suppr
 BB_PERIOD         = 20     # Bollinger Band lookback
 BB_STD            = 2.0    # Bollinger Band standard deviation multiplier
 COOLDOWN_BARS     = 3      # bars to wait after a signal before allowing the next one
+MIN_ATR_PCT       = 0.30   # minimum ATR(14) as % of price — skips low-volatility setups
+ATR_PERIOD        = 14
+
+# UTC hours to block new entries (low liquidity / wide spreads).
+# 18:30–00:30 UTC = 12:00–06:00 AM IST.  Stored as a frozenset of blocked hours.
+_BLACKOUT_HOURS_UTC: frozenset[int] = frozenset({18, 19, 20, 21, 22, 23, 0})
 
 
 # ── Adaptive params by timeframe ──────────────────────────────────────────────
@@ -88,9 +95,9 @@ def params_for_interval(interval: str) -> dict:
             macd_fast=3,    macd_slow=10,  macd_signal=3,
             ema_fast=9,     ema_slow=50,
             rsi_period=7,   stoch_k=5,     stoch_d=3,
-            adx_period=7,   adx_threshold=12.0,
-            min_histogram=0.0,
-            min_confirmations=1, cooldown_bars=2,
+            adx_period=7,   adx_threshold=18.0,  # raised from 12 — filter choppy 1m
+            min_histogram=0.01,                   # raised from 0.0 — reject hairline crosses
+            min_confirmations=2, cooldown_bars=5, # raised from (1, 2) — fewer, better signals
             take_profit_pct=0.8,  stop_loss_pct=0.4,
         )
     elif minutes < 60:       # ── Intraday (3m – 30m) ──
@@ -98,9 +105,9 @@ def params_for_interval(interval: str) -> dict:
             macd_fast=6,    macd_slow=14,  macd_signal=5,
             ema_fast=21,    ema_slow=55,
             rsi_period=10,  stoch_k=9,     stoch_d=3,
-            adx_period=10,  adx_threshold=18.0,
-            min_histogram=0.02,
-            min_confirmations=1, cooldown_bars=3,
+            adx_period=10,  adx_threshold=23.0,  # raised from 18
+            min_histogram=0.05,                   # raised from 0.02
+            min_confirmations=2, cooldown_bars=5, # raised cooldown from 3
             take_profit_pct=2.0,  stop_loss_pct=1.0,
         )
     elif minutes < 360:      # ── Swing (1h – 4h) ──
@@ -108,20 +115,20 @@ def params_for_interval(interval: str) -> dict:
             macd_fast=12,   macd_slow=26,  macd_signal=9,
             ema_fast=50,    ema_slow=200,
             rsi_period=14,  stoch_k=14,    stoch_d=3,
-            adx_period=14,  adx_threshold=20.0,
+            adx_period=14,  adx_threshold=25.0,  # raised from 20
             min_histogram=0.1,
-            min_confirmations=1, cooldown_bars=5,
-            take_profit_pct=4.0,  stop_loss_pct=2.0,
+            min_confirmations=2, cooldown_bars=5,
+            take_profit_pct=6.0,  stop_loss_pct=3.0,  # wider SL/TP
         )
     else:                    # ── Position (6h, 12h, 1d, 1w …) ──
         return dict(
             macd_fast=12,   macd_slow=26,  macd_signal=9,
             ema_fast=50,    ema_slow=200,
             rsi_period=14,  stoch_k=14,    stoch_d=3,
-            adx_period=14,  adx_threshold=22.0,
+            adx_period=14,  adx_threshold=25.0,  # raised from 22
             min_histogram=1.0,
-            min_confirmations=1, cooldown_bars=3,
-            take_profit_pct=8.0,  stop_loss_pct=4.0,
+            min_confirmations=2, cooldown_bars=3,
+            take_profit_pct=10.0,  stop_loss_pct=5.0,
         )
 
 
@@ -141,6 +148,9 @@ class Signal:
     adx_val:    float
     trend_note: str
     reasons:    list[str] = field(default_factory=list)
+    # True for position-exit signals: they bypass the entry gates (EMA/ADX), so
+    # executors must only use them to close, never to open a new position.
+    is_exit:    bool = False
 
 
 # ── Detector ──────────────────────────────────────────────────────────────────
@@ -373,6 +383,7 @@ class SignalDetector:
                 (True, exit_reason),
                 (True, f"Position mgmt ({self._open_position})"),
             ],
+            is_exit=True,
         )
 
     def _detect(self) -> Optional[Signal]:
@@ -384,6 +395,11 @@ class SignalDetector:
 
         # Cooldown gate — prevent whipsaw signals on consecutive candles
         if self._bar_count - self._last_signal_bar < self.cooldown_bars:
+            return None
+
+        # Time gate — block new entries during low-liquidity hours (18:30–00:30 UTC)
+        _now_hour = datetime.datetime.utcnow().hour
+        if _now_hour in _BLACKOUT_HOURS_UTC:
             return None
 
         closes  = self.closes
@@ -444,6 +460,17 @@ class SignalDetector:
         # 4. Cooldown gate — prevents rapid-fire signals after a recent one
         if n - self._last_signal_bar < self.cooldown_bars:
             return None
+
+        # 5. ATR minimum-move filter — skip setups in low-volatility / fee-zone markets.
+        # ATR(14) must be > MIN_ATR_PCT% of price so the expected move beats the fee.
+        if n >= ATR_PERIOD + 1:
+            from indicators import atr as _atr_fn
+            _atr_series = _atr_fn(highs, lows, closes, period=ATR_PERIOD)
+            _atr_val    = next((v for v in reversed(_atr_series) if v is not None), None)
+            if _atr_val is not None and price > 0:
+                _atr_pct = _atr_val / price * 100
+                if _atr_pct < MIN_ATR_PCT:
+                    return None  # price isn't moving enough to overcome fees
 
         # 6–8. Confirmations
         rsi_line = rsi(closes, period=self.rsi_period)
@@ -532,9 +559,11 @@ class SignalDetector:
         adx_val: float,
         trend_note: str,
         confirmations: list[tuple[bool, str]],
+        is_exit: bool = False,
     ) -> Signal:
         reasons = [msg for met, msg in confirmations if met and msg]
         return Signal(
+            is_exit=is_exit,
             direction=direction,
             confidence=_confidence(len(reasons)),
             entry_price=price,

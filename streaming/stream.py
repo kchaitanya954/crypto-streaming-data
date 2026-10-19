@@ -5,6 +5,7 @@ No API key required for public market data.
 
 import asyncio
 import json
+import time
 import urllib.request
 from dataclasses import dataclass
 from typing import AsyncIterator, Callable, Optional
@@ -160,3 +161,44 @@ async def run_stream(
                 continue
             if on_kline is None:
                 print(kline, flush=True)
+
+
+# ── USD-M futures (what CoinDCX "B-" pairs track) ─────────────────────────────
+
+BINANCE_FUTURES_REST = "https://fapi.binance.com"
+
+
+def _fetch_futures_klines_range_sync(symbol: str, interval: str, start_ms: int, end_ms: int,
+                                     spot: bool = False) -> list[Kline]:
+    """Closed klines in [start_ms, end_ms), paginated. USD-M futures by default, spot if spot=True."""
+    out: list[Kline] = []
+    cursor = start_ms
+    base, path, cap = ((BINANCE_REST_BASE, "/api/v3/klines", 1000) if spot
+                       else (BINANCE_FUTURES_REST, "/fapi/v1/klines", 1500))
+    while cursor < end_ms:
+        url = (f"{base}{path}?symbol={symbol.upper()}&interval={interval}"
+               f"&startTime={cursor}&endTime={end_ms - 1}&limit={cap}")
+        with urllib.request.urlopen(url, timeout=15) as resp:
+            rows = json.loads(resp.read())
+        if not rows:
+            break
+        for r in rows:
+            out.append(Kline(symbol=symbol.upper(), interval=interval, open_time=int(r[0]),
+                             close_time=int(r[6]), open=float(r[1]), high=float(r[2]), low=float(r[3]),
+                             close=float(r[4]), volume=float(r[5]), is_closed=True, trade_count=int(r[8])))
+        cursor = int(rows[-1][0]) + 1
+        if len(rows) < cap:
+            break
+    now_ms = int(time.time() * 1000)
+    return [k for k in out if k.close_time < now_ms]   # drop the still-forming candle
+
+
+async def fetch_futures_klines_range(symbol: str, interval: str, start_ms: int, end_ms: int) -> list[Kline]:
+    """
+    Futures candles (the prices CoinDCX B- pairs follow); falls back to spot candles
+    if the futures API is unreachable from this network.
+    """
+    try:
+        return await asyncio.to_thread(_fetch_futures_klines_range_sync, symbol, interval, start_ms, end_ms)
+    except Exception:
+        return await asyncio.to_thread(_fetch_futures_klines_range_sync, symbol, interval, start_ms, end_ms, True)

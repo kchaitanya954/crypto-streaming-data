@@ -7,4 +7,5 @@ services:
       - .env
     volumes:
       - ./data:/app/data      # persists SQLite DB across restarts
+      - ./logs:/app/logs      # bot.log + decisions.jsonl survive rebuilds
     restart: unless-stopped

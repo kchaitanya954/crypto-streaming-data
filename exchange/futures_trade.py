@@ -28,6 +28,8 @@ import logging
 import math
 import time
 
+from log_setup import journal
+
 _log = logging.getLogger("futures_trade")
 
 FUTURES_MIN_INTERVAL_MINUTES = 5  # only trade futures on 5m+ intervals
@@ -45,29 +47,55 @@ def _interval_minutes(interval: str) -> float:
 
 async def _check_mtf_alignment(symbol: str, side: str) -> bool:
     """
-    Fetch 60 1h candles and verify the 1h Supertrend aligns with the trade direction.
-    Returns True (proceed) on data/error fallback so the trade is never silently blocked.
+    Check that both the 1h Supertrend AND 1h EMA(20)/EMA(50) alignment agree with
+    the trade direction.  Both must pass for the check to return True.
+
+    Returns True (proceed) on any data/network error — fail-open so a connectivity
+    blip never silently blocks a live trade.
+
+    LONG  (BUY signal)  → 1h Supertrend = 1 AND 1h EMA20 > EMA50
+    SHORT (SELL signal) → 1h Supertrend = -1 AND 1h EMA20 < EMA50
     """
     try:
         from streaming.stream import fetch_historical_klines
         from indicators.indicators import supertrend as calc_supertrend
+        from indicators.indicators import ema as calc_ema
 
         klines = await fetch_historical_klines(symbol, "1h", limit=60)
-        if len(klines) < 12:
+        if len(klines) < 52:   # need ≥ 50 bars for EMA(50) warm-up
             return True
+
         highs  = [k.high  for k in klines]
         lows   = [k.low   for k in klines]
         closes = [k.close for k in klines]
-        st = calc_supertrend(highs, lows, closes, period=10, multiplier=3.0)
+
+        # 1h Supertrend check
+        st      = calc_supertrend(highs, lows, closes, period=10, multiplier=3.0)
         last_st = next((v for v in reversed(st) if v is not None), None)
-        if last_st is None:
+
+        # 1h EMA(20) vs EMA(50) trend direction
+        ema20     = calc_ema(closes, 20)
+        ema50     = calc_ema(closes, 50)
+        last_ema20 = next((v for v in reversed(ema20) if v is not None), None)
+        last_ema50 = next((v for v in reversed(ema50) if v is not None), None)
+
+        if last_st is None or last_ema20 is None or last_ema50 is None:
             return True
-        return (last_st == 1) if side == "long" else (last_st == -1)
+
+        if side == "long":
+            st_ok  = (last_st == 1)
+            ema_ok = (last_ema20 > last_ema50)
+        else:
+            st_ok  = (last_st == -1)
+            ema_ok = (last_ema20 < last_ema50)
+
+        return st_ok and ema_ok
+
     except Exception:
-        return True  # never block on MTF failure
+        return True  # fail-open: network/data error never blocks a live trade
 
 
-FUTURES_FEE_RATE  = 0.0005   # 0.05% per side (taker, futures)
+from exchange.fees import FUTURES_TAKER_FEE_RATE as FUTURES_FEE_RATE  # 0.059% per side incl. GST
 MAX_SL_MARGIN_LOSS = 0.15    # 15% margin loss triggers SL
 MIN_TP_MARGIN_GAIN = 0.06    # 6% margin gain minimum TP (÷ leverage = price distance)
 MIN_RR_RATIO      = 2.0      # minimum risk-reward ratio
@@ -478,7 +506,52 @@ async def execute_futures_trigger_trade(
                     )
                 except Exception as exc:
                     _log.error("Trigger %d: failed to close existing position: %s", trigger_id, exc)
+                    journal("futures_close_failed", trigger_id=trigger_id, symbol=symbol, error=str(exc)[:200])
                     return  # don't open new position if we couldn't close old one
+                journal("futures_closed", trigger_id=trigger_id, symbol=symbol, side=existing["side"],
+                        reason="opposite signal", price=signal.entry_price)
+                just_closed = True
+            else:
+                just_closed = False
+
+            # ── Entry guards ──────────────────────────────────────────────────
+            # Exit signals skip the detector's EMA/ADX entry gates — they may close
+            # a position but must never open one (that produced unfiltered entries).
+            if getattr(signal, "is_exit", False):
+                journal("trade_skipped", trigger_id=trigger_id, symbol=symbol, side=new_side,
+                        reason="exit signal: close-only")
+                return
+            if new_side == "short" and not trigger.get("allow_shorts", 1):
+                journal("trade_skipped", trigger_id=trigger_id, symbol=symbol, side=new_side,
+                        reason="shorts disabled for this trigger")
+                return
+            # One position per pair. CoinDCX nets every order on a pair into one
+            # position, so two triggers trading opposite directions cancel out and
+            # pay fees both ways — 23 instant open/close round trips in May 2026.
+            others = [p for p in await queries.get_open_futures_positions_on_symbol(db, symbol)
+                      if p["trigger_id"] != trigger_id]
+            if others:
+                journal("trade_skipped", trigger_id=trigger_id, symbol=symbol, side=new_side,
+                        reason=f"pair already held by trigger(s) {[p['trigger_id'] for p in others]}")
+                return
+            try:
+                if just_closed:
+                    await asyncio.sleep(1.5)   # let the exit settle before reading positions
+                live_now = await exchange.get_active_futures_position(symbol)
+            except Exception as exc:
+                journal("trade_skipped", trigger_id=trigger_id, symbol=symbol, side=new_side,
+                        reason=f"could not verify exchange position: {str(exc)[:120]}")
+                return
+            if live_now is not None:
+                journal("trade_skipped", trigger_id=trigger_id, symbol=symbol, side=new_side,
+                        reason=f"exchange already has a {symbol} position "
+                               f"({float(live_now.get('active_pos') or 0):+g}) not owned by this trigger")
+                if tg_bot and tg_chat_id:
+                    from telegram_bot.alerts import send_trade_skipped
+                    await send_trade_skipped(tg_bot, tg_chat_id, trigger_id, symbol,
+                                             "an untracked position is already open on this pair "
+                                             "(manual, another strategy, or a leftover) — not stacking on it")
+                return
 
             # ── Adaptive sizing ───────────────────────────────────────────────
             pos_before  = await queries.get_open_futures_position(db, trigger_id)
@@ -598,14 +671,26 @@ async def execute_futures_trigger_trade(
                 atr_pct, sl_price, tp_price, liq_price,
             )
 
-            # ── MTF alignment check (1h Supertrend) — advisory, does not block ──
+            # ── MTF alignment check (1h Supertrend + EMA) — BLOCKING for futures ──
+            # Counter-trend futures trades have been the primary source of losses.
+            # Both 1h Supertrend and 1h EMA(20)/EMA(50) must agree with the signal.
             if _interval_minutes(interval) < 60:
                 mtf_ok = await _check_mtf_alignment(symbol, new_side)
                 if not mtf_ok:
-                    _log.warning(
-                        "Trigger %d: 1h Supertrend not aligned with %s — proceeding (counter-trend)",
-                        trigger_id, new_side.upper(),
+                    _log.info(
+                        "Trigger %d: MTF check blocked %s futures signal on %s "
+                        "(1h Supertrend + EMA disagree — counter-trend trade skipped)",
+                        trigger_id, new_side.upper(), symbol,
                     )
+                    journal("trade_skipped", trigger_id=trigger_id, symbol=symbol, side=new_side,
+                            reason=f"1h trend disagrees with {interval} signal")
+                    if tg_bot and tg_chat_id:
+                        from telegram_bot.alerts import send_trade_skipped
+                        await send_trade_skipped(
+                            tg_bot, tg_chat_id, trigger_id, symbol,
+                            f"{new_side.upper()} blocked — 1h trend disagrees with the {interval} signal.",
+                        )
+                    return  # skip this signal — trading against the trend
 
             # ── Place order ───────────────────────────────────────────────────
             cdx_side = "buy" if new_side == "long" else "sell"
@@ -641,6 +726,10 @@ async def execute_futures_trigger_trade(
                 "Trigger %d: futures position #%d opened  %s %s  order=%s",
                 trigger_id, pos_id, new_side.upper(), symbol, cdx_order_id,
             )
+            journal("futures_opened", trigger_id=trigger_id, symbol=symbol, side=new_side, qty=qty,
+                    price=signal.entry_price, leverage=leverage, margin=margin_usdt, sl=sl_price,
+                    tp=tp_price, atr_pct=atr_pct, order_id=cdx_order_id, signal=signal.confidence,
+                    reasons=signal.reasons)
 
             # ── Telegram ──────────────────────────────────────────────────────
             if tg_bot and tg_chat_id:

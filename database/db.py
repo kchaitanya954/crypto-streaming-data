@@ -138,6 +138,37 @@ CREATE TABLE IF NOT EXISTS futures_positions (
     closed_at         INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_futures_pos ON futures_positions(trigger_id, status);
+
+-- Session-strategy trades (ICT/SMT), paper or live. One row per setup.
+CREATE TABLE IF NOT EXISTS strategy_trades (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    trigger_id    INTEGER NOT NULL REFERENCES triggers(id),
+    user_id       INTEGER,
+    strategy      TEXT    NOT NULL,
+    mode          TEXT    NOT NULL,      -- 'paper' | 'live'
+    symbol        TEXT    NOT NULL,
+    side          TEXT    NOT NULL,      -- 'long' | 'short'
+    entry_price   REAL    NOT NULL,
+    sl_price      REAL    NOT NULL,
+    tp_price      REAL    NOT NULL,
+    quantity      REAL    NOT NULL,
+    leverage      INTEGER NOT NULL DEFAULT 1,
+    risk_usdt     REAL,
+    status        TEXT    NOT NULL,      -- pending | open | closed | cancelled
+    cdx_order_id  TEXT,
+    position_id   TEXT,
+    setup_json    TEXT,
+    created_at    INTEGER NOT NULL,
+    expires_at    INTEGER,
+    filled_at     INTEGER,
+    closed_at     INTEGER,
+    exit_price    REAL,
+    exit_reason   TEXT,
+    fees_usdt     REAL,
+    pnl_usdt      REAL,
+    r_multiple    REAL
+);
+CREATE INDEX IF NOT EXISTS idx_strategy_trades ON strategy_trades(trigger_id, status, created_at);
 """
 
 
@@ -164,6 +195,12 @@ async def init_db(db_path: str) -> aiosqlite.Connection:
         ("users",              "password_reset_expiry","INTEGER"),
         ("triggers",           "market_type",          "TEXT NOT NULL DEFAULT 'spot'"),
         ("triggers",           "leverage",             "INTEGER NOT NULL DEFAULT 1"),
+        # 'macd' = indicator detector (original), 'ict_smt' = NY-session ICT/SMT strategy
+        ("triggers",           "strategy",             "TEXT NOT NULL DEFAULT 'macd'"),
+        # ICT trades only: 'paper' simulates against live candles, 'live' places orders
+        ("triggers",           "strategy_mode",        "TEXT NOT NULL DEFAULT 'paper'"),
+        # 0 = never open shorts (a SELL only closes longs)
+        ("triggers",           "allow_shorts",         "INTEGER NOT NULL DEFAULT 1"),
     ]:
         try:
             await db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {defn}")

@@ -829,6 +829,22 @@
             <span style="font-size:9px;color:#FF9800">×</span>
           </span>
         </div>
+        <div class="trig-form-row" id="trig-strategy-row" style="gap:6px;align-items:center;display:none">
+          <span style="font-size:9px;color:#787B86">Strategy</span>
+          <select id="trig-strategy" class="trig-inp" style="width:auto" title="Indicator signals on the trigger interval, or the NY-open ICT/SMT routine (BTC vs ETH)">
+            <option value="macd">Indicators (MACD)</option>
+            <option value="ict_smt">ICT / SMT · NY open</option>
+          </select>
+          <span id="trig-mode-wrap" style="display:none;align-items:center;gap:3px">
+            <select id="trig-mode" class="trig-inp" style="width:auto" title="Paper = simulated, no orders. Live = real orders.">
+              <option value="paper">Paper</option>
+              <option value="live">LIVE</option>
+            </select>
+          </span>
+          <label style="display:flex;align-items:center;gap:3px;cursor:pointer;font-size:9px;color:#D1D4DC" title="Off = SELL signals only close longs, never open shorts">
+            <input type="checkbox" id="trig-shorts" checked style="accent-color:#EF5350" /> Shorts
+          </label>
+        </div>
         <div id="trig-form-error" style="font-size:11px;color:#EF5350;padding:2px 0;display:none"></div>
         <button class="trig-save-btn" id="trig-save-btn">Save Trigger</button>
       </div>
