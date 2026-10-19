@@ -292,17 +292,22 @@ async def create_trigger(
     user_id: Optional[int] = None,
     market_type: str = "spot",
     leverage: int = 1,
+    strategy: str = "macd",
+    strategy_mode: str = "paper",
+    allow_shorts: bool = True,
 ) -> int:
     """Insert a new trigger. Returns the new row id."""
     cursor = await db.execute(
         """INSERT INTO triggers
                (symbol, interval, min_confidence, adx_threshold, cooldown_bars,
-                name, trade_amount_usdt, user_id, market_type, leverage, active, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)""",
+                name, trade_amount_usdt, user_id, market_type, leverage,
+                strategy, strategy_mode, allow_shorts, active, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)""",
         (symbol.upper(), interval, min_confidence.upper(),
          adx_threshold, cooldown_bars, name,
          trade_amount_usdt, user_id,
          market_type.lower(), max(1, min(leverage, 20)),
+         strategy, strategy_mode, 1 if allow_shorts else 0,
          int(time.time())),
     )
     await db.commit()
@@ -325,6 +330,9 @@ async def update_trigger(
     trade_amount_usdt: Optional[float] = None,
     market_type: Optional[str] = None,
     leverage: Optional[int] = None,
+    strategy: Optional[str] = None,
+    strategy_mode: Optional[str] = None,
+    allow_shorts: Optional[bool] = None,
 ) -> None:
     """Update any subset of trigger fields."""
     fields, params = [], []
@@ -338,6 +346,9 @@ async def update_trigger(
     if trade_amount_usdt  is not None:      fields.append("trade_amount_usdt = ?");  params.append(trade_amount_usdt)
     if market_type        is not None:      fields.append("market_type = ?");        params.append(market_type.lower())
     if leverage           is not None:      fields.append("leverage = ?");           params.append(leverage)
+    if strategy           is not None:      fields.append("strategy = ?");           params.append(strategy)
+    if strategy_mode      is not None:      fields.append("strategy_mode = ?");      params.append(strategy_mode)
+    if allow_shorts       is not None:      fields.append("allow_shorts = ?");       params.append(1 if allow_shorts else 0)
     if not fields:
         return
     params.append(trigger_id)
@@ -438,15 +449,15 @@ async def get_daily_pnl_by_trigger(
 
     Each row:
         trigger_id, symbol, interval,
-        buy_count,  buy_usdt  (gross),  buy_cost_eff  (incl. 0.1% fee),
-        sell_count, sell_usdt (gross),  sell_net_eff  (after 0.1% fee),
+        buy_count,  buy_usdt  (gross),  buy_cost_eff  (incl. 0.2% fee),
+        sell_count, sell_usdt (gross),  sell_net_eff  (after 0.2% fee),
         avg_pnl_pct  — average realised P&L % per sell trade (from trade_history),
         true_pnl_usdt — sum of realised P&L in USDT for completed sells,
         fee_usdt, net_pnl_usdt (cash-flow: sell_net_eff − buy_cost_eff),
         window_label  — human-readable window string, same for every row
     Plus a final synthetic row with trigger_id=None for the grand total.
     """
-    FEE = 0.001   # CoinDCX taker fee per side (0.1%)
+    from exchange.fees import SPOT_FEE_RATE as FEE   # 0.2% per side, as charged
 
     if from_ts is None or to_ts is None:
         from_ts, to_ts, window_label = _ist_10am_window()
@@ -500,6 +511,9 @@ async def get_daily_pnl_by_trigger(
         r["true_pnl_usdt"]  = round(r.get("true_pnl_usdt_raw") or 0.0, 4)
         r["avg_pnl_pct"]    = round(r["avg_pnl_pct"], 4) if r["avg_pnl_pct"] is not None else None
         r["window_label"]   = window_label
+        r["market"]         = "spot"
+
+    rows.extend(await _daily_futures_rows(db, user_id, from_ts, to_ts, window_label))
 
     if rows:
         total = {
@@ -516,11 +530,89 @@ async def get_daily_pnl_by_trigger(
             "avg_pnl_pct":   None,
             "true_pnl_usdt": round(sum(r["true_pnl_usdt"] for r in rows), 4),
             "net_pnl_usdt":  round(sum(r["net_pnl_usdt"]  for r in rows), 4),
+            "spot_pnl_usdt":    round(sum(r["true_pnl_usdt"] for r in rows if r["market"] == "spot"), 4),
+            "futures_pnl_usdt": round(sum(r["true_pnl_usdt"] for r in rows if r["market"] == "futures"), 4),
+            "market":        "all",
             "window_label":  window_label,
         }
         rows.append(total)
 
     return rows
+
+
+async def _daily_futures_rows(
+    db: aiosqlite.Connection,
+    user_id: int,
+    from_ts: int,
+    to_ts: int,
+    window_label: str,
+) -> list[dict]:
+    """
+    Per-trigger futures rows for the daily report, shaped like the spot rows.
+
+    Futures trades live in futures_positions, not orders, so they were missing
+    from the report entirely. A position counts as "opened" if created in the
+    window and "closed" (realised) if closed in the window. pnl_usdt stored on
+    close is already net of round-trip fees; liquidations count as -margin.
+    """
+    from exchange.fees import FUTURES_TAKER_FEE_RATE as FUT_FEE
+    cursor = await db.execute(
+        """
+        SELECT
+            fp.trigger_id,
+            t.symbol,
+            t.interval,
+            MAX(fp.leverage) AS leverage,
+            SUM(CASE WHEN fp.created_at >= :f AND fp.created_at < :t THEN 1 ELSE 0 END) AS opened_count,
+            SUM(CASE WHEN fp.created_at >= :f AND fp.created_at < :t THEN fp.margin_usdt ELSE 0 END) AS margin_opened,
+            SUM(CASE WHEN fp.status != 'open' AND fp.closed_at >= :f AND fp.closed_at < :t THEN 1 ELSE 0 END) AS closed_count,
+            SUM(CASE WHEN fp.status != 'open' AND fp.closed_at >= :f AND fp.closed_at < :t
+                THEN fp.margin_usdt ELSE 0 END) AS margin_closed,
+            SUM(CASE WHEN fp.status != 'open' AND fp.closed_at >= :f AND fp.closed_at < :t
+                THEN COALESCE(fp.pnl_usdt, CASE WHEN fp.status = 'liquidated' THEN -fp.margin_usdt END, 0)
+                ELSE 0 END) AS pnl_usdt,
+            SUM(CASE WHEN fp.status != 'open' AND fp.closed_at >= :f AND fp.closed_at < :t
+                 AND COALESCE(fp.pnl_usdt, 0) > 0 THEN 1 ELSE 0 END) AS wins,
+            SUM(CASE WHEN fp.status != 'open' AND fp.closed_at >= :f AND fp.closed_at < :t
+                THEN fp.notional_usdt * 2 * :fee ELSE 0 END) AS fee_usdt,
+            SUM(CASE WHEN fp.status = 'open' THEN 1 ELSE 0 END) AS open_now
+        FROM futures_positions fp
+        JOIN triggers t ON t.id = fp.trigger_id
+        WHERE fp.user_id = :u
+          AND ((fp.created_at >= :f AND fp.created_at < :t)
+               OR (fp.closed_at >= :f AND fp.closed_at < :t))
+        GROUP BY fp.trigger_id
+        ORDER BY fp.trigger_id
+        """,
+        {"u": user_id, "f": from_ts, "t": to_ts, "fee": FUT_FEE},
+    )
+    out = []
+    for r in (dict(x) for x in await cursor.fetchall()):
+        closed   = r["closed_count"] or 0
+        pnl      = round(r["pnl_usdt"] or 0.0, 4)
+        m_closed = r["margin_closed"] or 0.0
+        out.append({
+            "market":        "futures",
+            "trigger_id":    r["trigger_id"],
+            "symbol":        r["symbol"],
+            "interval":      r["interval"],
+            "leverage":      r["leverage"],
+            "buy_count":     r["opened_count"] or 0,      # positions opened
+            "sell_count":    closed,                      # positions closed
+            "buy_usdt":      round(r["margin_opened"] or 0.0, 4),
+            "sell_usdt":     round(m_closed + pnl, 4),    # margin returned
+            "buy_cost_eff":  round(r["margin_opened"] or 0.0, 4),
+            "sell_net_eff":  round(m_closed + pnl, 4),
+            "fee_usdt":      round(r["fee_usdt"] or 0.0, 4),
+            "avg_pnl_pct":   round(pnl / m_closed * 100, 4) if m_closed else None,
+            "true_pnl_usdt": pnl,
+            "net_pnl_usdt":  pnl,
+            "wins":          r["wins"] or 0,
+            "losses":        closed - (r["wins"] or 0),
+            "open_now":      r["open_now"] or 0,
+            "window_label":  window_label,
+        })
+    return out
 
 
 async def load_adaptive_state(db: aiosqlite.Connection) -> Optional[dict]:
@@ -549,6 +641,8 @@ def trigger_matches(
     adx_val: Optional[float] = None,
 ) -> bool:
     """Return True if the signal meets the trigger's criteria."""
+    if (trigger.get("strategy") or "macd") != "macd":
+        return False   # session strategies (ICT/SMT) run their own engine
     if trigger["symbol"].upper() != symbol.upper():
         return False
     if trigger["interval"] != interval:
@@ -756,6 +850,23 @@ async def get_positions_for_sl_tp_check(
     )
     rows = await cursor.fetchall()
     return [dict(row) for row in rows]
+
+
+async def update_spot_sl(
+    db: aiosqlite.Connection,
+    trigger_id: int,
+    new_sl_price: float,
+) -> None:
+    """Raise the stop-loss price for a trigger position (trailing SL ratchet).
+    Never lowers — caller must ensure new_sl_price > current stop_loss_price."""
+    await db.execute(
+        """UPDATE trigger_positions
+           SET stop_loss_price = ?
+           WHERE trigger_id = ?
+             AND (stop_loss_price IS NULL OR stop_loss_price < ?)""",
+        (new_sl_price, trigger_id, new_sl_price),
+    )
+    await db.commit()
 
 
 async def delete_trigger_position(db: aiosqlite.Connection, trigger_id: int) -> None:
@@ -970,6 +1081,16 @@ async def get_futures_history(
     return [dict(r) for r in await cursor.fetchall()]
 
 
+async def get_latest_close(db: aiosqlite.Connection, symbol: str) -> Optional[float]:
+    """Most recent persisted candle close for a symbol (any interval), or None."""
+    cursor = await db.execute(
+        "SELECT close FROM candles WHERE symbol = ? ORDER BY open_time DESC LIMIT 1",
+        (symbol.upper(),),
+    )
+    row = await cursor.fetchone()
+    return float(row["close"]) if row else None
+
+
 async def get_candles_for_atr(
     db: aiosqlite.Connection,
     symbol: str,
@@ -987,3 +1108,60 @@ async def get_candles_for_atr(
     )
     rows = [dict(r) for r in await cursor.fetchall()]
     return list(reversed(rows))  # oldest first
+
+
+# ── Session-strategy trades (ICT/SMT) ─────────────────────────────────────────
+
+async def insert_strategy_trade(db: aiosqlite.Connection, **f) -> int:
+    f.setdefault("created_at", int(time.time()))
+    cols = ", ".join(f.keys())
+    marks = ", ".join("?" for _ in f)
+    cursor = await db.execute(f"INSERT INTO strategy_trades ({cols}) VALUES ({marks})", list(f.values()))
+    await db.commit()
+    return cursor.lastrowid
+
+
+async def update_strategy_trade(db: aiosqlite.Connection, trade_id: int, **f) -> None:
+    if not f:
+        return
+    sets = ", ".join(f"{k} = ?" for k in f)
+    await db.execute(f"UPDATE strategy_trades SET {sets} WHERE id = ?", [*f.values(), trade_id])
+    await db.commit()
+
+
+async def get_active_strategy_trade(db: aiosqlite.Connection, trigger_id: int) -> Optional[dict]:
+    """The trigger's pending or open strategy trade, if any."""
+    cursor = await db.execute(
+        "SELECT * FROM strategy_trades WHERE trigger_id = ? AND status IN ('pending', 'open') "
+        "ORDER BY id DESC LIMIT 1", (trigger_id,))
+    row = await cursor.fetchone()
+    return dict(row) if row else None
+
+
+async def count_strategy_fills_since(db: aiosqlite.Connection, trigger_id: int, since_ts: int) -> int:
+    """Strategy trades that actually filled since since_ts (Unix s) — for daily limits."""
+    cursor = await db.execute(
+        "SELECT COUNT(*) FROM strategy_trades WHERE trigger_id = ? AND created_at >= ? "
+        "AND filled_at IS NOT NULL", (trigger_id, since_ts))
+    return (await cursor.fetchone())[0]
+
+
+async def get_strategy_trades_for_window(
+    db: aiosqlite.Connection, user_id: int, from_ts: int, to_ts: int,
+) -> list[dict]:
+    """Strategy trades closed in the window, plus any still pending/open."""
+    cursor = await db.execute(
+        """SELECT * FROM strategy_trades
+           WHERE user_id = ?
+             AND ((status = 'closed' AND closed_at >= ? AND closed_at < ?)
+                  OR status IN ('pending', 'open'))
+           ORDER BY created_at""",
+        (user_id, from_ts, to_ts))
+    return [dict(r) for r in await cursor.fetchall()]
+
+
+async def get_open_futures_positions_on_symbol(db: aiosqlite.Connection, symbol: str) -> list[dict]:
+    """Every bot-tracked open futures position on a symbol, across all triggers."""
+    cursor = await db.execute(
+        "SELECT * FROM futures_positions WHERE status = 'open' AND symbol = ?", (symbol.upper(),))
+    return [dict(r) for r in await cursor.fetchall()]

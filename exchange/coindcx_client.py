@@ -88,6 +88,16 @@ class CoinDCXClient:
             resp.raise_for_status()
             return await resp.json()
 
+    async def _signed_get(self, path: str, params: Optional[dict] = None) -> dict:
+        """GET an authenticated endpoint (CoinDCX signs a JSON body even on GET)."""
+        body_str, headers = self._sign({"timestamp": int(time.time() * 1000)})
+        async with self._session.get(BASE_URL + path, data=body_str, headers=headers, params=params) as resp:
+            if not resp.ok:
+                from aiohttp import ClientResponseError
+                raise ClientResponseError(resp.request_info, resp.history, status=resp.status,
+                                          message=f"{resp.reason} — {await resp.text()}", headers=resp.headers)
+            return await resp.json()
+
     # ── Public endpoints ──────────────────────────────────────────────────────
 
     async def get_markets(self) -> list[dict]:
@@ -320,10 +330,119 @@ class CoinDCXClient:
         result = await self._post("/exchange/v1/derivatives/futures/positions", body)
         return result if isinstance(result, list) else result.get("positions", [])
 
+    async def get_active_futures_position(self, symbol: str) -> Optional[dict]:
+        """
+        Return the exchange's live position for this pair, or None if flat.
+        active_pos is signed: > 0 long, < 0 short.
+        """
+        body = {"timestamp": int(time.time() * 1000), "page": "1", "size": "100"}
+        result = await self._post("/exchange/v1/derivatives/futures/positions", body)
+        positions = result if isinstance(result, list) else result.get("positions", [])
+        pair = self._futures_pair(symbol)
+        for p in positions:
+            if p.get("pair") == pair and abs(float(p.get("active_pos") or 0)) > 0:
+                return p
+        return None
+
+    async def exit_futures_position(self, position_id: str) -> dict:
+        """
+        POST /exchange/v1/derivatives/futures/positions/exit
+        Closes an existing position by id. Unlike an opposite-side market
+        order, this can never open a new position in the other direction.
+        """
+        body = {"timestamp": int(time.time() * 1000), "id": position_id}
+        return await self._post("/exchange/v1/derivatives/futures/positions/exit", body)
+
     async def cancel_futures_order(self, order_id: str) -> dict:
         """POST /exchange/v1/derivatives/futures/orders/cancel"""
         body = {"id": order_id, "timestamp": int(time.time() * 1000)}
         return await self._post("/exchange/v1/derivatives/futures/orders/cancel", body)
+
+    async def create_futures_tpsl(
+        self,
+        position_id: str,
+        sl_price: Optional[float] = None,
+        tp_price: Optional[float] = None,
+    ) -> dict:
+        """
+        POST /exchange/v1/derivatives/futures/positions/create_tpsl
+        Attach exchange-side stop-loss / take-profit (market on trigger) to a position.
+        """
+        body: dict = {"timestamp": int(time.time() * 1000), "id": position_id}
+        if sl_price is not None:
+            body["stop_loss"] = {"stop_price": str(sl_price), "order_type": "stop_market"}
+        if tp_price is not None:
+            body["take_profit"] = {"stop_price": str(tp_price), "order_type": "take_profit_market"}
+        return await self._post("/exchange/v1/derivatives/futures/positions/create_tpsl", body)
+
+    async def list_futures_positions(self, margin_currency: str = "USDT") -> list[dict]:
+        """All futures positions (flat ones included) for one margin currency."""
+        body = {"timestamp": int(time.time() * 1000), "page": "1", "size": "100",
+                "margin_currency_short_name": [margin_currency]}
+        result = await self._post("/exchange/v1/derivatives/futures/positions", body)
+        return result if isinstance(result, list) else result.get("positions", [])
+
+    async def list_futures_orders(
+        self,
+        status: str = "open,filled,partially_filled,partially_cancelled,cancelled,rejected,untriggered",
+        side: str = "buy",
+        page: int = 1,
+        size: int = 50,
+        margin_currency: str = "USDT",
+    ) -> list[dict]:
+        """POST /exchange/v1/derivatives/futures/orders — newest first."""
+        body = {"timestamp": int(time.time() * 1000), "status": status, "side": side,
+                "page": str(page), "size": str(size), "margin_currency_short_name": [margin_currency]}
+        result = await self._post("/exchange/v1/derivatives/futures/orders", body)
+        return result if isinstance(result, list) else result.get("orders", [])
+
+    async def get_futures_transactions(
+        self,
+        page: int = 1,
+        size: int = 100,
+        stage: str = "all",
+        margin_currency: str = "USDT",
+    ) -> list[dict]:
+        """
+        POST /exchange/v1/derivatives/futures/positions/transactions — the exchange's
+        own ledger: realised P&L (`amount`), `fee_amount`, funding, per fill. Newest first.
+        """
+        body = {"timestamp": int(time.time() * 1000), "stage": stage, "page": str(page),
+                "size": str(size), "margin_currency_short_name": [margin_currency]}
+        result = await self._post("/exchange/v1/derivatives/futures/positions/transactions", body)
+        return result if isinstance(result, list) else result.get("transactions", result.get("data", []))
+
+    async def get_futures_wallets(self) -> list[dict]:
+        """GET /exchange/v1/derivatives/futures/wallets — USDT and INR futures wallets."""
+        result = await self._signed_get("/exchange/v1/derivatives/futures/wallets")
+        return result if isinstance(result, list) else result.get("data", [])
+
+    async def get_futures_instrument(self, symbol: str, margin_currency: str = "USDT") -> dict:
+        """Public instrument spec: quantity_increment, price_increment, min_notional, fees."""
+        result = await self._get(
+            "/exchange/v1/derivatives/futures/data/instrument",
+            params={"pair": self._futures_pair(symbol), "margin_currency_short_name": margin_currency},
+        )
+        return result.get("instrument", result) if isinstance(result, dict) else {}
+
+    async def get_spot_fills(
+        self,
+        from_ms: Optional[int] = None,
+        to_ms: Optional[int] = None,
+        limit: int = 500,
+        sort: str = "asc",
+        from_id: Optional[str] = None,
+    ) -> list[dict]:
+        """POST /exchange/v1/orders/trade_history with a time window."""
+        body: dict = {"timestamp": int(time.time() * 1000), "limit": min(limit, 500), "sort": sort}
+        if from_ms is not None:
+            body["from_timestamp"] = int(from_ms)
+        if to_ms is not None:
+            body["to_timestamp"] = int(to_ms)
+        if from_id:
+            body["from_id"] = from_id
+        result = await self._post("/exchange/v1/orders/trade_history", body, spot=True)
+        return result if isinstance(result, list) else []
 
     async def get_futures_funding_rate(self, pair: str) -> Optional[float]:
         """

@@ -174,3 +174,64 @@ async def test_true_pnl_usdt_computed(db):
     data = [r for r in rows if r["trigger_id"] is not None]
     assert len(data) == 1
     assert data[0]["true_pnl_usdt"] == pytest.approx(2.0 / 100.0 * 100.0, rel=0.01)
+
+
+@pytest.mark.asyncio
+async def test_futures_positions_appear_in_daily_report(db):
+    """Futures trades live in futures_positions — they must show up in the report."""
+    await db.execute(
+        "INSERT INTO users (id, username, email, password_hash, totp_secret, created_at) "
+        "VALUES (4, 'u4', 'u4@e.com', 'x', 'x', 0)"
+    )
+    await db.execute(
+        "INSERT INTO triggers (id, user_id, name, symbol, interval, min_confidence, "
+        "trade_amount_usdt, active, market_type, leverage, created_at) "
+        "VALUES (4, 4, 'F', 'BTCUSDT', '5m', 'MEDIUM', 50, 1, 'futures', 5, 0)"
+    )
+    from_ts, to_ts, _ = _ist_10am_window()
+    mid = (from_ts + to_ts) // 2
+    cols = ("trigger_id, user_id, symbol, side, quantity, entry_price, leverage, margin_usdt, "
+            "notional_usdt, liquidation_price, sl_price, tp_price, status, pnl_pct, pnl_usdt, "
+            "created_at, closed_at")
+    # closed loser, closed winner, still-open position
+    for vals in [
+        (4, 4, "BTCUSDT", "long", 0.001, 60000, 5, 12.0, 60.0, 48000, 59000, 62000, "closed", -10.0, -1.2, mid, mid + 60),
+        (4, 4, "BTCUSDT", "short", 0.001, 60000, 5, 12.0, 60.0, 72000, 61000, 58000, "closed", 5.0, 0.6, mid + 120, mid + 180),
+        (4, 4, "BTCUSDT", "long", 0.001, 60000, 5, 12.0, 60.0, 48000, 59000, 62000, "open", None, None, mid + 240, None),
+    ]:
+        await db.execute(f"INSERT INTO futures_positions ({cols}) VALUES ({','.join('?' * 17)})", vals)
+    await db.commit()
+
+    rows = await get_daily_pnl_by_trigger(db, user_id=4, from_ts=from_ts, to_ts=to_ts)
+    fut = [r for r in rows if r.get("market") == "futures"]
+    assert len(fut) == 1
+    r = fut[0]
+    assert r["buy_count"] == 3 and r["sell_count"] == 2
+    assert r["wins"] == 1 and r["losses"] == 1 and r["open_now"] == 1
+    assert r["true_pnl_usdt"] == pytest.approx(-0.6)
+    total = rows[-1]
+    assert total["futures_pnl_usdt"] == pytest.approx(-0.6)
+    assert total["true_pnl_usdt"] == pytest.approx(-0.6)
+
+
+@pytest.mark.asyncio
+async def test_daily_report_message_renders_futures(db):
+    from telegram_bot.alerts import send_daily_pnl_report
+
+    class _Bot:
+        text = None
+        async def send_message(self, chat_id, text, parse_mode=None):
+            _Bot.text = text
+
+    rows = [
+        {"market": "futures", "trigger_id": 17, "symbol": "BTCUSDT", "interval": "5m", "leverage": 5,
+         "buy_count": 2, "sell_count": 2, "fee_usdt": 0.06, "avg_pnl_pct": -2.5,
+         "true_pnl_usdt": -0.6, "net_pnl_usdt": -0.6, "wins": 1, "losses": 1, "open_now": 0},
+        {"market": "all", "trigger_id": None, "symbol": "ALL", "buy_count": 2, "sell_count": 2,
+         "fee_usdt": 0.06, "true_pnl_usdt": -0.6, "net_pnl_usdt": -0.6,
+         "spot_pnl_usdt": 0.0, "futures_pnl_usdt": -0.6},
+    ]
+    await send_daily_pnl_report(_Bot(), "1", rows, "window")
+    assert "Futures 5×" in _Bot.text
+    assert "1W/1L" in _Bot.text
+    assert "Futures: $-0.6000" in _Bot.text

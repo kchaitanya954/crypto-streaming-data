@@ -208,3 +208,8 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Bot logs and decision journal (log_setup.py)
+logs/
+
+CLAUDE.md

@@ -14,6 +14,8 @@ Run:
 
 import asyncio
 import logging
+import os
+import time
 
 import aiohttp
 import uvicorn
@@ -21,19 +23,113 @@ import uvicorn
 from config import load_settings
 from database.db import init_db
 from exchange.coindcx_client import CoinDCXClient
+from log_setup import journal, setup_logging
 from telegram_bot.bot import create_bot
 from ui.server import app as fastapi_app
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s  %(levelname)-7s  %(name)s  %(message)s",
-)
-logging.getLogger("httpx").setLevel(logging.WARNING)
+setup_logging()   # console + logs/bot.log + logs/decisions.jsonl (survive restarts)
 logging.getLogger("coindcx_client").setLevel(logging.ERROR)  # always show request/response on API failure
 log = logging.getLogger("orchestrator")
 
+# Attach a protective stop to any futures position found without one (% from entry).
+# 0 = alert only. Off by default because it would also touch manual positions.
+AUTO_PROTECT_PCT = float(os.environ.get("FUTURES_AUTO_PROTECT_PCT", "0") or 0)
+
 
 # ── Background signal worker ───────────────────────────────────────────────────
+
+async def _update_trailing_sl(symbol: str, current_price: float, db) -> None:
+    """
+    Ratchet stop-loss upward for profitable open spot positions.
+
+    Logic (runs on every closed candle):
+      - If current_price >= avg_entry * (1 + TRAILING_ACTIVATION_PCT / 100):
+          new_sl = current_price * (1 - TRAILING_DISTANCE_PCT / 100)
+          Only commit if new_sl > existing stop_loss_price (never lower the SL).
+    """
+    from database import queries
+    from exchange.auto_trade import TRAILING_ACTIVATION_PCT, TRAILING_DISTANCE_PCT
+
+    positions = await queries.get_positions_for_sl_tp_check(db, symbol)
+    for pos in positions:
+        avg_entry = pos.get("avg_entry") or 0.0
+        sl_price  = pos.get("stop_loss_price") or 0.0
+        tp_price  = pos.get("take_profit_price") or 0.0
+        if avg_entry <= 0:
+            continue
+
+        activation_price = avg_entry * (1 + TRAILING_ACTIVATION_PCT / 100)
+        if current_price < activation_price:
+            continue  # not yet in trailing zone
+
+        new_sl = current_price * (1 - TRAILING_DISTANCE_PCT / 100)
+        if new_sl <= sl_price:
+            continue  # already at or above this level — nothing to raise
+
+        # Raise the SL (preserve coins_held, avg_entry, usdt_spent, tp unchanged)
+        await queries.update_spot_sl(
+            db,
+            trigger_id=pos["trigger_id"],
+            new_sl_price=round(new_sl, 8),
+        )
+        log.info(
+            "Trailing SL raised: trigger=%d %s  old_sl=%.4f → new_sl=%.4f  "
+            "(price=%.4f  entry=%.4f)",
+            pos["trigger_id"], symbol.upper(), sl_price, new_sl,
+            current_price, avg_entry,
+        )
+
+
+async def _check_mtf_ema_alignment(symbol: str, signal_direction: str) -> bool:
+    """
+    Fetch 60 15-minute candles and check that EMA(20) vs EMA(50) aligns with
+    the signal direction.  Returns True (proceed) on any data/network error so
+    we never silently block a trade due to a fetch failure.
+
+    BUY  signal → require 15m EMA(20) > EMA(50)  (uptrend context)
+    SELL signal → require 15m EMA(20) < EMA(50)  (downtrend context)
+    """
+    try:
+        from streaming.stream import fetch_historical_klines
+        from indicators.indicators import ema as calc_ema
+
+        klines = await fetch_historical_klines(symbol, "15m", limit=60)
+        if len(klines) < 52:   # need ≥ EMA_SLOW (50) + warm-up bars
+            return True
+
+        closes    = [k.close for k in klines]
+        ema20     = calc_ema(closes, 20)
+        ema50     = calc_ema(closes, 50)
+        last_ema20 = next((v for v in reversed(ema20) if v is not None), None)
+        last_ema50 = next((v for v in reversed(ema50) if v is not None), None)
+
+        if last_ema20 is None or last_ema50 is None:
+            return True
+
+        if signal_direction == "BUY":
+            return last_ema20 > last_ema50   # uptrend required for buys
+        else:
+            return last_ema20 < last_ema50   # downtrend required for sells
+
+    except Exception as exc:
+        log.debug("MTF EMA check failed for %s (%s) — allowing trade", symbol, exc)
+        return True  # fail-open: never silently block on network error
+
+
+# Positions with a close already in flight. Every (symbol, interval) worker runs
+# the SL/TP check, so e.g. BTC 1m and BTC 5m workers both see the same open
+# position at a 5-minute boundary. Without this guard both send a close order,
+# and the second one opens an unintended position in the opposite direction.
+_closing_spot_triggers: set[int] = set()
+_closing_futures_positions: set[int] = set()
+
+
+async def _run_spot_close(coro, trigger_id: int) -> None:
+    try:
+        await coro
+    finally:
+        _closing_spot_triggers.discard(trigger_id)
+
 
 async def _check_sl_tp(symbol: str, current_price: float, db, settings) -> None:
     """
@@ -44,6 +140,12 @@ async def _check_sl_tp(symbol: str, current_price: float, db, settings) -> None:
     from exchange.auto_trade import execute_trigger_trade
     from signals.detector import Signal
     import time as _time
+
+    # ── Trailing SL update (ratchets SL upward for profitable positions) ──────
+    try:
+        await _update_trailing_sl(symbol, current_price, db)
+    except Exception as exc:
+        log.error("Trailing SL update error %s: %s", symbol.upper(), exc)
 
     # ── Spot SL/TP ────────────────────────────────────────────────────────────
     positions = await queries.get_positions_for_sl_tp_check(db, symbol)
@@ -58,7 +160,7 @@ async def _check_sl_tp(symbol: str, current_price: float, db, settings) -> None:
         elif tp_price and current_price >= tp_price:
             reason = "take_profit"
 
-        if not reason:
+        if not reason or trigger_id in _closing_spot_triggers:
             continue
 
         log.info(
@@ -79,10 +181,12 @@ async def _check_sl_tp(symbol: str, current_price: float, db, settings) -> None:
             adx_val=0.0, trend_note=reason,
             reasons=[reason],
         )
-        asyncio.create_task(
+        _closing_spot_triggers.add(trigger_id)
+        asyncio.create_task(_run_spot_close(
             execute_trigger_trade(db, trigger, fake_signal, symbol.upper(),
-                                  trigger["interval"], signal_id=None, reason=reason)
-        )
+                                  trigger["interval"], signal_id=None, reason=reason),
+            trigger_id,
+        ))
 
     # ── Futures SL/TP ─────────────────────────────────────────────────────────
     futures_positions = await queries.get_open_futures_positions_for_sl_tp(db, symbol)
@@ -103,9 +207,10 @@ async def _check_sl_tp(symbol: str, current_price: float, db, settings) -> None:
             elif current_price <= tp_price:
                 reason = "take_profit"
 
-        if not reason:
+        if not reason or fpos["id"] in _closing_futures_positions:
             continue
 
+        _closing_futures_positions.add(fpos["id"])
         log.info(
             "Futures SL/TP triggered: pos=%d %s %s price=%.4f reason=%s (SL=%.4f TP=%.4f)",
             fpos["id"], side.upper(), symbol.upper(), current_price, reason,
@@ -123,13 +228,12 @@ async def _close_futures_position_sltp(db, fpos: dict, close_price: float, reaso
     from database import queries
     from auth.encryption import safe_decrypt
     from exchange.coindcx_client import CoinDCXClient
-    from exchange.futures_trade import FUTURES_FEE_RATE
+    from exchange.futures_trade import compute_futures_pnl, safe_close_futures
     from telegram_bot.alerts import send_futures_close_notification
 
     trigger_id = fpos["trigger_id"]
     user_id    = fpos["user_id"]
     side       = fpos["side"]
-    close_side = "sell" if side == "long" else "buy"
 
     try:
         user_settings = await queries.get_user_settings(db, user_id)
@@ -140,24 +244,18 @@ async def _close_futures_position_sltp(db, fpos: dict, close_price: float, reaso
 
         async with aiohttp.ClientSession() as session:
             exchange = CoinDCXClient(api_key=key, api_secret=secret, session=session)
-            result   = await exchange.close_futures_position(
-                side=close_side,
-                pair=fpos["symbol"],
-                quantity=fpos["quantity"],
-                leverage=fpos["leverage"],
-            )
-            from exchange.futures_trade import _order_id_from_result
-            close_order_id = _order_id_from_result(result)
+            close_order_id, already_closed = await safe_close_futures(exchange, fpos)
+
+        if already_closed:
+            # The exchange-side SL/TP placed with the order fired first. Record the
+            # close (price is the candle close — an estimate of the actual fill).
+            reason = f"{reason} (exchange)"
+            log.info("Futures position %d already closed on exchange — recording only", fpos["id"])
 
         ep = fpos["entry_price"]
-        if side == "long":
-            raw_pnl_pct = (close_price - ep) / ep * 100 * fpos["leverage"]
-        else:
-            raw_pnl_pct = (ep - close_price) / ep * 100 * fpos["leverage"]
-        # Deduct round-trip fee on notional (expressed as % of margin)
-        fee_margin_pct = FUTURES_FEE_RATE * 2 * fpos["leverage"] * 100
-        pnl_pct  = round(raw_pnl_pct - fee_margin_pct, 4)
-        pnl_usdt = round(fpos["margin_usdt"] * pnl_pct / 100, 4)
+        pnl_pct, pnl_usdt = compute_futures_pnl(
+            side, ep, close_price, fpos["leverage"], fpos["margin_usdt"]
+        )
 
         await queries.close_futures_position(
             db, fpos["id"], close_price, pnl_pct, pnl_usdt, close_order_id
@@ -166,6 +264,8 @@ async def _close_futures_position_sltp(db, fpos: dict, close_price: float, reaso
             "Futures position %d closed (%s): price=%.4f P&L=%.2f%% ($%.4f)",
             fpos["id"], reason, close_price, pnl_pct, pnl_usdt,
         )
+        journal("futures_closed", trigger_id=trigger_id, symbol=fpos["symbol"], side=side,
+                reason=reason, price=close_price, pnl_pct=pnl_pct, pnl_usdt=pnl_usdt)
 
         # Telegram
         from exchange.auto_trade import _get_user_telegram  # noqa: PLC0415
@@ -187,6 +287,8 @@ async def _close_futures_position_sltp(db, fpos: dict, close_price: float, reaso
             "Failed to close futures position %d: %s\n%s",
             fpos["id"], exc, traceback.format_exc(),
         )
+    finally:
+        _closing_futures_positions.discard(fpos["id"])
 
 
 async def _stream_pair(symbol: str, interval: str, db, tg_bot, exchange, settings) -> None:
@@ -222,6 +324,13 @@ async def _stream_pair(symbol: str, interval: str, db, tg_bot, exchange, setting
 
                 candle_count += 1
                 signal = detector.update(kline)
+
+                # Persist the candle so futures ATR-based SL/TP has fresh data
+                # even when no dashboard tab is open.
+                try:
+                    await queries.insert_candle(db, symbol, interval, kline)
+                except Exception as exc:
+                    log.warning("Candle persist failed %s %s: %s", symbol.upper(), interval, exc)
                 # Log every 30 candles so we can confirm the worker is alive and processing
                 if candle_count % 30 == 0:
                     snap = detector.current_snapshot()
@@ -248,6 +357,10 @@ async def _stream_pair(symbol: str, interval: str, db, tg_bot, exchange, setting
                 log.info("BG signal  %s %s %s %s @ %.2f",
                          symbol.upper(), interval, signal.direction,
                          signal.confidence, signal.entry_price)
+                journal("signal", symbol=symbol.upper(), interval=interval, direction=signal.direction,
+                        confidence=signal.confidence, price=signal.entry_price, adx=signal.adx_val,
+                        is_exit=getattr(signal, "is_exit", False), reasons=signal.reasons,
+                        trend=signal.trend_note)
 
                 # Persist to DB and capture signal_id for trade linkage
                 signal_id = None
@@ -303,6 +416,24 @@ async def _stream_pair(symbol: str, interval: str, db, tg_bot, exchange, setting
                         except Exception as exc:
                             log.error("BG Telegram alert error: %s", exc)
 
+                        # MTF EMA alignment filter — only trade with the 15m trend.
+                        # Checked once per signal (not per trigger) to save API calls.
+                        # Fail-open: if fetch fails, trade proceeds normally.
+                        try:
+                            mtf_aligned = await _check_mtf_ema_alignment(
+                                symbol.upper(), signal.direction
+                            )
+                        except Exception:
+                            mtf_aligned = True
+                        if not mtf_aligned and not getattr(signal, "is_exit", False):
+                            log.info(
+                                "BG MTF filter blocked %s %s signal on %s — 15m EMA trend disagrees",
+                                signal.direction, signal.confidence, symbol.upper(),
+                            )
+                            journal("signal_blocked", symbol=symbol.upper(), interval=interval,
+                                    direction=signal.direction, reason="15m EMA20/50 trend disagrees")
+                            continue  # skip all triggers for this signal
+
                         # Execute trade for each matched trigger.
                         # Position check (DB vs exchange balance) is handled inside
                         # execute_trigger_trade — no pre-filtering here so that manual
@@ -343,11 +474,33 @@ async def _stream_pair(symbol: str, interval: str, db, tg_bot, exchange, setting
         retry_delay = 10
 
 
+async def _ict_worker(db, trigger: dict) -> None:
+    """Run one ICT/SMT trigger forever, restarting with backoff on failure."""
+    from exchange.ict_runner import run_ict_trigger
+    delay = 10
+    while True:
+        try:
+            await run_ict_trigger(db, trigger)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log.warning("ICT worker #%d crashed (%s) — restarting in %ds", trigger["id"], exc, delay)
+            journal("ict_worker_crash", trigger_id=trigger["id"], error=str(exc)[:300])
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, 300)
+
+
+def _ict_key(t: dict) -> tuple:
+    """Restart the worker whenever a setting it captured at start changes."""
+    return ("ict", t["id"], t["symbol"].upper(), t.get("strategy_mode"), t.get("leverage"),
+            t.get("trade_amount_usdt"), t.get("allow_shorts"))
+
+
 async def background_signal_worker(db, tg_bot, exchange, settings) -> None:
     """
     Manage one streaming task per unique (symbol, interval) across all active
-    triggers.  Re-checks the DB every 30 s so newly added/removed triggers are
-    picked up without a restart.
+    indicator triggers, plus one task per ICT/SMT trigger. Re-checks the DB every
+    30 s so newly added/removed triggers are picked up without a restart.
     """
     from database import queries
 
@@ -355,13 +508,14 @@ async def background_signal_worker(db, tg_bot, exchange, settings) -> None:
 
     while True:
         try:
-            triggers = await queries.get_triggers(db, active_only=True)
-            # Only stream pairs for triggers that belong to a real user
+            triggers = [t for t in await queries.get_triggers(db, active_only=True)
+                        if t.get("user_id") is not None]   # only triggers that belong to a real user
             pairs = {
                 (t["symbol"].lower(), t["interval"])
                 for t in triggers
-                if t.get("user_id") is not None
+                if (t.get("strategy") or "macd") == "macd"
             }
+            ict = {_ict_key(t): t for t in triggers if t.get("strategy") == "ict_smt"}
 
             # Start tasks for new pairs
             for sym, iv in pairs:
@@ -371,11 +525,16 @@ async def background_signal_worker(db, tg_bot, exchange, settings) -> None:
                     running[key] = asyncio.create_task(
                         _stream_pair(sym, iv, db, tg_bot, exchange, settings)
                     )
+            for key, trig in ict.items():
+                if key not in running or running[key].done():
+                    log.info("ICT worker starting trigger #%d %s [%s]", trig["id"], trig["symbol"],
+                             trig.get("strategy_mode"))
+                    running[key] = asyncio.create_task(_ict_worker(db, trig))
 
-            # Cancel tasks for pairs that no longer have active triggers
+            # Cancel tasks whose trigger is gone, disabled or reconfigured
             for key in list(running):
-                if key not in pairs and not running[key].done():
-                    log.info("BG worker stopping %s %s", key[0].upper(), key[1])
+                if key not in pairs and key not in ict and not running[key].done():
+                    log.info("BG worker stopping %s", key)
                     running[key].cancel()
                     del running[key]
 
@@ -387,6 +546,66 @@ async def background_signal_worker(db, tg_bot, exchange, settings) -> None:
             log.error("BG worker manager error: %s", exc)
 
         await asyncio.sleep(30)   # re-sync with DB triggers every 30 s
+
+
+async def position_watchdog(db, interval_s: int = 300) -> None:
+    """
+    Every 5 min: any live futures position without an exchange stop-loss gets a
+    Telegram alert (once an hour per position). The worst losses on this account —
+    a manual ETH long left without a stop (−$10), an INR liquidation, and a naked
+    long opened by the old close logic — were all positions with no stop.
+    """
+    import aiohttp
+    from auth.encryption import safe_decrypt
+    from database import queries
+    from exchange.account_ledger import open_position_rows
+    from exchange.auto_trade import _get_user_telegram
+    from telegram_bot.alerts import send_unprotected_position_alert
+
+    alerted: dict[tuple, float] = {}
+    while True:
+        await asyncio.sleep(interval_s)
+        try:
+            for user in await queries.get_all_users(db):
+                us = await queries.get_user_settings(db, user["id"]) or {}
+                key, secret = safe_decrypt(us.get("coindcx_api_key_enc")), safe_decrypt(us.get("coindcx_api_secret_enc"))
+                if not key or not secret:
+                    continue
+                async with aiohttp.ClientSession() as session:
+                    client = CoinDCXClient(api_key=key, api_secret=secret, session=session)
+                    raw = []
+                    for cur in ("USDT", "INR"):
+                        try:
+                            raw += await client.list_futures_positions(cur)
+                        except Exception:
+                            pass
+                    for p in open_position_rows(raw):
+                        if p["sl"]:
+                            continue
+                        k = (user["id"], p["pair"], p["side"])
+                        if time.time() - alerted.get(k, 0) < 3600:
+                            continue
+                        alerted[k] = time.time()
+                        journal("unprotected_position", user_id=user["id"], **{x: p[x] for x in
+                                ("pair", "side", "qty", "avg", "mark", "upnl", "liq")})
+                        tg_bot, chat = await _get_user_telegram(us)
+                        if tg_bot:
+                            await send_unprotected_position_alert(tg_bot, chat, p)
+                        if AUTO_PROTECT_PCT > 0 and p["avg"] > 0:
+                            try:
+                                sym = p["pair"].replace("B-", "").replace("_", "")
+                                tick = float((await client.get_futures_instrument(sym, p["margin_currency"]))
+                                             .get("price_increment") or 0.1)
+                                f = 1 - AUTO_PROTECT_PCT / 100 if p["side"] == "long" else 1 + AUTO_PROTECT_PCT / 100
+                                sl = round(round(p["avg"] * f / tick) * tick, 8)
+                                await client.create_futures_tpsl(str(p["id"]), sl_price=sl)
+                                journal("auto_protect", user_id=user["id"], pair=p["pair"], sl=sl)
+                            except Exception as exc:
+                                journal("auto_protect_failed", pair=p["pair"], error=str(exc)[:200])
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log.warning("Position watchdog error: %s", exc)
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -442,14 +661,17 @@ async def main() -> None:
         worker_task = asyncio.create_task(
             background_signal_worker(db, tg_app.bot, exchange, settings)
         )
-        log.info("Background signal worker started")
+        watchdog_task = asyncio.create_task(position_watchdog(db))
+        log.info("Background signal worker + position watchdog started (logs in %s/)",
+                 os.environ.get("LOG_DIR", "logs"))
 
         try:
             await server.serve()
         finally:
             log.info("Shutting down…")
             worker_task.cancel()
-            await asyncio.gather(worker_task, return_exceptions=True)
+            watchdog_task.cancel()
+            await asyncio.gather(worker_task, watchdog_task, return_exceptions=True)
             await tg_app.updater.stop()
             await tg_app.stop()
 

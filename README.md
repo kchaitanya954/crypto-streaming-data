@@ -15,12 +15,20 @@ crypto-streaming-data/
 │   └── indicators.py        # EMA, MACD, RSI, Stochastic, OBV, ADX, Bollinger Bands
 ├── signals/
 │   ├── detector.py          # SignalDetector — trend gates + confluence logic → Signal
-│   └── adaptive_strategy.py # Half-Kelly position sizing engine (AdaptiveState)
+│   ├── adaptive_strategy.py # Half-Kelly position sizing engine (AdaptiveState)
+│   ├── ict_smt.py           # ICT/SMT NY-open engine (bias, levels, sweep, SMT, FVG → Setup)
+│   └── ict_sim.py           # Conservative fill/exit simulator (backtest + paper mode)
+├── backtest/
+│   └── ict_backtest.py      # 2-year ICT/SMT backtest on Binance futures 1m data
 ├── streaming/
 │   └── stream.py            # Binance WebSocket stream + REST candle history fetch
 ├── exchange/
-│   ├── coindcx_client.py    # CoinDCX authenticated REST client (orders, balances)
-│   └── auto_trade.py        # Auto-trade executor — BUY/SELL sizing, SL/TP, fee math
+│   ├── coindcx_client.py    # CoinDCX authenticated REST client (orders, balances, ledgers)
+│   ├── auto_trade.py        # Auto-trade executor — BUY/SELL sizing, SL/TP, fee math
+│   ├── futures_trade.py     # Futures executor + entry guards
+│   ├── ict_runner.py        # ICT/SMT trigger runner (paper / live)
+│   ├── account_ledger.py    # Exchange-ledger summaries for the daily report
+│   └── fees.py              # CoinDCX fee rates as actually charged
 ├── database/
 │   ├── db.py                # SQLite schema (candles, signals, orders, triggers, …)
 │   └── queries.py           # All DB read/write helpers
@@ -38,6 +46,7 @@ crypto-streaming-data/
 │       ├── index.html       # Dashboard UI (TradingView Lightweight Charts)
 │       └── app.js           # All frontend logic (signals, triggers, analytics, …)
 ├── orchestrator.py          # Full-stack launcher (DB + Exchange + Telegram + Dashboard)
+├── log_setup.py             # logs/bot.log + logs/decisions.jsonl
 ├── run_ui.py                # Dashboard-only launcher (no Telegram, no auto-trade)
 ├── check_macd_cross.py      # CLI signal printer (terminal only, no UI)
 ├── docker-compose.yml       # Docker deployment
@@ -211,12 +220,16 @@ Both thresholds are fee-adjusted: `avg_entry` = signal price × 1.001 (includes 
 
 ### Fee accounting
 
-CoinDCX charges **0.1% per side** (taker fee for market orders). Round-trip = 0.2%.
+Rates as actually charged on this account (verified against every fill, Oct 2026 — see `exchange/fees.py`):
 
-- BUY: effective cost per coin = `signal_price × 1.001`
-- SELL: effective proceeds per coin = `signal_price × 0.999`
-- Break-even: sell price must be **>0.2% above buy price** to profit
-- All P&L figures in Analytics and Telegram reports are fee-adjusted
+| Market | Per side | Round trip |
+|---|---|---|
+| Spot USDT pairs | **0.20%** | 0.40% |
+| Futures, market / SL / TP (taker, incl. 18% GST) | 0.059% | 0.118% |
+| Futures, resting limit (maker, incl. GST) | 0.0236% | — |
+
+A spot trade must move **more than 0.4%** just to break even — the 1m tier's 0.4% stop equals the fee.
+Earlier versions assumed 0.1% spot / 0.05% futures, which understated fees in every report.
 
 ---
 
@@ -283,11 +296,91 @@ Open the **Analytics** tab in the dashboard to see:
 
 The bot sends a report to every user at **10:00 AM IST (04:30 UTC)** automatically.
 
-- Grouped by trigger (symbol + interval)
+- **Exchange section first (source of truth):** read from CoinDCX's own ledgers
+  (`exchange/account_ledger.py`) — futures realised P&L, fees and funding per pair
+  (USDT and INR books), liquidations, spot fills/fees with FIFO P&L, open positions
+  (flagged ⚠️ when they have **no stop-loss**) and futures-wallet balances. This
+  includes exchange-side SL/TP fills, manual trades and accidental positions that the
+  bot's own tables never see. If the bot's records disagree with the exchange by more
+  than $0.10 the report says so.
+- ICT/SMT strategy trades (paper and live) for the window
+- Grouped by trigger (symbol + interval) — the bot's own records
 - Shows: buy count, sell count, gross amounts, fees paid, fee-adjusted net P&L
 - Grand total row across all triggers
 - If the service starts after 04:30 UTC, it sends a **catch-up report immediately** for that day, then resumes normal scheduling
 - Telegram send failures are retried once (30s delay) and logged with full traceback
+
+---
+
+## Logs and decision journal
+
+`log_setup.py` writes, in addition to the console:
+
+- `logs/bot.log` — everything at INFO+, rotated 10 MB × 10
+- `logs/decisions.jsonl` — one JSON line per decision: every signal, every trade taken or
+  **skipped with its reason**, orders, fills, closes, ICT plans/setups, unprotected-position alerts
+
+```bash
+tail -f logs/decisions.jsonl                         # live
+grep trade_skipped logs/decisions.jsonl | tail -20   # why didn't it trade?
+```
+
+Docker mounts `./logs` so the files survive rebuilds. Set `LOG_DIR` to move them.
+
+---
+
+## Futures safety guards
+
+- **One position per pair.** CoinDCX nets every order on a pair into one position, so
+  two triggers trading the same pair in opposite directions cancel out and pay fees both
+  ways. A trigger won't open if another trigger (or anything untracked — a manual trade,
+  a leftover) already holds the pair on the exchange.
+- **Exit signals close only.** The detector's position-exit signals skip its EMA/ADX entry
+  gates, so they may close a position but never open the opposite one.
+- **Shorts switch** per trigger (`allow_shorts`, "Shorts" checkbox).
+- **Position watchdog** (every 5 min): Telegram alert for any live futures position without
+  an exchange stop-loss. Set `FUTURES_AUTO_PROTECT_PCT=3` to also attach a 3% stop
+  automatically (off by default because it also touches manual positions).
+- Account audit: `python -m scripts.coindcx_audit --days 30` (read-only).
+
+---
+
+## ICT / SMT strategy (NY open)
+
+A mechanical version of the "NY open" routine, adapted to crypto: CoinDCX has no S&P 500 /
+Nasdaq futures (`B-SPX_USDT` is the SPX6900 memecoin), so SMT is measured between **BTC and ETH**.
+
+| Routine step | Implementation (`signals/ict_smt.py`) |
+|---|---|
+| Before 09:30 NY, prepare | Bias + session levels frozen at 09:30 New York (19:00 IST in EDT, 20:00 IST in EST) |
+| 1h/4h: will it rise or fall? | 1h market structure (break of structure on fractal swings) |
+| 1m/5m: precise setup | 5m bars built from 1m futures candles |
+| SMT divergence | One asset sweeps an untaken session level (Asia / London / pre-market / previous day), the other doesn't |
+| Fair value gap | Displacement candle (body ≥ 1×ATR) leaving a 3-bar FVG and breaking structure |
+| Enter on the retrace | Resting limit at the FVG midpoint (maker fee), expires after 30 min |
+| SL 1R, TP 2–3R at liquidity | SL beyond the sweep extreme; TP = nearest untaken opposing liquidity ≥ 2R (cap 4R) |
+| Exit / manage | Exchange SL/TP; time stop 15:55 NY; one filled trade per day; 09:30–11:00 NY only |
+
+Create a **Futures** trigger and pick *Strategy → ICT / SMT · NY open*. Mode defaults to
+**Paper** (simulated fills on live candles, same simulator as the backtest, results in
+Telegram and the daily report). *Live* places real limit orders with exchange SL/TP, checks
+the stop is attached after the fill, and closes the position if it can't attach one.
+Sizing risks `ICT_RISK_PCT` (default 1%) of the trigger budget, up to `ICT_MAX_RISK_PCT`
+(default 3%) when the exchange minimum size forces it.
+
+### Backtest — read this before going live
+
+```bash
+python -m backtest.ict_backtest                    # BTC traded, ETH reference, 2y of 1m futures data
+python -m backtest.ict_backtest --no-smt           # same setup without SMT
+python -m backtest.ict_backtest --ltf 1 --csv trades.csv
+```
+
+Result on Oct 2024 → Oct 2026 Binance futures data, CoinDCX fees, conservative fills:
+**22 trades, −0.27R per trade; out-of-sample −0.60R.** Out-of-sample was negative in all nine
+variants tried (1m chart, ETH traded, 4h bias, edge entry, 3R targets, no SMT…). Shorts lost
+in every variant. The routine does not have a demonstrated edge on BTC/ETH after costs —
+keep it in Paper unless its own paper record says otherwise.
 
 ---
 

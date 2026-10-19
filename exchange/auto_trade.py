@@ -23,12 +23,19 @@ _engine_lock = asyncio.Lock()
 MAX_OPEN_POSITIONS = 5
 
 # Default risk parameters (% of avg entry price)
-STOP_LOSS_PCT    = 2.0   # sell if price drops 2% below avg entry
-TAKE_PROFIT_PCT  = 4.0   # sell if price rises 4% above avg entry
+STOP_LOSS_PCT    = 3.0   # sell if price drops 3% below avg entry (wider to avoid whipsaw)
+TAKE_PROFIT_PCT  = 6.0   # sell if price rises 6% above avg entry (wider to let winners run)
 
-# CoinDCX taker fee (market orders). Round-trip cost = 2x this.
+# Trailing stop-loss parameters
+# Once price rises TRAILING_ACTIVATION_PCT above entry, the SL trails at
+# TRAILING_DISTANCE_PCT below the current high-water mark.
+# SL is only ever moved UP (never down), so gains are locked in progressively.
+TRAILING_ACTIVATION_PCT = 2.0   # activate trailing once +2% in profit
+TRAILING_DISTANCE_PCT   = 1.0   # trail SL at 1% below current price high-water mark
+
+# CoinDCX spot fee per side (market orders). Round-trip cost = 2x this.
 # TP must exceed 2x fee to be profitable; SL is tightened by the sell-side fee.
-COINDCX_FEE_RATE  = 0.001   # 0.1%
+from exchange.fees import SPOT_FEE_RATE as COINDCX_FEE_RATE  # 0.2% — as charged on real fills
 MIN_ORDER_USDT    = 10.0   # CoinDCX minimum notional per order (~$10 for most pairs)
 
 # Market constraints cache.
@@ -126,6 +133,15 @@ async def execute_trigger_trade(
 
     if not user_id or not amount:
         return  # legacy trigger without user or amount — skip
+
+    # A detector BUY with is_exit=True only "closes" the detector's virtual short.
+    # Spot can't be short, and exit signals skip the EMA/ADX entry gates, so
+    # treating it as a buy opened unfiltered positions.
+    if signal.direction == "BUY" and getattr(signal, "is_exit", False):
+        from log_setup import journal
+        journal("trade_skipped", trigger_id=trigger_id, symbol=symbol, side="buy",
+                reason="exit-of-short signal on spot (no short to close)")
+        return
 
     user_settings = await queries.get_user_settings(db, user_id)
     if not user_settings:

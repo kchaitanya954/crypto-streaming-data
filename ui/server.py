@@ -89,6 +89,21 @@ async def _get_user_exchange(db, user_id: int, request: Request = None):
     return CoinDCXClient(api_key=key, api_secret=secret, session=session), session
 
 
+async def _exchange_summary_for_user(db, user_id: int, from_ts: int, to_ts: int):
+    """Exchange-ledger summary for the report, or None if the user has no API keys."""
+    from exchange.account_ledger import exchange_window_summary
+    try:
+        exchange, session = await _get_user_exchange(db, user_id)
+    except HTTPException:
+        return None
+    try:
+        async with session:
+            return await exchange_window_summary(exchange, from_ts, to_ts)
+    except Exception as exc:
+        _log.warning("Exchange summary failed for user %d: %s", user_id, exc)
+        return {"errors": [f"exchange unreachable: {str(exc)[:120]}"], "open_positions": []}
+
+
 # ── Pydantic models ────────────────────────────────────────────────────────────
 
 class RegisterRequest(BaseModel):
@@ -135,6 +150,9 @@ class TriggerCreate(BaseModel):
     trade_amount_usdt:  float           = 10.0
     market_type:        str            = "spot"     # "spot" | "futures"
     leverage:           int            = 1          # 1–20 (futures only)
+    strategy:           str            = "macd"     # "macd" | "ict_smt" (futures only)
+    strategy_mode:      str            = "paper"    # ict_smt: "paper" | "live"
+    allow_shorts:       bool           = True
 
 class TriggerBulkDelete(BaseModel):
     ids: list[int]
@@ -150,6 +168,23 @@ class TriggerUpdate(BaseModel):
     trade_amount_usdt: Optional[float] = None
     market_type:       Optional[str]   = None
     leverage:          Optional[int]   = None
+    strategy:          Optional[str]   = None
+    strategy_mode:     Optional[str]   = None
+    allow_shorts:      Optional[bool]  = None
+
+
+_STRATEGIES = {"macd", "ict_smt"}
+_MODES = {"paper", "live"}
+
+
+def _validate_strategy(strategy, mode, market_type) -> Optional[str]:
+    if strategy is not None and strategy not in _STRATEGIES:
+        return f"strategy must be one of {sorted(_STRATEGIES)}"
+    if mode is not None and mode not in _MODES:
+        return f"strategy_mode must be one of {sorted(_MODES)}"
+    if strategy == "ict_smt" and (market_type or "spot") != "futures":
+        return "ICT/SMT strategy trades futures only (it needs shorts and exchange SL/TP)"
+    return None
 
 app = FastAPI()
 app.mount("/static", StaticFiles(directory=static_dir), name="static")
@@ -886,22 +921,35 @@ async def api_create_trigger(
     sym  = body.symbol.upper()
     iv   = body.interval
     conf = body.min_confidence.upper()
+    err = _validate_strategy(body.strategy, body.strategy_mode, body.market_type)
+    if err:
+        return JSONResponse({"error": err}, status_code=400)
 
-    # Balance check against user's CoinDCX account
+    # Balance check against the wallet this trigger will actually use: futures
+    # margin lives in the futures wallet, not in spot USDT.
     try:
         exchange, session = await _get_user_exchange(db, user_id, request)
         async with session:
-            balances = await exchange.get_balances()
-        usdt_row = next((b for b in balances if b.get("currency") == "USDT"), None)
+            if (body.market_type or "spot") == "futures":
+                wallets = await exchange.get_futures_wallets()
+                usdt_row = next((w for w in wallets if w.get("currency_short_name") == "USDT"), None)
+                where = "futures-wallet USDT"
+            else:
+                balances = await exchange.get_balances()
+                usdt_row = next((b for b in balances if b.get("currency") == "USDT"), None)
+                where = "spot USDT"
         usdt_bal = float(usdt_row.get("balance", 0)) if usdt_row else 0.0
         if usdt_bal < body.trade_amount_usdt:
             return JSONResponse(
-                {"error": f"Insufficient USDT balance: {usdt_bal:.2f} available, {body.trade_amount_usdt:.2f} required"},
+                {"error": f"Insufficient {where} balance: {usdt_bal:.2f} available, "
+                          f"{body.trade_amount_usdt:.2f} required"},
                 status_code=400,
             )
     except HTTPException:
         # No CoinDCX configured yet — allow trigger creation without balance check
         pass
+    except Exception as exc:
+        _log.warning("Balance check skipped for user %d: %s", user_id, exc)
 
     leverage = max(1, min(int(body.leverage or 1), 20))
     tid = await queries.create_trigger(
@@ -913,7 +961,14 @@ async def api_create_trigger(
         user_id=user_id,
         market_type=body.market_type or "spot",
         leverage=leverage,
+        strategy=body.strategy,
+        strategy_mode=body.strategy_mode,
+        allow_shorts=body.allow_shorts,
     )
+    from log_setup import journal
+    journal("trigger_created", trigger_id=tid, user_id=user_id, symbol=sym, interval=iv,
+            market=body.market_type, leverage=leverage, strategy=body.strategy,
+            mode=body.strategy_mode, allow_shorts=body.allow_shorts, budget=body.trade_amount_usdt)
     if tg_bot and settings:
         from telegram_bot.alerts import send_trigger_alert
         await send_trigger_alert(tg_bot, settings.telegram_chat_id, "created", sym, iv, conf)
@@ -940,6 +995,10 @@ async def api_update_trigger(
     if db is None:
         return JSONResponse({"error": "DB not configured"}, status_code=503)
     trig = await queries.get_trigger(db, trigger_id)
+    err = _validate_strategy(body.strategy, body.strategy_mode,
+                             body.market_type or (trig or {}).get("market_type"))
+    if err and (body.strategy is not None or body.strategy_mode is not None):
+        return JSONResponse({"error": err}, status_code=400)
     await queries.update_trigger(
         db, trigger_id,
         symbol=body.symbol, interval=body.interval,
@@ -950,7 +1009,12 @@ async def api_update_trigger(
         trade_amount_usdt=body.trade_amount_usdt,
         market_type=body.market_type,
         leverage=body.leverage,
+        strategy=body.strategy,
+        strategy_mode=body.strategy_mode,
+        allow_shorts=body.allow_shorts,
     )
+    from log_setup import journal
+    journal("trigger_updated", trigger_id=trigger_id, **{k: v for k, v in body.model_dump().items() if v is not None})
     if tg_bot and settings and trig:
         from telegram_bot.alerts import send_trigger_alert
         only_toggle = (body.active is not None
@@ -1412,9 +1476,12 @@ async def api_send_daily_pnl_report(
         )
 
     rows = await queries.get_daily_pnl_by_trigger(db, user_id, from_ts, to_ts, label)
+    ex_summary = await _exchange_summary_for_user(db, user_id, from_ts, to_ts)
+    strategy_rows = await queries.get_strategy_trades_for_window(db, user_id, from_ts, to_ts)
     try:
         bot = Bot(token=tg_token)
-        await send_daily_pnl_report(bot, tg_chat_id, rows, label)
+        await send_daily_pnl_report(bot, tg_chat_id, rows, label, exchange=ex_summary,
+                                    strategy_rows=strategy_rows)
         return {"ok": True, "window": label, "triggers": sum(1 for r in rows if r["trigger_id"] is not None)}
     except Exception as exc:
         _log.error("Manual P&L report send failed for user %d: %s\n%s", user_id, exc, _tb.format_exc())
@@ -1754,26 +1821,25 @@ async def api_close_futures_position(
     fpos = dict(row)
 
     try:
+        from exchange.futures_trade import compute_futures_pnl, safe_close_futures
         exchange, session = await _get_user_exchange(db, user_id, request)
         async with session:
-            close_side = "sell" if fpos["side"] == "long" else "buy"
-            result = await exchange.close_futures_position(
-                side=close_side,
-                pair=fpos["symbol"],
-                quantity=fpos["quantity"],
-                leverage=fpos["leverage"],
-            )
-        close_order_id = str(result.get("id") or result.get("order_id") or "")
-        # Use entry price as approximate close price (real fill unknown synchronously)
-        close_price = fpos["entry_price"]
+            close_order_id, _ = await safe_close_futures(exchange, fpos)
+        # Real fill isn't returned synchronously — use the latest candle close.
+        # (Previously this recorded entry price and 0 P&L, hiding real losses.)
+        close_price = await queries.get_latest_close(db, fpos["symbol"]) or fpos["entry_price"]
+        pnl_pct, pnl_usdt = compute_futures_pnl(
+            fpos["side"], fpos["entry_price"], close_price,
+            fpos["leverage"], fpos["margin_usdt"],
+        )
         await queries.close_futures_position(
             db, position_id,
             close_price=close_price,
-            pnl_pct=0.0,
-            pnl_usdt=0.0,
+            pnl_pct=pnl_pct,
+            pnl_usdt=pnl_usdt,
             cdx_close_order_id=close_order_id,
         )
-        return {"ok": True, "order_id": close_order_id}
+        return {"ok": True, "order_id": close_order_id, "pnl_usdt": pnl_usdt}
     except Exception:
         _log.exception("Failed to close futures position", extra={"position_id": position_id, "user_id": user_id})
         return JSONResponse({"error": "Internal server error"}, status_code=500)
@@ -1907,18 +1973,24 @@ async def _send_pnl_report_to_all_users(db, from_ts: int, to_ts: int, window_lab
                 continue
 
             rows = await queries.get_daily_pnl_by_trigger(db, user_id, from_ts, to_ts, window_label)
+            # What CoinDCX actually booked — includes exchange SL/TP fills, funding,
+            # manual trades; the bot's own rows alone missed futures entirely.
+            ex_summary = await _exchange_summary_for_user(db, user_id, from_ts, to_ts)
+            strategy_rows = await queries.get_strategy_trades_for_window(db, user_id, from_ts, to_ts)
             bot  = Bot(token=tg_token)
 
             # Retry once on Telegram error (transient network issues)
             for attempt in (1, 2):
                 try:
-                    await send_daily_pnl_report(bot, tg_chat_id, rows, window_label)
+                    await send_daily_pnl_report(bot, tg_chat_id, rows, window_label,
+                                                exchange=ex_summary, strategy_rows=strategy_rows)
                     log.info(
                         "Daily P&L report sent to user %d for %s  "
-                        "(%d trigger rows, net P&L %.4f USDT)",
+                        "(%d trigger rows, bot net %.4f USDT, exchange futures net %s USDT)",
                         user_id, window_label,
                         sum(1 for r in rows if r["trigger_id"] is not None),
                         (rows[-1]["net_pnl_usdt"] if rows else 0.0),
+                        (((ex_summary or {}).get("futures_usdt") or {}).get("total") or {}).get("net"),
                     )
                     break
                 except Exception as tg_exc:

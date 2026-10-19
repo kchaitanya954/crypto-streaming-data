@@ -12,3 +12,4 @@ bcrypt>=4.1.0
 pyotp>=2.9.0
 cryptography>=42.0.0
 qrcode>=7.4.2
+tzdata>=2024.1        # zoneinfo data for the NY session clock on slim images

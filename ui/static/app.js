@@ -1014,9 +1014,12 @@ function renderTriggers(list) {
     const cdHint   = t.cooldown_bars  != null ? ` cd${t.cooldown_bars}`   : '';
     const nameLabel = t.name ? `<span style="font-size:10px;color:#D1D4DC;font-weight:600;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${t.name}">${t.name}</span>` : '';
     const isFutures = (t.market_type || 'spot').toLowerCase() === 'futures';
-    const futuresBadge = isFutures
+    const isIct = t.strategy === 'ict_smt';
+    const futuresBadge = (isFutures
       ? `<span style="font-size:7px;color:#FF9800;background:rgba(255,152,0,0.15);border:1px solid rgba(255,152,0,0.4);border-radius:3px;padding:1px 3px;font-weight:700" title="Futures ${t.leverage || 1}×">F${t.leverage || 1}×</span>`
-      : '';
+      : '') + (isIct
+      ? `<span style="font-size:7px;color:${t.strategy_mode === 'live' ? '#EF5350' : '#26A69A'};border:1px solid currentColor;border-radius:3px;padding:1px 3px;font-weight:700" title="ICT/SMT NY-open strategy">ICT ${t.strategy_mode === 'live' ? 'LIVE' : 'PAPER'}</span>`
+      : '');
     let amtLabel = '';
     if (t.trade_amount_usdt) {
       const amtDisp = displayCurrency === 'INR'
@@ -1087,13 +1090,26 @@ document.getElementById('trig-iv').addEventListener('change', e => {
   applyTierToTriggerForm(e.target.value);
 });
 
-// Market type toggle — show/hide leverage input
+// Market type toggle — show/hide leverage + strategy inputs
+function syncStrategyControls() {
+  const futures = document.getElementById('trig-market-futures').checked;
+  document.getElementById('trig-leverage-wrap').style.display = futures ? 'flex' : 'none';
+  document.getElementById('trig-strategy-row').style.display = futures ? 'flex' : 'none';
+  if (!futures) document.getElementById('trig-strategy').value = 'macd';
+  const ict = document.getElementById('trig-strategy').value === 'ict_smt';
+  document.getElementById('trig-mode-wrap').style.display = ict ? 'flex' : 'none';
+}
 (function initMarketTypeToggle() {
-  const wrap = document.getElementById('trig-leverage-wrap');
   document.querySelectorAll('input[name="trig-market"]').forEach(radio => {
-    radio.addEventListener('change', () => {
-      wrap.style.display = radio.value === 'futures' && radio.checked ? 'flex' : 'none';
-    });
+    radio.addEventListener('change', syncStrategyControls);
+  });
+  document.getElementById('trig-strategy').addEventListener('change', syncStrategyControls);
+  document.getElementById('trig-mode').addEventListener('change', e => {
+    if (e.target.value === 'live' && !confirm(
+      'LIVE places real CoinDCX futures orders.\n\nThe 2-year backtest of this routine (BTC vs ETH, fees included) ' +
+      'was NEGATIVE out-of-sample. Run it in Paper first and judge it on its own results.\n\nSwitch to LIVE anyway?')) {
+      e.target.value = 'paper';
+    }
   });
 }());
 
@@ -1112,9 +1128,11 @@ function openEditForm(t) {
   const mtype = (t.market_type || 'spot').toLowerCase();
   document.getElementById('trig-market-spot').checked    = mtype === 'spot';
   document.getElementById('trig-market-futures').checked = mtype === 'futures';
-  const leverageWrap = document.getElementById('trig-leverage-wrap');
-  leverageWrap.style.display = mtype === 'futures' ? 'flex' : 'none';
   document.getElementById('trig-leverage').value = t.leverage || 5;
+  document.getElementById('trig-strategy').value = t.strategy || 'macd';
+  document.getElementById('trig-mode').value = t.strategy_mode || 'paper';
+  document.getElementById('trig-shorts').checked = t.allow_shorts == null ? true : !!t.allow_shorts;
+  syncStrategyControls();
   updateTrigAmountConversion();
   applyTierToTriggerForm(t.interval);
   document.getElementById('trig-save-btn').textContent = 'Update Trigger';
@@ -1136,8 +1154,11 @@ document.getElementById('trig-add-btn').addEventListener('click', () => {
     document.getElementById('trig-cd').value   = '';
     document.getElementById('trig-market-spot').checked    = true;
     document.getElementById('trig-market-futures').checked = false;
-    document.getElementById('trig-leverage-wrap').style.display = 'none';
     document.getElementById('trig-leverage').value = 5;
+    document.getElementById('trig-strategy').value = 'macd';
+    document.getElementById('trig-mode').value = 'paper';
+    document.getElementById('trig-shorts').checked = true;
+    syncStrategyControls();
     for (const opt of document.getElementById('trig-iv').options)
       opt.selected = opt.value === currentInterval;
     applyTierToTriggerForm(currentInterval);
@@ -1220,6 +1241,9 @@ document.getElementById('trig-save-btn').addEventListener('click', () => {
     trade_amount_usdt: parseFloat(amountUsdt.toFixed(4)),
     market_type: marketType,
     leverage: marketType === 'futures' ? Math.min(Math.max(leverageVal, 1), 20) : 1,
+    strategy: marketType === 'futures' ? document.getElementById('trig-strategy').value : 'macd',
+    strategy_mode: document.getElementById('trig-mode').value,
+    allow_shorts: document.getElementById('trig-shorts').checked,
   };
 
   apiFetch(url, {
@@ -1755,7 +1779,7 @@ function renderDailyPnl(data) {
     return `<tr style="${rowStyle}">
       <td style="color:${isTotal ? '#D1D4DC' : '#787B86'}">${isTotal ? '<b>ALL</b>' : `#${r.trigger_id}`}</td>
       <td style="font-weight:${isTotal ? 700 : 400};color:#D1D4DC">${r.symbol}</td>
-      <td style="color:#787B86">${r.interval}</td>
+      <td style="color:#787B86">${r.interval}${r.market === 'futures' ? ` <span style="color:#FF9800;font-size:10px" title="Futures: entries = positions opened, exits = positions closed, amounts = margin">FUT ${r.leverage || 1}×</span>` : ''}</td>
       <td style="color:#26A69A">${r.buy_count}</td>
       <td style="color:#787B86">$${(r.buy_usdt || 0).toFixed(4)}</td>
       <td style="color:#EF5350">${r.sell_count}</td>
