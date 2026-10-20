@@ -61,11 +61,14 @@ MIN_CONFIRMATIONS = 2      # require MEDIUM or HIGH — LOW signals always suppr
 BB_PERIOD         = 20     # Bollinger Band lookback
 BB_STD            = 2.0    # Bollinger Band standard deviation multiplier
 COOLDOWN_BARS     = 3      # bars to wait after a signal before allowing the next one
+MAX_HISTORY       = 5000   # bars kept per detector; indicators are recomputed over all of them each bar
 MIN_ATR_PCT       = 0.30   # minimum ATR(14) as % of price — skips low-volatility setups
 ATR_PERIOD        = 14
 
-# UTC hours to block new entries (low liquidity / wide spreads).
-# 18:30–00:30 UTC = 12:00–06:00 AM IST.  Stored as a frozenset of blocked hours.
+# UTC hours to block new entries on sub-hour charts (low liquidity / wide spreads).
+# 18:00–00:59 UTC ≈ 23:30–06:30 IST. Judged by the candle's own time, and never
+# applied to 1h+ charts: a daily candle closes at 00:00 UTC, so a wall-clock check
+# that includes hour 0 silently blocked every 1d entry.
 _BLACKOUT_HOURS_UTC: frozenset[int] = frozenset({18, 19, 20, 21, 22, 23, 0})
 
 
@@ -99,6 +102,7 @@ def params_for_interval(interval: str) -> dict:
             min_histogram=0.01,                   # raised from 0.0 — reject hairline crosses
             min_confirmations=2, cooldown_bars=5, # raised from (1, 2) — fewer, better signals
             take_profit_pct=0.8,  stop_loss_pct=0.4,
+            night_blackout=True,
         )
     elif minutes < 60:       # ── Intraday (3m – 30m) ──
         return dict(
@@ -109,6 +113,7 @@ def params_for_interval(interval: str) -> dict:
             min_histogram=0.05,                   # raised from 0.02
             min_confirmations=2, cooldown_bars=5, # raised cooldown from 3
             take_profit_pct=2.0,  stop_loss_pct=1.0,
+            night_blackout=True,
         )
     elif minutes < 360:      # ── Swing (1h – 4h) ──
         return dict(
@@ -119,6 +124,7 @@ def params_for_interval(interval: str) -> dict:
             min_histogram=0.1,
             min_confirmations=2, cooldown_bars=5,
             take_profit_pct=6.0,  stop_loss_pct=3.0,  # wider SL/TP
+            night_blackout=False,
         )
     else:                    # ── Position (6h, 12h, 1d, 1w …) ──
         return dict(
@@ -129,6 +135,7 @@ def params_for_interval(interval: str) -> dict:
             min_histogram=1.0,
             min_confirmations=2, cooldown_bars=3,
             take_profit_pct=10.0,  stop_loss_pct=5.0,
+            night_blackout=False,
         )
 
 
@@ -191,6 +198,7 @@ class SignalDetector:
         cooldown_bars:     int   = COOLDOWN_BARS,
         take_profit_pct:   float = 3.0,
         stop_loss_pct:     float = 1.5,
+        night_blackout:    bool  = False,
     ) -> None:
         self.macd_fast         = macd_fast
         self.macd_slow         = macd_slow
@@ -209,6 +217,7 @@ class SignalDetector:
         self.cooldown_bars     = cooldown_bars
         self.take_profit_pct   = take_profit_pct
         self.stop_loss_pct     = stop_loss_pct
+        self.night_blackout    = night_blackout
         self._bar_count:       int = 0
         self._last_signal_bar: int = -999   # bar index when last signal fired
         # Position tracking — prevents consecutive same-direction signals
@@ -241,6 +250,9 @@ class SignalDetector:
         self.lows.append(kline.low)
         self.volumes.append(kline.volume)
         self.open_times.append(kline.open_time)
+        if len(self.closes) > MAX_HISTORY:
+            for buf in (self.opens, self.closes, self.highs, self.lows, self.volumes, self.open_times):
+                del buf[:-MAX_HISTORY]
         signal = self._detect()
         if signal:
             self._last_signal_bar = self._bar_count
@@ -397,10 +409,11 @@ class SignalDetector:
         if self._bar_count - self._last_signal_bar < self.cooldown_bars:
             return None
 
-        # Time gate — block new entries during low-liquidity hours (18:30–00:30 UTC)
-        _now_hour = datetime.datetime.utcnow().hour
-        if _now_hour in _BLACKOUT_HOURS_UTC:
-            return None
+        # Time gate — sub-hour charts only, by the candle's own UTC hour
+        if self.night_blackout and self.open_times:
+            bar_hour = datetime.datetime.fromtimestamp(self.open_times[-1] / 1000, datetime.timezone.utc).hour
+            if bar_hour in _BLACKOUT_HOURS_UTC:
+                return None
 
         closes  = self.closes
         highs   = self.highs
@@ -458,7 +471,7 @@ class SignalDetector:
             return None
 
         # 4. Cooldown gate — prevents rapid-fire signals after a recent one
-        if n - self._last_signal_bar < self.cooldown_bars:
+        if self._bar_count - self._last_signal_bar < self.cooldown_bars:
             return None
 
         # 5. ATR minimum-move filter — skip setups in low-volatility / fee-zone markets.
@@ -546,8 +559,7 @@ class SignalDetector:
         if len(sig.reasons) < self.min_confirmations:
             return None
 
-        self._last_signal_bar = n   # record cooldown checkpoint
-        return sig
+        return sig   # update() records the cooldown checkpoint (_bar_count)
 
     def _build_signal(
         self,
