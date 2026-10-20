@@ -150,7 +150,7 @@ class TriggerCreate(BaseModel):
     trade_amount_usdt:  float           = 10.0
     market_type:        str            = "spot"     # "spot" | "futures"
     leverage:           int            = 1          # 1–20 (futures only)
-    strategy:           str            = "macd"     # "macd" | "ict_smt" (futures only)
+    strategy:           str            = "macd"     # "macd" | "ict_smt" (futures) | "trend_donchian" (spot)
     strategy_mode:      str            = "paper"    # ict_smt: "paper" | "live"
     allow_shorts:       bool           = True
 
@@ -173,7 +173,7 @@ class TriggerUpdate(BaseModel):
     allow_shorts:      Optional[bool]  = None
 
 
-_STRATEGIES = {"macd", "ict_smt"}
+_STRATEGIES = {"macd", "ict_smt", "trend_donchian"}
 _MODES = {"paper", "live"}
 
 
@@ -184,6 +184,9 @@ def _validate_strategy(strategy, mode, market_type) -> Optional[str]:
         return f"strategy_mode must be one of {sorted(_MODES)}"
     if strategy == "ict_smt" and (market_type or "spot") != "futures":
         return "ICT/SMT strategy trades futures only (it needs shorts and exchange SL/TP)"
+    if strategy == "trend_donchian" and (market_type or "spot") != "spot":
+        return ("Daily trend strategy runs on spot only — on futures, funding and leverage made it "
+                "worse in every backtest")
     return None
 
 app = FastAPI()

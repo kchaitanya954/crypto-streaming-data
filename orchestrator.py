@@ -490,9 +490,25 @@ async def _ict_worker(db, trigger: dict) -> None:
             delay = min(delay * 2, 300)
 
 
+async def _trend_worker(db, trigger: dict) -> None:
+    """Run one daily trend trigger forever, restarting with backoff on failure."""
+    from exchange.trend_runner import run_trend_trigger
+    delay = 60
+    while True:
+        try:
+            await run_trend_trigger(db, trigger)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log.warning("Trend worker #%d crashed (%s) — restarting in %ds", trigger["id"], exc, delay)
+            journal("trend_worker_crash", trigger_id=trigger["id"], error=str(exc)[:300])
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, 1800)
+
+
 def _ict_key(t: dict) -> tuple:
     """Restart the worker whenever a setting it captured at start changes."""
-    return ("ict", t["id"], t["symbol"].upper(), t.get("strategy_mode"), t.get("leverage"),
+    return (t.get("strategy"), t["id"], t["symbol"].upper(), t.get("strategy_mode"), t.get("leverage"),
             t.get("trade_amount_usdt"), t.get("allow_shorts"))
 
 
@@ -515,7 +531,7 @@ async def background_signal_worker(db, tg_bot, exchange, settings) -> None:
                 for t in triggers
                 if (t.get("strategy") or "macd") == "macd"
             }
-            ict = {_ict_key(t): t for t in triggers if t.get("strategy") == "ict_smt"}
+            ict = {_ict_key(t): t for t in triggers if t.get("strategy") in ("ict_smt", "trend_donchian")}
 
             # Start tasks for new pairs
             for sym, iv in pairs:
@@ -527,9 +543,10 @@ async def background_signal_worker(db, tg_bot, exchange, settings) -> None:
                     )
             for key, trig in ict.items():
                 if key not in running or running[key].done():
-                    log.info("ICT worker starting trigger #%d %s [%s]", trig["id"], trig["symbol"],
-                             trig.get("strategy_mode"))
-                    running[key] = asyncio.create_task(_ict_worker(db, trig))
+                    log.info("%s worker starting trigger #%d %s [%s]", trig["strategy"], trig["id"],
+                             trig["symbol"], trig.get("strategy_mode"))
+                    worker = _trend_worker if trig["strategy"] == "trend_donchian" else _ict_worker
+                    running[key] = asyncio.create_task(worker(db, trig))
 
             # Cancel tasks whose trigger is gone, disabled or reconfigured
             for key in list(running):

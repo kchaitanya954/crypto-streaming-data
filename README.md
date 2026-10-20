@@ -345,6 +345,43 @@ Docker mounts `./logs` so the files survive rebuilds. Set `LOG_DIR` to move them
 
 ---
 
+## Daily trend strategy (spot) and the recommended trigger set
+
+`signals/trend.py` + `exchange/trend_runner.py`: three breakout systems (20/10, 50/25,
+100/50 days) share a spot trigger's budget, one third each. At every daily close
+(00:00 UTC = 05:30 IST) a flat system buys on a close above its prior N-day high and a
+long system sells on a close below its prior M-day low. Entries only on a fresh
+breakout; each system sells only the coins it bought. Paper or live like ICT.
+
+Why this and not the indicator triggers (`python -m backtest.trigger_backtest`, real
+detector + the bot's own exits, CoinDCX fees, 2020–22 vs 2023–26):
+
+| Strategy (BTC) | 2020–22 | 2023–26 | Max DD 2023–26 |
+|---|---|---|---|
+| Indicator trigger 1d, spot | −6% | −20% | −36% |
+| Indicator trigger 4h, futures long | +33% | −26% | −28% |
+| **Daily trend, spot (3-system blend)** | **+227%** | **+101%** | **−26%** |
+| Buy & hold | +146% | +396% | −53% |
+
+Trend was positive in both periods at every length from 20 to 200 days on BTC. On ETH
+it was weak since 2023 (+15%), and on futures (1x) funding made it worse every time.
+It is a drawdown cutter, not a guarantee — it trails buy-and-hold in strong bull years.
+
+Create the set on the server (dry run first):
+
+```bash
+python -m scripts.create_triggers --user <name>                              # shows the plan
+python -m scripts.create_triggers --user <name> --apply --pause-indicator   # creates, pauses MACD triggers
+```
+
+| Trigger | Market | Mode | Budget (default) |
+|---|---|---|---|
+| BTC trend · daily | spot | **LIVE** | $45 (needs spot USDT) |
+| ETH trend · daily | spot | paper | $30 |
+| BTC ICT/SMT · NY open (shorts off) | futures 5x | paper | $17 |
+
+---
+
 ## ICT / SMT strategy (NY open)
 
 A mechanical version of the "NY open" routine, adapted to crypto: CoinDCX has no S&P 500 /
