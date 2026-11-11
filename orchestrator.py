@@ -577,7 +577,8 @@ async def position_watchdog(db, interval_s: int = 300) -> None:
     from database import queries
     from exchange.account_ledger import open_position_rows
     from exchange.auto_trade import _get_user_telegram
-    from telegram_bot.alerts import send_unprotected_position_alert
+    from exchange.coindcx_client import is_auth_error
+    from telegram_bot.alerts import send_api_key_expired_alert, send_unprotected_position_alert
 
     alerted: dict[tuple, float] = {}
     while True:
@@ -591,11 +592,24 @@ async def position_watchdog(db, interval_s: int = 300) -> None:
                 async with aiohttp.ClientSession() as session:
                     client = CoinDCXClient(api_key=key, api_secret=secret, session=session)
                     raw = []
+                    key_dead = False
                     for cur in ("USDT", "INR"):
                         try:
                             raw += await client.list_futures_positions(cur)
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            if is_auth_error(exc):
+                                key_dead = True
+                                break
+                    if key_dead:
+                        k = (user["id"], "api_key_expired")
+                        if time.time() - alerted.get(k, 0) >= 12 * 3600:
+                            alerted[k] = time.time()
+                            journal("api_key_expired", user_id=user["id"])
+                            log.error("User %d: CoinDCX API key expired — trading is stopped", user["id"])
+                            tg_bot, chat = await _get_user_telegram(us)
+                            if tg_bot:
+                                await send_api_key_expired_alert(tg_bot, chat)
+                        continue
                     for p in open_position_rows(raw):
                         if p["sl"]:
                             continue
