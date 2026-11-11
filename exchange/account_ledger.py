@@ -159,8 +159,16 @@ async def exchange_window_summary(exchange, from_ts: int, to_ts: int) -> dict:
     Each section fails independently — a flaky endpoint shows up as an error line,
     it never hides the rest of the report.
     """
+    from exchange.coindcx_client import is_auth_error
     from_ms, to_ms = from_ts * 1000, to_ts * 1000
     out: dict = {"errors": []}
+    try:
+        await exchange.get_futures_wallets()
+    except Exception as exc:
+        if is_auth_error(exc):
+            out["auth_error"] = "CoinDCX rejected the API key (expired or revoked)"
+            out["open_positions"] = []
+            return out
 
     for cur in ("USDT", "INR"):
         try:

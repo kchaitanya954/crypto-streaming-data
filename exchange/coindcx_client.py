@@ -22,6 +22,16 @@ BASE_URL      = "https://api.coindcx.com"      # balances, markets, futures
 SPOT_BASE_URL = "https://apigw.coindcx.com"   # spot order execution (mandatory from CoinDCX update)
 
 
+_AUTH_ERROR_MARKERS = ("api key expired", "generate new keys", "invalid api key", "invalid credentials",
+                       "api key not found", "unauthorized")
+
+
+def is_auth_error(exc) -> bool:
+    """True when CoinDCX rejected the API key itself (expired/revoked) — retrying can't help."""
+    text = str(getattr(exc, "message", "") or exc).lower()
+    return getattr(exc, "status", None) == 401 or any(m in text for m in _AUTH_ERROR_MARKERS)
+
+
 class CoinDCXClient:
     """Async CoinDCX REST client for authenticated endpoints."""
 

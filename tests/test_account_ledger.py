@@ -77,3 +77,38 @@ async def test_report_puts_exchange_first_and_flags_mismatch():
     assert _Bot.text.index("Exchange") < _Bot.text.index("Bot triggers")
     assert "$-1.1000" in _Bot.text                     # exchange net: −1 P&L − 0.1 fee
     assert "differ from the exchange" in _Bot.text
+
+
+def test_auth_error_detection():
+    from exchange.coindcx_client import is_auth_error
+
+    class E(Exception):
+        def __init__(self, status, message):
+            super().__init__(message)
+            self.status, self.message = status, message
+
+    assert is_auth_error(E(422, 'Unprocessable Entity — {"code":422,"message":"API key expired. Please generate new keys."}'))
+    assert is_auth_error(E(401, "Unauthorized"))
+    assert not is_auth_error(E(500, "Something went wrong. We are on it"))
+    assert not is_auth_error(E(400, "Quantity should be greater than 0.001"))
+
+
+@pytest.mark.asyncio
+async def test_expired_key_report_shows_banner_not_no_fills():
+    from exchange.account_ledger import exchange_window_summary
+
+    class Dead:
+        calls = 0
+        async def get_futures_wallets(self):
+            Dead.calls += 1
+            raise RuntimeError("422 API key expired. Please generate new keys.")
+
+    ex = await exchange_window_summary(Dead(), 0, 86400)
+    assert ex.get("auth_error") and Dead.calls == 1          # stops after one call, no spam
+    text = "\n".join(format_exchange_section(ex))
+    assert "EXPIRED" in text and "No fills" not in text
+
+
+def test_partial_outage_does_not_claim_no_fills():
+    text = "\n".join(format_exchange_section({"errors": ["spot fills: timeout"], "open_positions": []}))
+    assert "No fills" not in text and "unavailable" in text

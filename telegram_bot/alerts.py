@@ -210,6 +210,10 @@ def _money(v: float, cur: str = "USDT") -> str:
 
 def format_exchange_section(ex: dict) -> list[str]:
     """Exchange-ledger section of the daily report (see exchange.account_ledger)."""
+    if ex.get("auth_error"):
+        return ["🔑 *CoinDCX API KEY EXPIRED — the bot cannot trade or read your account.*",
+                "Create a new key on coindcx.com → Settings → API and paste it into the dashboard "
+                "(⚙ Account Settings). Nothing below reflects exchange activity."]
     lines = ["🏦 *Exchange (CoinDCX ledger — source of truth)*"]
     any_activity = False
     for cur in ("USDT", "INR"):
@@ -232,7 +236,7 @@ def format_exchange_section(ex: dict) -> list[str]:
         icon = "🟢" if t["net"] >= 0 else "🔴"
         lines.append(f"Spot: {icon} *≈${t['net']:+.4f}* net · {t['buys']}B/{t['sells']}S · "
                      f"vol ${t['volume']:.2f} · fees -${t['fees']:.4f}")
-    if not any_activity:
+    if not any_activity and not ex.get("errors"):
         lines.append("No fills on the exchange in this window.")
     for p in ex.get("open_positions", []):
         guard = f"SL {p['sl']:,.2f}" if p["sl"] else "⚠️ *NO STOP-LOSS*"
@@ -561,6 +565,19 @@ async def send_unprotected_position_alert(bot: Bot, chat_id: str, pos: dict) -> 
                   f"`{_pair_label(pos['pair'])}` {pos['side'].upper()} {pos['qty']:g} @ {pos['avg']:,.2f} "
                   f"(mark {pos['mark']:,.2f}, uP&L {pos['upnl']:+.4f}, liq {pos['liq']:,.2f})\n"
                   "Nothing protects this position if price runs. Add a stop in the app, or close it."),
+            parse_mode=ParseMode.MARKDOWN,
+        )
+    except Exception:
+        pass
+
+
+async def send_api_key_expired_alert(bot: Bot, chat_id: str) -> None:
+    try:
+        await bot.send_message(
+            chat_id=chat_id,
+            text=("🔑 *CoinDCX API key expired* — the bot cannot place, close or check any trade.\n"
+                  "Open positions are NOT being watched. Create a new key on coindcx.com → Settings → API "
+                  "(enable trade + futures) and paste it into the dashboard ⚙ Account Settings."),
             parse_mode=ParseMode.MARKDOWN,
         )
     except Exception:
